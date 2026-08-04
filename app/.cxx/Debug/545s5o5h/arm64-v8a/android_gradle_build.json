@@ -1,0 +1,38 @@
+{
+  "buildFiles": [
+    "/home/dev/Autombot-Cliente/app/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/dev/android-sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/dev/Autombot-Cliente/app/.cxx/Debug/545s5o5h/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/dev/android-sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/dev/Autombot-Cliente/app/.cxx/Debug/545s5o5h/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "autombot_tun2socks::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "autombot_tun2socks",
+      "output": "/home/dev/Autombot-Cliente/app/build/intermediates/cxx/Debug/545s5o5h/obj/arm64-v8a/libautombot_tun2socks.so",
+      "runtimeFiles": []
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "/home/dev/android-sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/clang.lld",
+      "cppCompilerExecutable": "/home/dev/android-sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++.lld"
+    }
+  },
+  "cFileExtensions": [
+    "c"
+  ],
+  "cppFileExtensions": []
+}

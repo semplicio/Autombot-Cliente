@@ -467,7 +467,7 @@ private fun MainShell(
                 ssConnectionsDash.sumOf { it.txBytes } +
                 trConnectionsDash.sumOf { it.txBytes } +
                 ovpnConnections.sumOf { it.txBytes }
-            val dashTrafficLabel = if (dashRx + dashTx > 0) formatBytes(dashRx + dashTx) else "0.00 KB"
+            val dashTrafficLabel = if (dashRx + dashTx > 0) formatBytes(dashRx + dashTx) else "0 B"
 
             Box(modifier = Modifier.padding(padding)) {
                 DashboardScreen(
