@@ -1,0 +1,158 @@
+[
+  {
+    "level_": 0,
+    "message_": "Start JSON generation. Platform version: 26 min SDK version: arm64-v8a",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "rebuilding JSON /home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/05s3w862/arm64-v8a/android_gradle_build.json due to:",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "- no fingerprint file, will remove stale configuration folder",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "removing stale contents from \u0027/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/05s3w862/arm64-v8a\u0027",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "created folder \u0027/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/05s3w862/arm64-v8a\u0027",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "executing cmake /home/semplicio/Android/Sdk/cmake/3.22.1/bin/cmake \\\n  -H/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp \\\n  -DCMAKE_SYSTEM_NAME\u003dAndroid \\\n  -DCMAKE_EXPORT_COMPILE_COMMANDS\u003dON \\\n  -DCMAKE_SYSTEM_VERSION\u003d26 \\\n  -DANDROID_PLATFORM\u003dandroid-26 \\\n  -DANDROID_ABI\u003darm64-v8a \\\n  -DCMAKE_ANDROID_ARCH_ABI\u003darm64-v8a \\\n  -DANDROID_NDK\u003d/home/semplicio/Android/Sdk/ndk/26.3.11579264 \\\n  -DCMAKE_ANDROID_NDK\u003d/home/semplicio/Android/Sdk/ndk/26.3.11579264 \\\n  -DCMAKE_TOOLCHAIN_FILE\u003d/home/semplicio/Android/Sdk/ndk/26.3.11579264/build/cmake/android.toolchain.cmake \\\n  -DCMAKE_MAKE_PROGRAM\u003d/home/semplicio/Android/Sdk/cmake/3.22.1/bin/ninja \\\n  -DCMAKE_LIBRARY_OUTPUT_DIRECTORY\u003d/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/05s3w862/obj/arm64-v8a \\\n  -DCMAKE_RUNTIME_OUTPUT_DIRECTORY\u003d/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/05s3w862/obj/arm64-v8a \\\n  -DCMAKE_BUILD_TYPE\u003dDebug \\\n  -B/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/05s3w862/arm64-v8a \\\n  -GNinja\n",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "/home/semplicio/Android/Sdk/cmake/3.22.1/bin/cmake \\\n  -H/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp \\\n  -DCMAKE_SYSTEM_NAME\u003dAndroid \\\n  -DCMAKE_EXPORT_COMPILE_COMMANDS\u003dON \\\n  -DCMAKE_SYSTEM_VERSION\u003d26 \\\n  -DANDROID_PLATFORM\u003dandroid-26 \\\n  -DANDROID_ABI\u003darm64-v8a \\\n  -DCMAKE_ANDROID_ARCH_ABI\u003darm64-v8a \\\n  -DANDROID_NDK\u003d/home/semplicio/Android/Sdk/ndk/26.3.11579264 \\\n  -DCMAKE_ANDROID_NDK\u003d/home/semplicio/Android/Sdk/ndk/26.3.11579264 \\\n  -DCMAKE_TOOLCHAIN_FILE\u003d/home/semplicio/Android/Sdk/ndk/26.3.11579264/build/cmake/android.toolchain.cmake \\\n  -DCMAKE_MAKE_PROGRAM\u003d/home/semplicio/Android/Sdk/cmake/3.22.1/bin/ninja \\\n  -DCMAKE_LIBRARY_OUTPUT_DIRECTORY\u003d/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/05s3w862/obj/arm64-v8a \\\n  -DCMAKE_RUNTIME_OUTPUT_DIRECTORY\u003d/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/05s3w862/obj/arm64-v8a \\\n  -DCMAKE_BUILD_TYPE\u003dDebug \\\n  -B/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/05s3w862/arm64-v8a \\\n  -GNinja\n",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "Received process result: 0",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "Exiting generation of /home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/05s3w862/arm64-v8a/compile_commands.json.bin normally",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "done executing cmake",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "hard linked /home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/05s3w862/arm64-v8a/compile_commands.json to /home/semplicio/Documentos/AutomBotClient/app/.cxx/tools/debug/arm64-v8a/compile_commands.json",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  },
+  {
+    "level_": 0,
+    "message_": "JSON generation completed without problems",
+    "file_": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+    "tag_": "debug|arm64-v8a",
+    "diagnosticCode_": 0,
+    "memoizedIsInitialized": 1,
+    "unknownFields": {
+      "fields": {}
+    },
+    "memoizedSize": -1,
+    "memoizedHashCode": 0
+  }
+]

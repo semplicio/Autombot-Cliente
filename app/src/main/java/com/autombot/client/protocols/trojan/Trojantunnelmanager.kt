@@ -1,0 +1,209 @@
+package com.autombot.client.protocols.trojan
+
+import android.content.Context
+import com.autombot.client.core.AutomBotVpnService
+import com.autombot.client.protocols.ssh.Socks5Server
+import com.autombot.client.util.AppLog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.ServerSocket
+
+enum class TrojanStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
+
+data class ManagedTrojanConnection(
+    val config: TrojanConnectionConfig,
+    val status: TrojanStatus = TrojanStatus.DISCONNECTED,
+    val localSocksPort: Int? = null,
+    val rxBytes: Long = 0L,
+    val txBytes: Long = 0L,
+    val lastError: String? = null
+)
+
+/**
+ * Nucleo real da conexao Trojan (TCP+TLS direto + servidor SOCKS5 local) — mesma
+ * estrutura do ShadowsocksTunnelManager.kt/VlessTunnelManager.kt. Protocolo mais
+ * simples que VLESS/VMess (sem cifra propria, sem WebSocket), risco menor.
+ */
+class TrojanTunnelManager(context: Context) {
+    private val prefs = context.getSharedPreferences("autombot_trojan", Context.MODE_PRIVATE)
+    private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val _connections = MutableStateFlow<List<ManagedTrojanConnection>>(emptyList())
+    val connections: StateFlow<List<ManagedTrojanConnection>> = _connections
+
+    private val activeSocksServers = mutableMapOf<String, Socks5Server>()
+    // UDP do Trojan usa UMA conexao TLS compartilhada por conexao (nao uma por
+    // destino, ver TrojanUdpTransport.kt) — criada sob demanda na primeira vez que
+    // algum UDP aparecer.
+    private val activeUdpTransports = mutableMapOf<String, TrojanUdpTransport>()
+
+    init {
+        loadPersisted()
+        managerScope.launch {
+            while (isActive) {
+                delay(2000)
+                _connections.update { current ->
+                    current.map { conn ->
+                        val server = activeSocksServers[conn.config.connectionName]
+                        if (server != null && conn.status == TrojanStatus.CONNECTED) {
+                            conn.copy(rxBytes = server.totalRx.get(), txBytes = server.totalTx.get())
+                        } else conn
+                    }
+                }
+            }
+        }
+    }
+
+    fun addProfile(config: TrojanConnectionConfig) {
+        _connections.update { current ->
+            if (current.any { it.config.connectionName == config.connectionName }) {
+                current.map { if (it.config.connectionName == config.connectionName) it.copy(config = config) else it }
+            } else {
+                current + ManagedTrojanConnection(config)
+            }
+        }
+        persist()
+    }
+
+    fun removeProfile(connectionName: String) {
+        if (_connections.value.firstOrNull { it.config.connectionName == connectionName }?.status == TrojanStatus.CONNECTED) {
+            managerScope.launch { disconnect(connectionName) }
+        }
+        _connections.update { current -> current.filterNot { it.config.connectionName == connectionName } }
+        persist()
+    }
+
+    suspend fun connect(connectionName: String) {
+        val managed = _connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return
+        val config = managed.config
+
+        markStatus(connectionName, TrojanStatus.CONNECTING)
+        AppLog.log("Trojan \"$connectionName\": iniciando conexão (${config.describeTransport()})", AppLog.Level.INFO)
+
+        withContext(Dispatchers.IO) {
+            try {
+                val socksPort = findFreePort()
+                val socksServer = Socks5Server(
+                    socksPort,
+                    onConnectRequest = { destHost, destPort ->
+                        openTrojanChannel(config, connectionName, destHost, destPort)
+                    },
+                    onUdpAssociateRequest = { destHost, destPort, onIncoming ->
+                        openTrojanUdpSession(config, connectionName, destHost, destPort, onIncoming)
+                    },
+                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) }
+                )
+                socksServer.start()
+                activeSocksServers[connectionName] = socksServer
+
+                _connections.update { current ->
+                    current.map {
+                        if (it.config.connectionName == connectionName)
+                            it.copy(status = TrojanStatus.CONNECTED, localSocksPort = socksPort, lastError = null)
+                        else it
+                    }
+                }
+                AppLog.log("Trojan \"$connectionName\": conectado — proxy SOCKS5 em 127.0.0.1:$socksPort", AppLog.Level.SUCCESS)
+            } catch (e: Exception) {
+                markError(connectionName, e.message ?: e.javaClass.simpleName)
+            }
+        }
+    }
+
+    suspend fun disconnect(connectionName: String) {
+        markStatus(connectionName, TrojanStatus.DISCONNECTED)
+        activeSocksServers.remove(connectionName)?.stop()
+        activeUdpTransports.remove(connectionName)?.close()
+        _connections.update { current ->
+            current.map {
+                if (it.config.connectionName == connectionName) it.copy(localSocksPort = null, rxBytes = 0L, txBytes = 0L)
+                else it
+            }
+        }
+        AppLog.log("Trojan \"$connectionName\" desconectado", AppLog.Level.INFO)
+    }
+
+    private fun openTrojanChannel(
+        config: TrojanConnectionConfig,
+        connectionName: String,
+        destHost: String,
+        destPort: Int
+    ): Pair<InputStream, OutputStream>? {
+        return try {
+            TrojanTransport.connect(
+                config = config,
+                destHost = destHost,
+                destPort = destPort,
+                protectSocket = { socket -> AutomBotVpnService.protectSocket(socket) }
+            )
+        } catch (e: Exception) {
+            val detail = "${e.javaClass.simpleName}: ${e.message}"
+            AppLog.log("Trojan \"$connectionName\": falha ao abrir canal para $destHost:$destPort — $detail", AppLog.Level.ERROR)
+            android.util.Log.w("TrojanTunnelManager", "Falha ao abrir canal Trojan para $destHost:$destPort: $detail", e)
+            null
+        }
+    }
+
+    @Synchronized
+    private fun openTrojanUdpSession(
+        config: TrojanConnectionConfig,
+        connectionName: String,
+        destHost: String,
+        destPort: Int,
+        onIncoming: (ByteArray) -> Unit
+    ): com.autombot.client.protocols.ssh.UdpBackendSession? {
+        return try {
+            val transport = activeUdpTransports.getOrPut(connectionName) {
+                TrojanUdpTransport(config) { socket -> AutomBotVpnService.protectSocket(socket) }
+            }
+            transport.openSession(destHost, destPort, onIncoming)
+        } catch (e: Exception) {
+            val detail = "${e.javaClass.simpleName}: ${e.message}"
+            AppLog.log("Trojan \"$connectionName\": falha ao abrir UDP para $destHost:$destPort — $detail", AppLog.Level.ERROR)
+            null
+        }
+    }
+
+    private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
+
+    private fun markStatus(name: String, status: TrojanStatus) {
+        _connections.update { current ->
+            current.map { if (it.config.connectionName == name) it.copy(status = status) else it }
+        }
+    }
+
+    private fun markError(name: String, error: String) {
+        AppLog.log("Erro na conexão Trojan \"$name\": $error", AppLog.Level.ERROR)
+        _connections.update { current ->
+            current.map { if (it.config.connectionName == name) it.copy(status = TrojanStatus.ERROR, lastError = error) else it }
+        }
+    }
+
+    private fun persist() {
+        val array = JSONArray()
+        _connections.value.forEach { array.put(it.config.toJson()) }
+        prefs.edit().putString("profiles", array.toString()).apply()
+    }
+
+    private fun loadPersisted() {
+        val raw = prefs.getString("profiles", null) ?: return
+        runCatching {
+            val array = JSONArray(raw)
+            val loaded = (0 until array.length()).map { i ->
+                ManagedTrojanConnection(config = trojanConnectionConfigFromJson(array.getJSONObject(i)))
+            }
+            _connections.value = loaded
+        }
+    }
+}

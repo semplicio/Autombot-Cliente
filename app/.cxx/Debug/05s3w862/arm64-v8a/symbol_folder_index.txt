@@ -1,0 +1,1 @@
+/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/05s3w862/obj/arm64-v8a

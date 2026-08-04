@@ -1,0 +1,3 @@
+ninja: Entering directory `/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/6w4m6jg3/arm64-v8a'
+[1/2] Building C object CMakeFiles/autombot_tun2socks.dir/autombot_tun2socks_jni.c.o
+[2/2] Linking C shared library /home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/6w4m6jg3/obj/arm64-v8a/libautombot_tun2socks.so

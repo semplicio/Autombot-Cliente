@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/n4o14n3z/arm64-v8a",
+  "command": "/home/semplicio/Android/Sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --target=aarch64-none-linux-android26 --sysroot=/home/semplicio/Android/Sdk/ndk/30.0.15729638/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dautombot_tun2socks_EXPORTS -I/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/hev-socks5-tunnel/src -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -o CMakeFiles/autombot_tun2socks.dir/autombot_tun2socks_jni.c.o -c /home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/autombot_tun2socks_jni.c",
+  "file": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/autombot_tun2socks_jni.c"
+}
+]

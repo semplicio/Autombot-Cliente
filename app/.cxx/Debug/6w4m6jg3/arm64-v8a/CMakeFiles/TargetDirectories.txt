@@ -1,0 +1,3 @@
+/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/6w4m6jg3/arm64-v8a/CMakeFiles/autombot_tun2socks.dir
+/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/6w4m6jg3/arm64-v8a/CMakeFiles/edit_cache.dir
+/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/6w4m6jg3/arm64-v8a/CMakeFiles/rebuild_cache.dir
