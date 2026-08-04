@@ -311,9 +311,25 @@ private fun AppRoot(
         is Screen.Statistics -> {
             val wgTunnels by wireGuardManager.tunnels.collectAsState()
             val sshConns by sshManager.connections.collectAsState()
+            val vlessConnsStats by vlessManager.connections.collectAsState()
+            val vmessConnsStats by vmessManager.connections.collectAsState()
+            val ssConnsStats by shadowsocksManager.connections.collectAsState()
+            val trConnsStats by trojanManager.connections.collectAsState()
             val ovpnConns by openVpnManager.connections.collectAsState()
-            val totalRx = wgTunnels.sumOf { it.rxBytes } + sshConns.sumOf { it.rxBytes } + ovpnConns.sumOf { it.rxBytes }
-            val totalTx = wgTunnels.sumOf { it.txBytes } + sshConns.sumOf { it.txBytes } + ovpnConns.sumOf { it.txBytes }
+            val totalRx = wgTunnels.sumOf { it.rxBytes } +
+                sshConns.sumOf { it.rxBytes } +
+                vlessConnsStats.sumOf { it.rxBytes } +
+                vmessConnsStats.sumOf { it.rxBytes } +
+                ssConnsStats.sumOf { it.rxBytes } +
+                trConnsStats.sumOf { it.rxBytes } +
+                ovpnConns.sumOf { it.rxBytes }
+            val totalTx = wgTunnels.sumOf { it.txBytes } +
+                sshConns.sumOf { it.txBytes } +
+                vlessConnsStats.sumOf { it.txBytes } +
+                vmessConnsStats.sumOf { it.txBytes } +
+                ssConnsStats.sumOf { it.txBytes } +
+                trConnsStats.sumOf { it.txBytes } +
+                ovpnConns.sumOf { it.txBytes }
             StatisticsScreen(
                 rxBytesLabel = formatBytes(totalRx),
                 txBytesLabel = formatBytes(totalTx),
@@ -420,19 +436,44 @@ private fun MainShell(
         ) { padding ->
             val wgTunnels by wireGuardManager.tunnels.collectAsState()
             val sshConnections by sshManager.connections.collectAsState()
+            val vlessConnectionsDash by vlessManager.connections.collectAsState()
+            val vmessConnectionsDash by vmessManager.connections.collectAsState()
+            val ssConnectionsDash by shadowsocksManager.connections.collectAsState()
+            val trConnectionsDash by trojanManager.connections.collectAsState()
             val ovpnConnections by openVpnManager.connections.collectAsState()
 
             val activeCount = listOf(
                 wgTunnels.any { it.status == TunnelStatus.CONNECTED },
                 sshConnections.any { it.status == SshStatus.CONNECTED },
+                vlessConnectionsDash.any { it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED },
+                vmessConnectionsDash.any { it.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTED },
+                ssConnectionsDash.any { it.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTED },
+                trConnectionsDash.any { it.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTED },
                 ovpnConnections.any { it.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTED }
             ).count { it }
+
+            // Soma o tráfego real de TODOS os protocolos para o Dashboard
+            val dashRx = wgTunnels.sumOf { it.rxBytes } +
+                sshConnections.sumOf { it.rxBytes } +
+                vlessConnectionsDash.sumOf { it.rxBytes } +
+                vmessConnectionsDash.sumOf { it.rxBytes } +
+                ssConnectionsDash.sumOf { it.rxBytes } +
+                trConnectionsDash.sumOf { it.rxBytes } +
+                ovpnConnections.sumOf { it.rxBytes }
+            val dashTx = wgTunnels.sumOf { it.txBytes } +
+                sshConnections.sumOf { it.txBytes } +
+                vlessConnectionsDash.sumOf { it.txBytes } +
+                vmessConnectionsDash.sumOf { it.txBytes } +
+                ssConnectionsDash.sumOf { it.txBytes } +
+                trConnectionsDash.sumOf { it.txBytes } +
+                ovpnConnections.sumOf { it.txBytes }
+            val dashTrafficLabel = if (dashRx + dashTx > 0) formatBytes(dashRx + dashTx) else "0.00 KB"
 
             Box(modifier = Modifier.padding(padding)) {
                 DashboardScreen(
                     trialCountdown = trialSecondsRemaining?.let { formatCountdown(it) },
                     activeConnections = activeCount,
-                    trafficLabel = "0.00 KB",
+                    trafficLabel = dashTrafficLabel,
                     onRenew = onOpenPlan,
                     onOpenConnections = onOpenConnections
                 )

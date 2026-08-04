@@ -9,211 +9,210 @@
 9        android:targetSdkVersion="34" />
 10
 11    <uses-permission android:name="android.permission.INTERNET" />
-11-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:4:5-67
-11-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:4:22-64
+11-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:4:5-67
+11-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:4:22-64
 12    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-12-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:5:5-79
-12-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:5:22-76
+12-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:5:5-79
+12-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:5:22-76
 13    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-13-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:6:5-77
-13-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:6:22-74
+13-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:6:5-77
+13-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:6:22-74
 14    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-14-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:7:5-89
-14-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:7:22-86
+14-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:7:5-89
+14-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:7:22-86
 15    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-15-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:8:5-77
-15-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:8:22-74
+15-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:8:5-77
+15-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:8:22-74
 16    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
-16-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:9:5-10:100
-16-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:9:22-74
+16-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:9:5-10:100
+16-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:9:22-74
 17    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-17-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:11:5-81
-17-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:11:22-78
+17-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:11:5-81
+17-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:11:22-78
 18
 19    <permission
-19-->[androidx.core:core:1.13.1] /home/semplicio/.gradle/caches/8.13/transforms/5a77dee4cf2cf87eae9dd49fc41985d9/transformed/core-1.13.1/AndroidManifest.xml:22:5-24:47
+19-->[androidx.core:core:1.13.1] /home/dev/.gradle/caches/9.5.0/transforms/49f188a787f44392d8a749336553ddfc/transformed/core-1.13.1/AndroidManifest.xml:22:5-24:47
 20        android:name="com.autombot.client.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
-20-->[androidx.core:core:1.13.1] /home/semplicio/.gradle/caches/8.13/transforms/5a77dee4cf2cf87eae9dd49fc41985d9/transformed/core-1.13.1/AndroidManifest.xml:23:9-81
+20-->[androidx.core:core:1.13.1] /home/dev/.gradle/caches/9.5.0/transforms/49f188a787f44392d8a749336553ddfc/transformed/core-1.13.1/AndroidManifest.xml:23:9-81
 21        android:protectionLevel="signature" />
-21-->[androidx.core:core:1.13.1] /home/semplicio/.gradle/caches/8.13/transforms/5a77dee4cf2cf87eae9dd49fc41985d9/transformed/core-1.13.1/AndroidManifest.xml:24:9-44
+21-->[androidx.core:core:1.13.1] /home/dev/.gradle/caches/9.5.0/transforms/49f188a787f44392d8a749336553ddfc/transformed/core-1.13.1/AndroidManifest.xml:24:9-44
 22
 23    <uses-permission android:name="com.autombot.client.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
-23-->[androidx.core:core:1.13.1] /home/semplicio/.gradle/caches/8.13/transforms/5a77dee4cf2cf87eae9dd49fc41985d9/transformed/core-1.13.1/AndroidManifest.xml:26:5-97
-23-->[androidx.core:core:1.13.1] /home/semplicio/.gradle/caches/8.13/transforms/5a77dee4cf2cf87eae9dd49fc41985d9/transformed/core-1.13.1/AndroidManifest.xml:26:22-94
+23-->[androidx.core:core:1.13.1] /home/dev/.gradle/caches/9.5.0/transforms/49f188a787f44392d8a749336553ddfc/transformed/core-1.13.1/AndroidManifest.xml:26:5-97
+23-->[androidx.core:core:1.13.1] /home/dev/.gradle/caches/9.5.0/transforms/49f188a787f44392d8a749336553ddfc/transformed/core-1.13.1/AndroidManifest.xml:26:22-94
 24
 25    <application
-25-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:13:5-66:19
+25-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:13:5-66:19
 26        android:allowBackup="false"
-26-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:14:9-36
+26-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:14:9-36
 27        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
-27-->[androidx.core:core:1.13.1] /home/semplicio/.gradle/caches/8.13/transforms/5a77dee4cf2cf87eae9dd49fc41985d9/transformed/core-1.13.1/AndroidManifest.xml:28:18-86
+27-->[androidx.core:core:1.13.1] /home/dev/.gradle/caches/9.5.0/transforms/49f188a787f44392d8a749336553ddfc/transformed/core-1.13.1/AndroidManifest.xml:28:18-86
 28        android:debuggable="true"
 29        android:extractNativeLibs="true"
-29-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:15:9-41
+29-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:15:9-41
 30        android:icon="@mipmap/ic_launcher"
-30-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:16:9-43
+30-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:16:9-43
 31        android:label="AutomBot Connect"
-31-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:17:9-41
+31-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:17:9-41
 32        android:supportsRtl="true"
-32-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:19:9-35
-33        android:testOnly="true"
-34        android:theme="@style/Theme.AutomBotClient" >
-34-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:18:9-52
-35        <activity
-35-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:21:9-36:20
-36            android:name="com.autombot.client.ui.MainActivity"
-36-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:22:13-44
-37            android:exported="true"
-37-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:23:13-36
-38            android:theme="@style/Theme.AutomBotClient" >
-38-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:24:13-56
-39            <intent-filter>
-39-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:25:13-28:29
-40                <action android:name="android.intent.action.MAIN" />
-40-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:26:17-69
-40-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:26:25-66
-41
-42                <category android:name="android.intent.category.LAUNCHER" />
-42-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:27:17-77
-42-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:27:27-74
-43            </intent-filter>
-44            <!-- Deeplink para import de perfil/painel: autombot://import?panel=... -->
-45            <intent-filter>
-45-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:30:13-35:29
-46                <action android:name="android.intent.action.VIEW" />
-46-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:31:17-69
-46-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:31:25-66
-47
-48                <category android:name="android.intent.category.DEFAULT" />
-48-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:32:17-76
-48-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:32:27-73
-49                <category android:name="android.intent.category.BROWSABLE" />
-49-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:33:17-78
-49-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:33:27-75
-50
-51                <data
-51-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:34:17-73
-52                    android:host="import"
-52-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:34:49-70
-53                    android:scheme="autombot" />
-53-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:34:23-48
-54            </intent-filter>
-55        </activity>
-56
-57        <service
-57-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:38:9-53:19
-58            android:name="com.autombot.client.core.AutomBotVpnService"
-58-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:39:13-52
-59            android:exported="false"
-59-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:41:13-37
-60            android:foregroundServiceType="specialUse"
-60-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:42:13-55
-61            android:permission="android.permission.BIND_VPN_SERVICE" >
-61-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:40:13-69
-62            <intent-filter>
-62-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:43:13-45:29
-63                <action android:name="android.net.VpnService" />
-63-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:44:17-65
-63-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:44:25-62
-64            </intent-filter>
-65            <!--
-66                 Obrigatorio no Android 14+ (API 34) pra foregroundServiceType="specialUse" —
-67                 sem isso, startForeground() lanca excecao e o codigo depois dele (o motor
-68                 de roteamento inteiro) nunca chega a rodar. Provavel causa de a chave de
-69                 VPN acender mas nada de trafego funcionar.
-70            -->
-71            <property
-71-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:50:13-52:39
-72                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-72-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:51:17-76
-73                android:value="vpn" />
-73-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:52:17-36
-74        </service>
-75
-76        <!-- Servico interno do backend oficial do WireGuard (com.wireguard.android:tunnel) -->
-77        <service
-77-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:56:9-64:19
-78            android:name="com.wireguard.android.backend.GoBackend$VpnService"
-78-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:57:13-78
-79            android:exported="false"
-79-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:59:13-37
-80            android:foregroundServiceType="specialUse"
-80-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:60:13-55
-81            android:permission="android.permission.BIND_VPN_SERVICE" >
-81-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:58:13-69
-82            <intent-filter>
-82-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:43:13-45:29
-83                <action android:name="android.net.VpnService" />
-83-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:44:17-65
-83-->/home/semplicio/Documentos/AutomBotClient/app/src/main/AndroidManifest.xml:44:25-62
-84            </intent-filter>
-85        </service>
-86
-87        <provider
-87-->[androidx.emoji2:emoji2:1.3.0] /home/semplicio/.gradle/caches/8.13/transforms/10dcfdf04cda6bb6b4624fa73f30acbb/transformed/emoji2-1.3.0/AndroidManifest.xml:24:9-32:20
-88            android:name="androidx.startup.InitializationProvider"
-88-->[androidx.emoji2:emoji2:1.3.0] /home/semplicio/.gradle/caches/8.13/transforms/10dcfdf04cda6bb6b4624fa73f30acbb/transformed/emoji2-1.3.0/AndroidManifest.xml:25:13-67
-89            android:authorities="com.autombot.client.androidx-startup"
-89-->[androidx.emoji2:emoji2:1.3.0] /home/semplicio/.gradle/caches/8.13/transforms/10dcfdf04cda6bb6b4624fa73f30acbb/transformed/emoji2-1.3.0/AndroidManifest.xml:26:13-68
-90            android:exported="false" >
-90-->[androidx.emoji2:emoji2:1.3.0] /home/semplicio/.gradle/caches/8.13/transforms/10dcfdf04cda6bb6b4624fa73f30acbb/transformed/emoji2-1.3.0/AndroidManifest.xml:27:13-37
-91            <meta-data
-91-->[androidx.emoji2:emoji2:1.3.0] /home/semplicio/.gradle/caches/8.13/transforms/10dcfdf04cda6bb6b4624fa73f30acbb/transformed/emoji2-1.3.0/AndroidManifest.xml:29:13-31:52
-92                android:name="androidx.emoji2.text.EmojiCompatInitializer"
-92-->[androidx.emoji2:emoji2:1.3.0] /home/semplicio/.gradle/caches/8.13/transforms/10dcfdf04cda6bb6b4624fa73f30acbb/transformed/emoji2-1.3.0/AndroidManifest.xml:30:17-75
-93                android:value="androidx.startup" />
-93-->[androidx.emoji2:emoji2:1.3.0] /home/semplicio/.gradle/caches/8.13/transforms/10dcfdf04cda6bb6b4624fa73f30acbb/transformed/emoji2-1.3.0/AndroidManifest.xml:31:17-49
-94            <meta-data
-94-->[androidx.lifecycle:lifecycle-process:2.8.4] /home/semplicio/.gradle/caches/8.13/transforms/bee41a2d78f62268d7cf9a153dbef61a/transformed/lifecycle-process-2.8.4/AndroidManifest.xml:29:13-31:52
-95                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
-95-->[androidx.lifecycle:lifecycle-process:2.8.4] /home/semplicio/.gradle/caches/8.13/transforms/bee41a2d78f62268d7cf9a153dbef61a/transformed/lifecycle-process-2.8.4/AndroidManifest.xml:30:17-78
-96                android:value="androidx.startup" />
-96-->[androidx.lifecycle:lifecycle-process:2.8.4] /home/semplicio/.gradle/caches/8.13/transforms/bee41a2d78f62268d7cf9a153dbef61a/transformed/lifecycle-process-2.8.4/AndroidManifest.xml:31:17-49
-97            <meta-data
-97-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:29:13-31:52
-98                android:name="androidx.profileinstaller.ProfileInstallerInitializer"
-98-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:30:17-85
-99                android:value="androidx.startup" />
-99-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:31:17-49
-100        </provider>
-101
-102        <receiver
-102-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:34:9-52:20
-103            android:name="androidx.profileinstaller.ProfileInstallReceiver"
-103-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:35:13-76
-104            android:directBootAware="false"
-104-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:36:13-44
-105            android:enabled="true"
-105-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:37:13-35
-106            android:exported="true"
-106-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:38:13-36
-107            android:permission="android.permission.DUMP" >
-107-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:39:13-57
-108            <intent-filter>
-108-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:40:13-42:29
-109                <action android:name="androidx.profileinstaller.action.INSTALL_PROFILE" />
-109-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:41:17-91
-109-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:41:25-88
-110            </intent-filter>
-111            <intent-filter>
-111-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:43:13-45:29
-112                <action android:name="androidx.profileinstaller.action.SKIP_FILE" />
-112-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:44:17-85
-112-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:44:25-82
-113            </intent-filter>
-114            <intent-filter>
-114-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:46:13-48:29
-115                <action android:name="androidx.profileinstaller.action.SAVE_PROFILE" />
-115-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:47:17-88
-115-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:47:25-85
-116            </intent-filter>
-117            <intent-filter>
-117-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:49:13-51:29
-118                <action android:name="androidx.profileinstaller.action.BENCHMARK_OPERATION" />
-118-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:50:17-95
-118-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/semplicio/.gradle/caches/8.13/transforms/6934391db2a25169033d1d60745e885f/transformed/profileinstaller-1.3.1/AndroidManifest.xml:50:25-92
-119            </intent-filter>
-120        </receiver>
-121    </application>
-122
-123</manifest>
+32-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:19:9-35
+33        android:theme="@style/Theme.AutomBotClient" >
+33-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:18:9-52
+34        <activity
+34-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:21:9-36:20
+35            android:name="com.autombot.client.ui.MainActivity"
+35-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:22:13-44
+36            android:exported="true"
+36-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:23:13-36
+37            android:theme="@style/Theme.AutomBotClient" >
+37-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:24:13-56
+38            <intent-filter>
+38-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:25:13-28:29
+39                <action android:name="android.intent.action.MAIN" />
+39-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:26:17-69
+39-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:26:25-66
+40
+41                <category android:name="android.intent.category.LAUNCHER" />
+41-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:27:17-77
+41-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:27:27-74
+42            </intent-filter>
+43            <!-- Deeplink para import de perfil/painel: autombot://import?panel=... -->
+44            <intent-filter>
+44-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:30:13-35:29
+45                <action android:name="android.intent.action.VIEW" />
+45-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:31:17-69
+45-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:31:25-66
+46
+47                <category android:name="android.intent.category.DEFAULT" />
+47-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:32:17-76
+47-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:32:27-73
+48                <category android:name="android.intent.category.BROWSABLE" />
+48-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:33:17-78
+48-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:33:27-75
+49
+50                <data
+50-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:34:17-73
+51                    android:host="import"
+51-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:34:49-70
+52                    android:scheme="autombot" />
+52-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:34:23-48
+53            </intent-filter>
+54        </activity>
+55
+56        <service
+56-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:38:9-53:19
+57            android:name="com.autombot.client.core.AutomBotVpnService"
+57-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:39:13-52
+58            android:exported="false"
+58-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:41:13-37
+59            android:foregroundServiceType="specialUse"
+59-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:42:13-55
+60            android:permission="android.permission.BIND_VPN_SERVICE" >
+60-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:40:13-69
+61            <intent-filter>
+61-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:43:13-45:29
+62                <action android:name="android.net.VpnService" />
+62-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:44:17-65
+62-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:44:25-62
+63            </intent-filter>
+64            <!--
+65                 Obrigatorio no Android 14+ (API 34) pra foregroundServiceType="specialUse" —
+66                 sem isso, startForeground() lanca excecao e o codigo depois dele (o motor
+67                 de roteamento inteiro) nunca chega a rodar. Provavel causa de a chave de
+68                 VPN acender mas nada de trafego funcionar.
+69            -->
+70            <property
+70-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:50:13-52:39
+71                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+71-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:51:17-76
+72                android:value="vpn" />
+72-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:52:17-36
+73        </service>
+74
+75        <!-- Servico interno do backend oficial do WireGuard (com.wireguard.android:tunnel) -->
+76        <service
+76-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:56:9-64:19
+77            android:name="com.wireguard.android.backend.GoBackend$VpnService"
+77-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:57:13-78
+78            android:exported="false"
+78-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:59:13-37
+79            android:foregroundServiceType="specialUse"
+79-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:60:13-55
+80            android:permission="android.permission.BIND_VPN_SERVICE" >
+80-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:58:13-69
+81            <intent-filter>
+81-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:43:13-45:29
+82                <action android:name="android.net.VpnService" />
+82-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:44:17-65
+82-->/home/dev/Autombot-Cliente/app/src/main/AndroidManifest.xml:44:25-62
+83            </intent-filter>
+84        </service>
+85
+86        <provider
+86-->[androidx.emoji2:emoji2:1.3.0] /home/dev/.gradle/caches/9.5.0/transforms/21ed1b11bebb3e242d1dcc1f02887cbc/transformed/emoji2-1.3.0/AndroidManifest.xml:24:9-32:20
+87            android:name="androidx.startup.InitializationProvider"
+87-->[androidx.emoji2:emoji2:1.3.0] /home/dev/.gradle/caches/9.5.0/transforms/21ed1b11bebb3e242d1dcc1f02887cbc/transformed/emoji2-1.3.0/AndroidManifest.xml:25:13-67
+88            android:authorities="com.autombot.client.androidx-startup"
+88-->[androidx.emoji2:emoji2:1.3.0] /home/dev/.gradle/caches/9.5.0/transforms/21ed1b11bebb3e242d1dcc1f02887cbc/transformed/emoji2-1.3.0/AndroidManifest.xml:26:13-68
+89            android:exported="false" >
+89-->[androidx.emoji2:emoji2:1.3.0] /home/dev/.gradle/caches/9.5.0/transforms/21ed1b11bebb3e242d1dcc1f02887cbc/transformed/emoji2-1.3.0/AndroidManifest.xml:27:13-37
+90            <meta-data
+90-->[androidx.emoji2:emoji2:1.3.0] /home/dev/.gradle/caches/9.5.0/transforms/21ed1b11bebb3e242d1dcc1f02887cbc/transformed/emoji2-1.3.0/AndroidManifest.xml:29:13-31:52
+91                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+91-->[androidx.emoji2:emoji2:1.3.0] /home/dev/.gradle/caches/9.5.0/transforms/21ed1b11bebb3e242d1dcc1f02887cbc/transformed/emoji2-1.3.0/AndroidManifest.xml:30:17-75
+92                android:value="androidx.startup" />
+92-->[androidx.emoji2:emoji2:1.3.0] /home/dev/.gradle/caches/9.5.0/transforms/21ed1b11bebb3e242d1dcc1f02887cbc/transformed/emoji2-1.3.0/AndroidManifest.xml:31:17-49
+93            <meta-data
+93-->[androidx.lifecycle:lifecycle-process:2.8.4] /home/dev/.gradle/caches/9.5.0/transforms/b18311a2904adf3ac4c73404ece6261e/transformed/lifecycle-process-2.8.4/AndroidManifest.xml:29:13-31:52
+94                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+94-->[androidx.lifecycle:lifecycle-process:2.8.4] /home/dev/.gradle/caches/9.5.0/transforms/b18311a2904adf3ac4c73404ece6261e/transformed/lifecycle-process-2.8.4/AndroidManifest.xml:30:17-78
+95                android:value="androidx.startup" />
+95-->[androidx.lifecycle:lifecycle-process:2.8.4] /home/dev/.gradle/caches/9.5.0/transforms/b18311a2904adf3ac4c73404ece6261e/transformed/lifecycle-process-2.8.4/AndroidManifest.xml:31:17-49
+96            <meta-data
+96-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:29:13-31:52
+97                android:name="androidx.profileinstaller.ProfileInstallerInitializer"
+97-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:30:17-85
+98                android:value="androidx.startup" />
+98-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:31:17-49
+99        </provider>
+100
+101        <receiver
+101-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:34:9-52:20
+102            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+102-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:35:13-76
+103            android:directBootAware="false"
+103-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:36:13-44
+104            android:enabled="true"
+104-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:37:13-35
+105            android:exported="true"
+105-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:38:13-36
+106            android:permission="android.permission.DUMP" >
+106-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:39:13-57
+107            <intent-filter>
+107-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:40:13-42:29
+108                <action android:name="androidx.profileinstaller.action.INSTALL_PROFILE" />
+108-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:41:17-91
+108-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:41:25-88
+109            </intent-filter>
+110            <intent-filter>
+110-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:43:13-45:29
+111                <action android:name="androidx.profileinstaller.action.SKIP_FILE" />
+111-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:44:17-85
+111-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:44:25-82
+112            </intent-filter>
+113            <intent-filter>
+113-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:46:13-48:29
+114                <action android:name="androidx.profileinstaller.action.SAVE_PROFILE" />
+114-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:47:17-88
+114-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:47:25-85
+115            </intent-filter>
+116            <intent-filter>
+116-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:49:13-51:29
+117                <action android:name="androidx.profileinstaller.action.BENCHMARK_OPERATION" />
+117-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:50:17-95
+117-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/dev/.gradle/caches/9.5.0/transforms/76c2bbf665423a7585c8243cf526a182/transformed/profileinstaller-1.3.1/AndroidManifest.xml:50:25-92
+118            </intent-filter>
+119        </receiver>
+120    </application>
+121
+122</manifest>

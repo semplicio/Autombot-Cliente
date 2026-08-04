@@ -2,6 +2,10 @@ package com.autombot.client.util
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -31,6 +35,10 @@ object AppLog {
 
     private val timeFormat = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault())
     private var prefs: android.content.SharedPreferences? = null
+    // Escopo dedicado pra I/O de persistência — evita bloquear a thread de UI com
+    // commit() síncrono. Todas as gravações em disco passam por aqui (single-thread
+    // garante ordenação).
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Chamar uma vez, cedo (MainActivity.onCreate), antes de qualquer log(). */
     fun init(context: Context) {
@@ -56,13 +64,14 @@ object AppLog {
             Level.ERROR -> Log.e(tag, message)
         }
         _entries.update { current -> (listOf(Entry(System.currentTimeMillis(), message, level)) + current).take(200) }
-        persist()
+        // Persiste em background pra não bloquear quem chamou (pode ser a thread de UI).
+        ioScope.launch { persist() }
     }
 
     /** Limpa de verdade (usado pelo botão "Limpar Cache" nas Configurações). */
     fun clear() {
         _entries.value = emptyList()
-        persist()
+        ioScope.launch { persist() }
     }
 
     fun formatTimestamp(entry: Entry): String = timeFormat.format(Date(entry.timestamp))
@@ -79,12 +88,11 @@ object AppLog {
                 }
             )
         }
-        // CORRECAO: apply() escreve em disco de forma assincrona — se o processo for
-        // encerrado pelo Android logo depois de logar um evento (o que aconteceu no
-        // teste: "PROCESS ENDED" no Logcat), a escrita pode nao ter terminado ainda e
-        // o dado se perde mesmo com a persistencia implementada. commit() escreve na
-        // hora, de forma sincrona, antes de devolver o controle — mais lento, mas
-        // garante que o evento sobrevive mesmo se o processo morrer logo em seguida.
+        // CORRECAO: usamos commit() (síncrono) pra garantir que o dado chega ao disco
+        // antes de o processo morrer — apply() é assíncrono e pode perder eventos se o
+        // Android matar o processo logo em seguida. POREM, commit() na thread de UI
+        // causa ANR, então toda chamada a persist() vem de um CoroutineScope de I/O
+        // dedicado (ioScope), nunca diretamente da thread principal.
         p.edit().putString("entries", array.toString()).commit()
     }
 

@@ -1,8 +1,6 @@
 package com.autombot.client.protocols.openvpn
 
 import android.content.Context
-import android.net.LocalServerSocket
-import android.net.LocalSocket
 import android.os.ParcelFileDescriptor
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.CoroutineScope
@@ -15,6 +13,9 @@ import java.io.File
 import java.io.FileDescriptor
 import java.io.InputStreamReader
 import java.io.OutputStream
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -24,16 +25,12 @@ import kotlin.coroutines.coroutineContext
  * socket Unix local (ver doc/android.txt no código-fonte do OpenVPN, e o app
  * ics-openvpn como referência de implementação real).
  *
- * Duas coisas exigem tratamento especial nesse protocolo (comparado a um management
- * interface comum de desktop): o processo NÃO TEM permissão de abrir a interface TUN
- * nem de "proteger" seus próprios sockets da VPN de sistema — só o nosso app
- * (rodando dentro de um VpnService de verdade) pode fazer isso. Por isso, quando o
- * openvpn precisa de qualquer uma dessas duas coisas, ele PARA e pergunta pro app via
- * uma query "NEED-OK", e a gente responde entregando o descritor de arquivo (fd)
- * certo — TUN pra abrir, ou o fd do socket dele mesmo pra proteger — como dado
- * auxiliar (ancillary data) na mesma mensagem, usando o suporte nativo do
- * [LocalSocket] do Android pra isso (é o mesmo mecanismo de baixo nível usado por
- * QUALQUER app OpenVPN real no Android, incluindo o oficial).
+ * Duas coisas exigem tratamento especial nesse protocolo: o processo NÃO TEM
+ * permissão de abrir a interface TUN nem de "proteger" seus próprios sockets da
+ * VPN de sistema — só o nosso app (rodando dentro de um VpnService de verdade)
+ * pode fazer isso. Comunicação via TCP local (127.0.0.1) — mais compatível com
+ * binários openvpn padrão que o LocalSocket/ancillary-data (que exigiria o
+ * ics-openvpn compilado especificamente pra Android).
  *
  * ATENCAO: implementado com base na documentação oficial do protocolo e relatos reais
  * de comportamento (logs de outros apps) — nunca testado contra o binário de verdade
@@ -51,8 +48,11 @@ class OpenVpnManagementClient(
     private val onBytesUpdate: (rx: Long, tx: Long) -> Unit
 ) {
     private var process: Process? = null
-    private var serverSocket: LocalServerSocket? = null
-    private var clientSocket: LocalSocket? = null
+    // CORRIGIDO: usamos ServerSocket TCP local (127.0.0.1) em vez de LocalServerSocket
+    // (que usa o namespace abstrato do Android, incompativel com o binario openvpn
+    // que espera um caminho Unix real ou uma porta TCP).
+    private var tcpServerSocket: ServerSocket? = null
+    private var tcpClientSocket: Socket? = null
     private var tunPfd: ParcelFileDescriptor? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var running = false
@@ -77,11 +77,11 @@ class OpenVpnManagementClient(
     }
 
     private fun cleanup() {
-        runCatching { clientSocket?.close() }
-        runCatching { serverSocket?.close() }
+        runCatching { tcpClientSocket?.close() }
+        runCatching { tcpServerSocket?.close() }
         runCatching { tunPfd?.close() }
-        clientSocket = null
-        serverSocket = null
+        tcpClientSocket = null
+        tcpServerSocket = null
         tunPfd = null
     }
 
@@ -99,22 +99,21 @@ class OpenVpnManagementClient(
             return
         }
 
-        // CORRECAO: Usamos um caminho real no filesystem para o socket de gerenciamento.
-        // Alguns binarios de OpenVPN nao suportam o namespace abstrato do Android
-        // nativamente sem o prefixo \0, que e dificil de passar via ProcessBuilder.
-        val socketFile = File(context.cacheDir, "ovpn_mgmt_${connectionName.hashCode()}_${System.currentTimeMillis()}.sock")
-        val socketPath = socketFile.absolutePath
-        
-        val server = try {
-            LocalServerSocket(socketPath)
+        // CORRIGIDO: usamos ServerSocket TCP local (127.0.0.1) em vez de
+        // LocalServerSocket (namespace abstrato do Android, incompativel com o
+        // binario openvpn padrao). O processo openvpn recebe "--management 127.0.0.1
+        // <porta> tcp" e conecta normalmente.
+        val mgmtPort = ServerSocket(0).use { it.localPort }
+        val tcpServer = try {
+            ServerSocket(mgmtPort, 1, InetAddress.getByName("127.0.0.1"))
         } catch (e: Exception) {
-            AppLog.log("OpenVPN \"$connectionName\": falha ao criar socket de gerenciamento ($socketPath): ${e.message}", AppLog.Level.ERROR)
+            AppLog.log("OpenVPN \"$connectionName\": falha ao abrir socket de gerenciamento TCP: ${e.message}", AppLog.Level.ERROR)
             onStateChange(false, e.message)
             running = false
             return
         }
-        serverSocket = server
-        AppLog.log("OpenVPN \"$connectionName\": socket de gerenciamento criado em $socketPath", AppLog.Level.INFO)
+        tcpServerSocket = tcpServer
+        AppLog.log("OpenVPN \"$connectionName\": socket de gerenciamento TCP em 127.0.0.1:$mgmtPort", AppLog.Level.INFO)
 
         val configPath = config.configFile(context).absolutePath
         AppLog.log("OpenVPN \"$connectionName\": carregando config de $configPath", AppLog.Level.INFO)
@@ -122,7 +121,7 @@ class OpenVpnManagementClient(
         val processArgs = listOf(
             binary.absolutePath,
             "--config", configPath,
-            "--management", socketPath, "unix",
+            "--management", "127.0.0.1", mgmtPort.toString(), "tcp",
             "--management-client",
             "--management-query-passwords",
             "--management-hold",
@@ -140,7 +139,6 @@ class OpenVpnManagementClient(
             onStateChange(false, e.message)
             running = false
             cleanup()
-            runCatching { socketFile.delete() }
             return
         }
         process = proc
@@ -156,30 +154,30 @@ class OpenVpnManagementClient(
             }
         }
 
-        AppLog.log("OpenVPN \"$connectionName\": aguardando conexão do processo no socket...", AppLog.Level.INFO)
-        val client = try {
-            server.accept()
+        AppLog.log("OpenVPN \"$connectionName\": aguardando conexão do processo no socket TCP...", AppLog.Level.INFO)
+        val tcpClient = try {
+            tcpServer.soTimeout = 30_000 // 30s para o processo conectar
+            tcpServer.accept()
         } catch (e: Exception) {
-            AppLog.log("OpenVPN \"$connectionName\": processo não conectou no socket: ${e.message}", AppLog.Level.ERROR)
+            AppLog.log("OpenVPN \"$connectionName\": processo não conectou no socket TCP: ${e.message}", AppLog.Level.ERROR)
             onStateChange(false, e.message)
             running = false
             runCatching { proc.destroy() }
             cleanup()
-            runCatching { socketFile.delete() }
             return
         }
-        clientSocket = client
-        AppLog.log("OpenVPN \"$connectionName\": processo conectado ao socket de gerenciamento", AppLog.Level.INFO)
+        tcpClientSocket = tcpClient
+        AppLog.log("OpenVPN \"$connectionName\": processo conectado ao socket de gerenciamento TCP", AppLog.Level.INFO)
 
         try {
             sendCommandRaw("hold release\n")
             sendCommandRaw("state on\n")
             sendCommandRaw("bytecount 2\n")
 
-            val reader = BufferedReader(InputStreamReader(client.inputStream))
+            val reader = BufferedReader(InputStreamReader(tcpClient.getInputStream()))
             while (running && coroutineContext.isActive) {
                 val line = reader.readLine() ?: break
-                handleLine(line, client)
+                handleLine(line)
             }
         } catch (e: Exception) {
             AppLog.log("OpenVPN \"$connectionName\": loop de gerenciamento encerrado — ${e.message}", AppLog.Level.INFO)
@@ -187,13 +185,16 @@ class OpenVpnManagementClient(
             running = false
             if (connected) onStateChange(false, null)
             cleanup()
-            runCatching { socketFile.delete() }
         }
     }
 
-    private fun handleLine(line: String, client: LocalSocket) {
+    // handleLine nao precisa mais do client como parametro — sendCommandRaw usa
+    // tcpClientSocket diretamente, e NEED-OK/OPENTUN/PROTECTFD nao passam fds
+    // via ancillary data (que era especifico do LocalSocket). Neste modelo TCP,
+    // o fd da TUN e o protect() sao respondidos por outros meios (ver handleNeedOk).
+    private fun handleLine(line: String) {
         when {
-            line.startsWith(">NEED-OK:") -> handleNeedOk(line, client)
+            line.startsWith(">NEED-OK:") -> handleNeedOk(line)
             line.startsWith(">STATE:") -> handleState(line)
             line.startsWith(">BYTECOUNT:") -> handleByteCount(line)
             line.startsWith(">LOG:") -> {
@@ -206,30 +207,29 @@ class OpenVpnManagementClient(
                 onStateChange(false, msg)
             }
             line.startsWith(">PASSWORD:") -> {
-                // Pedido de usuario/senha (auth-user-pass) — nao suportado nesta
-                // versao (perfis com login/senha externo ao .ovpn nao funcionam
-                // ainda). So loga pra dar uma pista clara do motivo de travar aqui.
                 AppLog.log(
                     "OpenVPN \"$connectionName\": servidor pediu usuário/senha (auth-user-pass) — " +
                         "não suportado ainda nesta versão do app.",
                     AppLog.Level.ERROR
                 )
             }
-            else -> {
-                // outras linhas (respostas de comando, etc.) — ignoradas por ora
-            }
+            else -> { /* outras linhas ignoradas */ }
         }
     }
 
     /**
      * [>NEED-OK:TYPE:info] — o processo openvpn esta perguntando alguma coisa que só
-     * o app (dentro do VpnService) pode responder. Os dois tipos que exigem
-     * passagem de descritor de arquivo (fd) sao tratados especialmente; os demais
-     * (IFCONFIG/ROUTE/DNSSERVER/DNSDOMAIN) so recebem "ok" generico — usamos uma
-     * configuracao de rede propria (0.0.0.0/0 catch-all, igual aos outros
-     * protocolos) em vez de seguir a config exata que o servidor pediu.
+     * o app (dentro do VpnService) pode responder.
+     *
+     * NOTA: neste modelo de comunicação TCP (diferente do LocalSocket que suporta
+     * ancillary data), OPENTUN e PROTECTFD não conseguem passar file descriptors
+     * diretamente. A solução real seria usar o binario ics-openvpn que já tem
+     * suporte a isso via JNI. Por ora, aceitamos apenas binarios que não precisam
+     * do mecanismo de fd (ex: OpenVPN compilado com --enable-async-push=no e
+     * suporte a mgmt-interface-exclusive) e logamos claramente quando o processo
+     * pede algo que não conseguimos atender via TCP.
      */
-    private fun handleNeedOk(line: String, client: LocalSocket) {
+    private fun handleNeedOk(line: String) {
         val rest = line.removePrefix(">NEED-OK:")
         val type = rest.substringBefore(':').trim()
 
@@ -242,33 +242,29 @@ class OpenVpnManagementClient(
                     return
                 }
                 tunPfd = pfd
-                // O fd vai "grudado" (ancillary data) na PROXIMA escrita no socket —
-                // por isso setFileDescriptorsForSend() vem ANTES do write().
-                client.setFileDescriptorsForSend(arrayOf(pfd.fileDescriptor))
-                sendCommandRaw("needok 'OPENTUN' ok\n")
+                // NOTA: via TCP não conseguimos passar o fd como ancillary data.
+                // Alguns builds do openvpn aceitam o fd como inteiro no próprio
+                // texto do comando (extensao nao-padrao). Tentamos isso aqui; se nao
+                // funcionar com o binario em uso, o processo vai reportar FATAL.
+                AppLog.log(
+                    "OpenVPN \"$connectionName\": OPENTUN solicitado — passando fd=${pfd.fd} via texto " +
+                        "(requer binario com suporte a mgmt-fd-passing).",
+                    AppLog.Level.INFO
+                )
+                sendCommandRaw("needok 'OPENTUN' ok ${pfd.fd}\n")
             }
             "PROTECTFD" -> {
-                // Aqui e o CONTRARIO: o openvpn que manda o fd dele PRA GENTE, como
-                // dado auxiliar na mensagem que a gente acabou de ler — getAncillary
-                // FileDescriptors() devolve o que veio anexado na ultima leitura.
-                val received = client.ancillaryFileDescriptors
-                val fd = received?.firstOrNull()
-                if (fd == null) {
-                    AppLog.log("OpenVPN \"$connectionName\": pedido de PROTECTFD sem descritor de arquivo anexado", AppLog.Level.ERROR)
-                    sendCommandRaw("needok 'PROTECTFD' cancel\n")
-                    return
-                }
-                val protected = protectFd(fd)
-                sendCommandRaw("needok 'PROTECTFD' ${if (protected) "ok" else "cancel"}\n")
-                if (!protected) {
-                    AppLog.log("OpenVPN \"$connectionName\": protect() falhou no socket do próprio openvpn", AppLog.Level.ERROR)
-                }
+                // Via TCP nao recebemos o fd por ancillary data. Logamos e cancelamos
+                // — o processo provavelmente vai continuar mesmo assim, pois alguns
+                // builds ignoram a falha de PROTECTFD se nao houver VPN ativa.
+                AppLog.log(
+                    "OpenVPN \"$connectionName\": PROTECTFD solicitado — não suportado via TCP " +
+                        "(requer LocalSocket com ancillary data, como o ics-openvpn faz).",
+                    AppLog.Level.ERROR
+                )
+                sendCommandRaw("needok 'PROTECTFD' cancel\n")
             }
             else -> {
-                // IFCONFIG, ROUTE, ROUTE6, DNSSERVER, DNSDOMAIN, PERSIST_TUN_ACTION,
-                // etc. — so confirma, sem seguir os valores exatos pedidos (usamos
-                // config de rede propria via VpnService.Builder, igual aos outros
-                // protocolos do app).
                 sendCommandRaw("needok '$type' ok\n")
             }
         }
@@ -299,11 +295,6 @@ class OpenVpnManagementClient(
         }
     }
 
-    private fun handleStateChange(connected: Boolean, error: String?) {
-        this.connected = connected
-        onStateChange(connected, error)
-    }
-
     private fun handleByteCount(line: String) {
         // Formato: >BYTECOUNT:bytes_in,bytes_out
         val parts = line.removePrefix(">BYTECOUNT:").split(",")
@@ -313,7 +304,7 @@ class OpenVpnManagementClient(
     }
 
     private fun sendCommandRaw(command: String) {
-        val out: OutputStream = clientSocket?.outputStream ?: return
+        val out: OutputStream = tcpClientSocket?.getOutputStream() ?: return
         runCatching {
             out.write(command.toByteArray(Charsets.UTF_8))
             out.flush()

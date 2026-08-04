@@ -8,9 +8,9 @@
     "triple": "aarch64-linux-android",
     "llvmTriple": "aarch64-none-linux-android"
   },
-  "cxxBuildFolder": "/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/545s5o5h/arm64-v8a",
-  "soFolder": "/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/545s5o5h/obj/arm64-v8a",
-  "soRepublishFolder": "/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cmake/debug/obj/arm64-v8a",
+  "cxxBuildFolder": "/home/dev/Autombot-Cliente/app/.cxx/Debug/545s5o5h/arm64-v8a",
+  "soFolder": "/home/dev/Autombot-Cliente/app/build/intermediates/cxx/Debug/545s5o5h/obj/arm64-v8a",
+  "soRepublishFolder": "/home/dev/Autombot-Cliente/app/build/intermediates/cmake/debug/obj/arm64-v8a",
   "abiPlatformVersion": 26,
   "cmake": {
     "effectiveConfiguration": {
@@ -33,16 +33,16 @@
     "implicitBuildTargetSet": [],
     "cmakeSettingsConfiguration": "android-gradle-plugin-predetermined-name",
     "module": {
-      "cxxFolder": "/home/semplicio/Documentos/AutomBotClient/app/.cxx",
-      "intermediatesBaseFolder": "/home/semplicio/Documentos/AutomBotClient/app/build/intermediates",
-      "intermediatesFolder": "/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx",
+      "cxxFolder": "/home/dev/Autombot-Cliente/app/.cxx",
+      "intermediatesBaseFolder": "/home/dev/Autombot-Cliente/app/build/intermediates",
+      "intermediatesFolder": "/home/dev/Autombot-Cliente/app/build/intermediates/cxx",
       "gradleModulePathName": ":app",
-      "moduleRootFolder": "/home/semplicio/Documentos/AutomBotClient/app",
-      "moduleBuildFile": "/home/semplicio/Documentos/AutomBotClient/app/build.gradle.kts",
-      "makeFile": "/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt",
+      "moduleRootFolder": "/home/dev/Autombot-Cliente/app",
+      "moduleBuildFile": "/home/dev/Autombot-Cliente/app/build.gradle.kts",
+      "makeFile": "/home/dev/Autombot-Cliente/app/src/main/cpp/CMakeLists.txt",
       "buildSystem": "CMAKE",
-      "ndkFolder": "/home/semplicio/Android/Sdk/ndk/26.3.11579264",
-      "ndkFolderBeforeSymLinking": "/home/semplicio/Android/Sdk/ndk/26.3.11579264",
+      "ndkFolder": "/home/dev/android-sdk/ndk/26.3.11579264",
+      "ndkFolderBeforeSymLinking": "/home/dev/android-sdk/ndk/26.3.11579264",
       "ndkVersion": "26.3.11579264",
       "ndkSupportedAbiList": [
         "armeabi-v7a",
@@ -121,32 +121,31 @@
           "llvmTriple": "x86_64-none-linux-android"
         }
       ],
-      "cmakeToolchainFile": "/home/semplicio/Android/Sdk/ndk/26.3.11579264/build/cmake/android.toolchain.cmake",
+      "cmakeToolchainFile": "/home/dev/android-sdk/ndk/26.3.11579264/build/cmake/android.toolchain.cmake",
       "cmake": {
-        "cmakeExe": "/home/semplicio/Android/Sdk/cmake/3.22.1/bin/cmake",
+        "cmakeExe": "/home/dev/android-sdk/cmake/3.22.1/bin/cmake",
         "cmakeVersionFromDsl": "3.22.1"
       },
       "stlSharedObjectMap": {
         "LIBCXX_SHARED": {
-          "armeabi-v7a": "/home/semplicio/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so",
-          "arm64-v8a": "/home/semplicio/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so",
-          "x86": "/home/semplicio/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/i686-linux-android/libc++_shared.so",
-          "x86_64": "/home/semplicio/Android/Sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so"
+          "armeabi-v7a": "/home/dev/android-sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so",
+          "arm64-v8a": "/home/dev/android-sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so",
+          "x86": "/home/dev/android-sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/i686-linux-android/libc++_shared.so",
+          "x86_64": "/home/dev/android-sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so"
         },
         "LIBCXX_STATIC": {},
         "NONE": {},
         "SYSTEM": {}
       },
       "project": {
-        "rootBuildGradleFolder": "/home/semplicio/Documentos/AutomBotClient",
-        "sdkFolder": "/home/semplicio/Android/Sdk",
+        "rootBuildGradleFolder": "/home/dev/Autombot-Cliente",
+        "sdkFolder": "/home/dev/android-sdk",
         "isBuildOnlyTargetAbiEnabled": true,
-        "ideBuildTargetAbi": "arm64-v8a,armeabi-v7a,armeabi",
         "isCmakeBuildCohabitationEnabled": false,
         "isPrefabEnabled": false
       },
       "outputOptions": [],
-      "ninjaExe": "/home/semplicio/Android/Sdk/cmake/3.22.1/bin/ninja",
+      "ninjaExe": "/home/dev/android-sdk/cmake/3.22.1/bin/ninja",
       "hasBuildTimeInformation": true
     },
     "prefabClassPaths": [],
@@ -158,27 +157,27 @@
   "buildSettings": {
     "environmentVariables": []
   },
-  "prefabFolder": "/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/545s5o5h/prefab/arm64-v8a",
+  "prefabFolder": "/home/dev/Autombot-Cliente/app/.cxx/Debug/545s5o5h/prefab/arm64-v8a",
   "isActiveAbi": true,
   "fullConfigurationHash": "545s5o5h4x104j1j4p5m724z6p6v63x245m4153t6l3f6u4306c2v3nc3d2q",
   "fullConfigurationHashKey": "# Values used to calculate the hash in this folder name.\n# Should not depend on the absolute path of the project itself.\n#   - AGP: 8.13.2.\n#   - $NDK is the path to NDK 26.3.11579264.\n#   - $PROJECT is the path to the parent folder of the root Gradle build file.\n#   - $ABI is the ABI to be built with. The specific value doesn\u0027t contribute to the value of the hash.\n#   - $HASH is the hash value computed from this text.\n#   - $CMAKE is the path to CMake 3.22.1.\n#   - $NINJA is the path to Ninja.\n-H$PROJECT/app/src/main/cpp\n-DCMAKE_SYSTEM_NAME\u003dAndroid\n-DCMAKE_EXPORT_COMPILE_COMMANDS\u003dON\n-DCMAKE_SYSTEM_VERSION\u003d26\n-DANDROID_PLATFORM\u003dandroid-26\n-DANDROID_ABI\u003d$ABI\n-DCMAKE_ANDROID_ARCH_ABI\u003d$ABI\n-DANDROID_NDK\u003d$NDK\n-DCMAKE_ANDROID_NDK\u003d$NDK\n-DCMAKE_TOOLCHAIN_FILE\u003d$NDK/build/cmake/android.toolchain.cmake\n-DCMAKE_MAKE_PROGRAM\u003d$NINJA\n-DCMAKE_LIBRARY_OUTPUT_DIRECTORY\u003d$PROJECT/app/build/intermediates/cxx/Debug/$HASH/obj/$ABI\n-DCMAKE_RUNTIME_OUTPUT_DIRECTORY\u003d$PROJECT/app/build/intermediates/cxx/Debug/$HASH/obj/$ABI\n-DCMAKE_BUILD_TYPE\u003dDebug\n-B$PROJECT/app/.cxx/Debug/$HASH/$ABI\n-GNinja",
   "configurationArguments": [
-    "-H/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp",
+    "-H/home/dev/Autombot-Cliente/app/src/main/cpp",
     "-DCMAKE_SYSTEM_NAME\u003dAndroid",
     "-DCMAKE_EXPORT_COMPILE_COMMANDS\u003dON",
     "-DCMAKE_SYSTEM_VERSION\u003d26",
     "-DANDROID_PLATFORM\u003dandroid-26",
     "-DANDROID_ABI\u003darm64-v8a",
     "-DCMAKE_ANDROID_ARCH_ABI\u003darm64-v8a",
-    "-DANDROID_NDK\u003d/home/semplicio/Android/Sdk/ndk/26.3.11579264",
-    "-DCMAKE_ANDROID_NDK\u003d/home/semplicio/Android/Sdk/ndk/26.3.11579264",
-    "-DCMAKE_TOOLCHAIN_FILE\u003d/home/semplicio/Android/Sdk/ndk/26.3.11579264/build/cmake/android.toolchain.cmake",
-    "-DCMAKE_MAKE_PROGRAM\u003d/home/semplicio/Android/Sdk/cmake/3.22.1/bin/ninja",
-    "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY\u003d/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/545s5o5h/obj/arm64-v8a",
-    "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY\u003d/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/545s5o5h/obj/arm64-v8a",
+    "-DANDROID_NDK\u003d/home/dev/android-sdk/ndk/26.3.11579264",
+    "-DCMAKE_ANDROID_NDK\u003d/home/dev/android-sdk/ndk/26.3.11579264",
+    "-DCMAKE_TOOLCHAIN_FILE\u003d/home/dev/android-sdk/ndk/26.3.11579264/build/cmake/android.toolchain.cmake",
+    "-DCMAKE_MAKE_PROGRAM\u003d/home/dev/android-sdk/cmake/3.22.1/bin/ninja",
+    "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY\u003d/home/dev/Autombot-Cliente/app/build/intermediates/cxx/Debug/545s5o5h/obj/arm64-v8a",
+    "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY\u003d/home/dev/Autombot-Cliente/app/build/intermediates/cxx/Debug/545s5o5h/obj/arm64-v8a",
     "-DCMAKE_BUILD_TYPE\u003dDebug",
-    "-B/home/semplicio/Documentos/AutomBotClient/app/.cxx/Debug/545s5o5h/arm64-v8a",
+    "-B/home/dev/Autombot-Cliente/app/.cxx/Debug/545s5o5h/arm64-v8a",
     "-GNinja"
   ],
-  "intermediatesParentFolder": "/home/semplicio/Documentos/AutomBotClient/app/build/intermediates/cxx/Debug/545s5o5h"
+  "intermediatesParentFolder": "/home/dev/Autombot-Cliente/app/build/intermediates/cxx/Debug/545s5o5h"
 }

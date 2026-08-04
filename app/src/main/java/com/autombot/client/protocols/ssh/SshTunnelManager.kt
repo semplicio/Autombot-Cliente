@@ -139,7 +139,11 @@ class SshTunnelManager(context: Context) {
     private fun persistProfiles() {
         val array = JSONArray()
         _connections.value.forEach { array.put(it.config.toJson()) }
-        prefs.edit().putString("profiles", array.toString()).apply()
+        // commit() sincrono: garante que perfis SSH sobrevivem mesmo que o processo
+        // seja encerrado logo em seguida — mesma decisao que o AppLog.kt.
+        // Chamado sempre de um CoroutineScope de IO (nunca da thread de UI), entao
+        // nao ha risco de ANR.
+        prefs.edit().putString("profiles", array.toString()).commit()
     }
 
     private fun loadPersistedProfiles() {

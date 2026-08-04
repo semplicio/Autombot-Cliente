@@ -30,7 +30,6 @@
         android:icon="@mipmap/ic_launcher"
         android:label="AutomBot Connect"
         android:supportsRtl="true"
-        android:testOnly="true"
         android:theme="@style/Theme.AutomBotClient" >
         <activity
             android:name="com.autombot.client.ui.MainActivity"

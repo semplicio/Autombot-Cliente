@@ -1,1 +1,0 @@
-/home/semplicio/Documentos/AutomBotClient/app/src/main/cpp/CMakeLists.txt

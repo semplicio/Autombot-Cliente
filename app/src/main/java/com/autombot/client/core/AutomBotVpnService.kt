@@ -135,7 +135,7 @@ class AutomBotVpnService : VpnService() {
                 NativeTun2Socks.stop()
                 val fd = tunInterface?.fd
                 if (fd != null) {
-                    val restarted = NativeTun2Socks.start(fd, "127.0.0.1", socksPort)
+                    val restarted = NativeTun2Socks.start(fd, "127.0.0.1", socksPort, dns1)
                     if (restarted) activeSocksPort = socksPort
                 }
                 return
@@ -151,7 +151,7 @@ class AutomBotVpnService : VpnService() {
         activeDns2 = dns2
         activeSocksPort = socksPort
 
-        val started = NativeTun2Socks.start(tun.fd, "127.0.0.1", socksPort)
+        val started = NativeTun2Socks.start(tun.fd, "127.0.0.1", socksPort, dns1)
         if (!started) {
             AppLog.log("VPN de sistema: motor nativo falhou ao iniciar", AppLog.Level.ERROR)
         }
