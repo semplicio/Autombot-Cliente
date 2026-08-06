@@ -68,7 +68,7 @@ object NativeTun2Socks {
     //    loop.
     private fun buildConfig(socksHost: String, socksPort: Int, dns: String = "8.8.8.8"): String = """
         tunnel:
-          mtu: 1500
+          mtu: 1280
           ipv4: 198.18.0.1
         socks5:
           port: $socksPort
