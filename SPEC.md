@@ -2017,3 +2017,22 @@ as linhas) e `handleConnect()` agora loga cada tentativa — sucesso ou falha �
 
 Próximo teste deve finalmente mostrar, linha a linha, quais sites/destinos estão falhando ao conectar —
 peça que faltava pra fechar esse problema de vez.
+
+## 79. Causa raiz real (com evidência de log): IPv6 sempre tentado primeiro, sempre falha, sem suporte
+
+Log novo (já com o log de conexão TCP da Etapa 78) trouxe a evidência definitiva: pra todo destino que
+oferece IPv4 e IPv6 (a maioria dos sites grandes hoje — Google, YouTube, etc.), o celular tenta **IPv6
+primeiro** (padrão "Happy Eyeballs" do Android/navegador) — e como **nenhum protocolo do app suporta IPv6**,
+toda tentativa falha. Só DEPOIS o mesmo destino em IPv4 conecta normalmente.
+
+O problema não é só a falha em si — é a DEMORA de cada falha. A tentativa IPv6 passava pelo caminho inteiro
+de conexão do protocolo (no caso do SSH, até **15 segundos de timeout**, Etapa 57) antes de desistir e só
+então liberar o navegador pra tentar IPv4. Multiplicado por vários recursos IPv6 numa página só, isso
+explica bem o "trava"/"não navega direito" relatado repetidamente.
+
+**Corrigido**: `Socks5Server.handleConnect()` agora detecta IPv6 (endereço contém `:`) e recusa **na hora**,
+antes de tentar qualquer coisa — resposta SOCKS5 `0x08` (tipo de endereço não suportado), sem passar pelo
+protocolo. O navegador/app deve cair pro IPv4 quase instantaneamente, em vez de esperar o timeout inteiro.
+
+IPv6 de verdade (suporte completo, não só rejeição rápida) fica como possível trabalho futuro — por
+enquanto, IPv4 é o caminho funcional em todos os protocolos.
