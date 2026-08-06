@@ -1965,3 +1965,36 @@ callback `onLogcat` propagado através de `MainShell` até o `AppRoot`, apontand
 `BottomNavBar.kt`/`MoreScreen.kt` (a aba "Mais" com o item "Logcat" antigo) continuam existindo no projeto,
 mas são código morto — nunca chegam a renderizar. Não removi agora (fora do escopo do pedido), mas vale
 limpar isso em algum momento pra evitar confusão futura (inclusive minha).
+
+## 77. Causa raiz confirmada por log real: faltava a permissão WAKE_LOCK no manifesto
+
+O "Logcat" (Etapa 75/76) funcionou perfeitamente e trouxe evidência definitiva pela primeira vez. Log real
+mostrou, em toda tentativa de conexão:
+
+```
+ERROR: VPN de sistema: falha ao adquirir WakeLock (Neither user 10370 nor current process has
+android.permission.WAKE_LOCK.)
+```
+
+**O WakeLock da Etapa 73 nunca funcionou de verdade** — faltava declarar a permissão
+`android.permission.WAKE_LOCK` no `AndroidManifest.xml`. Sem ela, `PowerManager.WakeLock.acquire()` lança
+uma exceção de segurança — capturada pelo try-catch existente (só logava o erro, não travava nada), então
+passou despercebido. Ou seja: o teste do usuário na etapa anterior (confirmando que o problema persistia)
+estava, sem querer, testando exatamente o MESMO cenário de antes — sem proteção nenhuma contra o CPU entrar
+em economia de energia.
+
+Log também mostrou o momento exato de uma queda real: `Conexão SSH perdida (cliente desconectado)`
+aconteceu no MESMO SEGUNDO que `App perdendo o foco (onPause)` — não é um timeout gradual, é imediato,
+reforçando que é mesmo falta de proteção contra o sistema cortando rede na hora que a tela perde foco.
+
+**Corrigido**: `<uses-permission android:name="android.permission.WAKE_LOCK" />` adicionada ao manifesto.
+
+### Coisas boas confirmadas pelo mesmo log
+- SSH conecta rápido e limpo nos 4 passos, toda vez
+- Gateway UDP (badvpn-udpgw, Etapa 70/71) conecta com sucesso (`SSH "Alves": gateway UDP conectado`)
+- Navegação entre telas e ciclo de vida da Activity sendo registrados exatamente como esperado
+
+### Observação menor, não corrigida agora
+`"VPN de sistema: desligando"` aparece em pares (às vezes até 4x seguidas) pra uma única ação de desconectar
+— não parece causar dano real (operação idempotente), mas vale investigar a causa da duplicação em algum
+momento futuro.
