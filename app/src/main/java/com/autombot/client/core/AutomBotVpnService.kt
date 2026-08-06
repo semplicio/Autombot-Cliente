@@ -75,6 +75,9 @@ class AutomBotVpnService : VpnService() {
         // conseguir proteger seus sockets, mesmo sem referencia direta ao Service.
         @Volatile private var activeInstance: AutomBotVpnService? = null
 
+        val instance: AutomBotVpnService?
+            get() = activeInstance
+
         /**
          * Retorna true se protegeu (ou se nao ha VPN ativa — nesse caso nao ha nada a
          * proteger). CORRIGIDO: antes, quem chamava essas funcoes descartava o
@@ -212,6 +215,8 @@ class AutomBotVpnService : VpnService() {
             .addDnsServer(dns1)
             .addDnsServer(dns2)
             .addRoute("0.0.0.0", 0)
+            .addAddress("fd00:1:fd00:1::1", 128)
+            .addRoute("::", 0)
             .setMtu(1280)
 
         // CORRECAO: alem do protect() por socket (que deveria bastar sozinho, mas por
@@ -374,4 +379,6 @@ class AutomBotVpnService : VpnService() {
         stopVpn()
         super.onRevoke()
     }
+
+    fun protectFd(fd: Int): Boolean = protect(fd)
 }
