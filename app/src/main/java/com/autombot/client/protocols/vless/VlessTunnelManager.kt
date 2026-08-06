@@ -99,7 +99,8 @@ class VlessTunnelManager(context: Context) {
                     onUdpAssociateRequest = { destHost, destPort, onIncoming ->
                         openVlessUdpSession(config, connectionName, destHost, destPort, onIncoming)
                     },
-                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) }
+                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) },
+                    logPrefix = "VLESS \"$connectionName\""
                 )
                 socksServer.start()
                 activeSocksServers[connectionName] = socksServer
