@@ -252,7 +252,8 @@ class SshTunnelManager(context: Context) {
                 },
                 protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) },
                 dns1 = if (config.dnsForwardingEnabled) config.dnsPrimary else "8.8.8.8",
-                dns2 = if (config.dnsForwardingEnabled) config.dnsSecondary else "8.8.4.4"
+                dns2 = if (config.dnsForwardingEnabled) config.dnsSecondary else "8.8.4.4",
+                logPrefix = "SSH \"$connectionName\""
             )
             socksServer.start()
             activeSocksServers[connectionName] = socksServer
