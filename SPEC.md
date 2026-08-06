@@ -1871,3 +1871,28 @@ Usuário reportou dois problemas novos:
    bateria PADRÃO do Android (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, disparado no `onCreate` se
    ainda não isento) — resolve a camada padrão, mas o Motorola pode ter uma tela PRÓPRIA e separada de
    gerenciamento de bateria que precisa de ajuste manual adicional, fora do alcance do código sozinho.
+
+## 73. WakeLock — explicação real do "trava ao sair do app" (WireGuard funciona, os outros não)
+
+Usuário fez uma observação certeira que derrubou minha teoria da Etapa 72: **o WireGuard continua
+funcionando perfeitamente em segundo plano — só os outros 6 protocolos travam**. Se fosse o gerenciador de
+bateria do fabricante matando o processo, mataria todos igual (não discrimina por protocolo dentro do mesmo
+app) — isso aponta pra uma diferença real no nosso próprio código, não no sistema.
+
+Causa encontrada: o WireGuard roda por uma biblioteca própria e madura (`GoBackend$VpnService`, serviço
+totalmente separado do nosso, ver manifesto), que quase certamente já lida com isso internamente. O nosso
+`AutomBotVpnService` (usado pelos outros 6 protocolos) **nunca segurava um `WakeLock`** — confirmado, zero
+ocorrências no código. Sem isso, a CPU pode entrar em modo de economia assim que a tela apaga ou o app sai
+de vista, mesmo com o serviço em primeiro plano ativo, travando a entrada/saída de dados dos nossos
+sockets.
+
+**Corrigido**: `WakeLock` parcial (`PARTIAL_WAKE_LOCK` — só mantém a CPU acordada, não a tela) adquirido
+junto com o início do serviço em primeiro plano, liberado ao desconectar (e coberto por `onDestroy()` como
+rede de segurança).
+
+### Bônus: divergência de MTU de novo
+Ao revisar esse trecho, notei que o MTU real da TUN tinha sido alterado pra **1280** (de 1500, provavelmente
+um ajuste do usuário ou do Agent do Studio, decisão razoável — 1280 é o mínimo do IPv6 e uma escolha comum
+pra evitar fragmentação) — mas o motor nativo (`NativeTun2Socks.kt`) continuava em 1500, sem ninguém
+atualizar o outro lado. Mesma categoria de bug da Etapa 69, reintroduzida. Sincronizado: motor nativo agora
+também em 1280.
