@@ -1849,3 +1849,25 @@ JVM/threads, não funciona (nem devia ser usado) dentro de uma função suspensa
 Corrigido: `openUdpOverGateway` voltou a ser `suspend fun`, e a proteção contra criação duplicada agora usa
 `Mutex` (de `kotlinx.coroutines.sync`, o jeito certo de fazer exclusão mútua em código suspenso) em vez de
 `@Synchronized`.
+
+## 72. Bloqueio de orientação + pedido de isenção de otimização de bateria
+
+Usuário reportou dois problemas novos:
+
+1. **Rotação da tela desconecta tudo e limpa o tráfego/ping** — a Activity é destruída e recriada por
+   padrão em qualquer rotação, e como o `screen` de navegação (e por extensão, os *TunnelManager,
+   instanciados no `onCreate()`) usa estado em memória comum, isso perde as conexões ativas. Corrigido no
+   `AndroidManifest.xml`: `android:screenOrientation="portrait"` (trava a orientação, exatamente o pedido)
+   + `android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"` como proteção
+   extra (mesmo que a orientação mude no futuro por algum motivo, a Activity não é mais recriada por causa
+   dessas mudanças específicas — ela só recebe um callback, sem perder estado).
+
+2. **Conexão trava assim que o usuário sai do app** (funciona enquanto o app está em primeiro plano,
+   trava ao trocar pra outro app/navegador) — investigado: nada no nosso próprio código explica isso
+   (sem `onPause`/`onStop` desconectando nada), e a declaração do serviço em primeiro plano no manifesto já
+   está correta (`foregroundServiceType="specialUse"` + a property exigida pelo Android 14+). Explicação
+   mais provável: gerenciador de bateria PRÓPRIO do fabricante (comum em Motorola) matando o processo em
+   segundo plano mesmo com tudo declarado certo. Adicionado pedido automático de isenção da otimização de
+   bateria PADRÃO do Android (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, disparado no `onCreate` se
+   ainda não isento) — resolve a camada padrão, mas o Motorola pode ter uma tela PRÓPRIA e separada de
+   gerenciamento de bateria que precisa de ajuste manual adicional, fora do alcance do código sozinho.
