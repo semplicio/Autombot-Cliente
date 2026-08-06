@@ -1,6 +1,7 @@
 package com.autombot.client.protocols.ssh
 
 import android.util.Log
+import com.autombot.client.util.AppLog
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -26,7 +27,13 @@ class Socks5Server(
     private val onUdpAssociateRequest: UdpAssociateOpener? = null,
     private val protectDatagramSocket: ((DatagramSocket) -> Boolean)? = null,
     private val dns1: String = "8.8.8.8",
-    private val dns2: String = "8.8.4.4"
+    private val dns2: String = "8.8.4.4",
+    // CORRECAO: handleConnect() nao registrava NADA — nem tentativa, nem sucesso,
+    // nem falha — de cada conexao TCP individual (exatamente o que o navegador usa
+    // pra abrir cada site). Por isso, quando a navegacao falhava, nao sobrava
+    // rastro nenhum no Logcat pra saber o motivo. logPrefix identifica de qual
+    // protocolo/conexao essas linhas novas vieram (ex: "SSH \"bispo\"").
+    private val logPrefix: String = "SOCKS5"
 ) {
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -141,11 +148,13 @@ class Socks5Server(
     private suspend fun handleConnect(client: Socket, input: InputStream, output: OutputStream, destHost: String, destPort: Int) {
         val remote = connectSemaphore.withPermit { onConnectRequest(destHost, destPort) }
         if (remote == null) {
+            AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
             output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
             client.close()
             return
         }
+        AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
 
         output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
         output.flush()
