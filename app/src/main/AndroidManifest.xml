@@ -9,6 +9,13 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" xmlns:tools="http://schemas.android.com/tools" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- CORRECAO: faltava essa permissao pro WakeLock (Etapa 73) funcionar de
+         verdade — confirmado por log real do usuario, o pedido de WakeLock estava
+         sendo recusado com SecurityException toda vez ("Neither user ... nor
+         current process has android.permission.WAKE_LOCK"), silenciosamente (so
+         logava o erro, nao travava nada) — a correcao da Etapa 73 nunca chegou a
+         ter efeito nenhum ate agora. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Pede pro usuario isentar o app da otimizacao de bateria padrao do Android
          (Doze) — VPNs precisam disso pra continuar rodando em segundo plano.
          Fabricantes como Motorola costumam ter uma camada PROPRIA de gerenciamento
