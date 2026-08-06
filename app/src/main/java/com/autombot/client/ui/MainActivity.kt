@@ -102,6 +102,8 @@ class MainActivity : ComponentActivity() {
         trojanManager = com.autombot.client.protocols.trojan.TrojanTunnelManager(applicationContext)
         openVpnManager = com.autombot.client.protocols.openvpn.OpenVpnTunnelManager(applicationContext)
 
+        requestBatteryOptimizationExemption()
+
         setContent {
             AutomBotClientTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -131,6 +133,38 @@ class MainActivity : ComponentActivity() {
             vpnPermissionLauncher.launch(intent)
         } else {
             onGranted()
+        }
+    }
+
+    /**
+     * CORRECAO: usuario relatou que a conexao funciona normalmente enquanto o app
+     * esta em primeiro plano (tela ligada, olhando pra ele), mas trava assim que
+     * ele sai (troca pra outro app/navegador). Nao achamos nada no nosso proprio
+     * codigo (nenhum onPause/onStop desconectando nada), e a declaracao do servico
+     * em primeiro plano no manifesto ja esta correta — sobra a explicacao mais
+     * provavel: o gerenciador de bateria PROPRIO do fabricante (comum em
+     * Motorola e varios outros) matando o processo em segundo plano, MESMO com o
+     * servico em primeiro plano declarado certinho. Isso pede pro usuario isentar
+     * o app da camada PADRAO do Android (Doze) — normalmente resolve isso na
+     * maioria dos apps, mas alguns fabricantes (Motorola incluso) tem uma tela
+     * PROPRIA e SEPARADA de gerenciamento de bateria que pode precisar de ajuste
+     * manual adicional, que esse codigo nao alcança sozinho.
+     */
+    private fun requestBatteryOptimizationExemption() {
+        val powerManager = getSystemService(android.os.PowerManager::class.java)
+        if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
+        try {
+            val intent = android.content.Intent(
+                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                android.net.Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+        } catch (e: Exception) {
+            com.autombot.client.util.AppLog.log(
+                "Não consegui abrir a tela de isenção de otimização de bateria automaticamente — " +
+                    "pode precisar ajustar manualmente nas configurações do aparelho.",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
         }
     }
 
