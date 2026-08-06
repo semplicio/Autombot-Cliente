@@ -102,7 +102,8 @@ class ShadowsocksTunnelManager(context: Context) {
                     onUdpAssociateRequest = { destHost, destPort, onIncoming ->
                         openShadowsocksUdpSession(config, connectionName, destHost, destPort, onIncoming)
                     },
-                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) }
+                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) },
+                    logPrefix = "Shadowsocks \"$connectionName\""
                 )
                 socksServer.start()
                 activeSocksServers[connectionName] = socksServer
