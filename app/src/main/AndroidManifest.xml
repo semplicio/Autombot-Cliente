@@ -9,6 +9,13 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" xmlns:tools="http://schemas.android.com/tools" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Pede pro usuario isentar o app da otimizacao de bateria padrao do Android
+         (Doze) — VPNs precisam disso pra continuar rodando em segundo plano.
+         Fabricantes como Motorola costumam ter uma camada PROPRIA de gerenciamento
+         de bateria alem dessa, que precisa de ajuste manual separado nas
+         configuracoes do fabricante — essa permissao so cobre a camada padrao do
+         Android. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:allowBackup="false"
@@ -21,6 +28,8 @@
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:theme="@style/Theme.AutomBotClient">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
