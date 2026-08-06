@@ -26,6 +26,7 @@ fun SideMenuContent(
     onDevices: () -> Unit,
     onSettings: () -> Unit,
     onSupport: () -> Unit,
+    onLogcat: () -> Unit,
     onLogout: () -> Unit
 ) {
     ModalDrawerSheet(drawerContainerColor = C.Surface) {
@@ -51,6 +52,7 @@ fun SideMenuContent(
             if (showPlan) DrawerItem("Planos", onPlan)
             DrawerItem("Dispositivos", onDevices)
             DrawerItem("Configurações", onSettings)
+            DrawerItem("Logcat", onLogcat)
             DrawerItem("Suporte", onSupport)
 
             Spacer(Modifier.weight(1f))
