@@ -1942,3 +1942,26 @@ agora só tínhamos eventos de conexão/protocolo, e (2) o nome "Logcat" que o u
 - Renomeado "Logs" → "Logcat" no menu ("Mais") e no título da tela.
 - Envio/recebimento de dados: já coberto pelos logs de conexão/erro existentes em cada protocolo — não
   adicionado log por pacote (isso inundaria o registro sem trazer valor real).
+
+## 76. Correção real: "Logcat" estava num menu morto (BottomNavBar nunca é desenhado)
+
+Usuário mandou print mostrando a navegação real do app (menu lateral, aberto pelo ícone de hambúrguer) —
+completamente diferente do que eu tinha assumido. Cheguei a dizer, incorretamente, que os textos do print
+("Dispositivos", "Suporte", "Modo manual") não existiam no projeto — **estava errado**: uma busca real
+confirmou que existem sim (`DevicesScreen.kt`, `SupportScreen.kt`, `SideMenuContent.kt` — literalmente a
+"Tela 25" do mockup original de 25 telas que o projeto segue desde o início).
+
+**Causa raiz de verdade**: `BottomNavBar` (onde eu tinha colocado "Logcat", dentro de "Mais") **nunca é
+desenhado em lugar nenhum do `MainActivity.kt` atual** — confirmei com busca direta, zero ocorrências de
+`BottomNavBar(`. A navegação real e única do app é o `ModalNavigationDrawer` + `SideMenuContent` (menu
+lateral). Ou seja, a etapa anterior (75) tecnicamente "funcionou", só que colocou o item num lugar que o
+usuário nunca teria como alcançar.
+
+**Corrigido**: adicionado item "Logcat" direto no menu lateral de verdade (`SideMenuContent.kt`), com o
+callback `onLogcat` propagado através de `MainShell` até o `AppRoot`, apontando pro mesmo
+`Screen.Logs(origin = Screen.Shell)` de sempre.
+
+### Nota pra próxima sessão
+`BottomNavBar.kt`/`MoreScreen.kt` (a aba "Mais" com o item "Logcat" antigo) continuam existindo no projeto,
+mas são código morto — nunca chegam a renderizar. Não removi agora (fora do escopo do pedido), mas vale
+limpar isso em algum momento pra evitar confusão futura (inclusive minha).
