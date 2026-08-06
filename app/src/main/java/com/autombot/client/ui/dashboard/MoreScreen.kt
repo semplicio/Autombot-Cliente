@@ -37,7 +37,7 @@ fun MoreScreen(
         Spacer(Modifier.height(16.dp))
 
         MoreRow("Configurações", onOpenSettings)
-        MoreRow("Logs", onOpenLogs)
+        MoreRow("Logcat", onOpenLogs)
         MoreRow("Estatísticas", onOpenStatistics)
         MoreRow("Meus Dispositivos", onOpenDevices)
         MoreRow("Suporte", onOpenSupport)
