@@ -49,7 +49,7 @@ fun LogsScreen(filterName: String? = null, onBack: () -> Unit) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Voltar", tint = C.Text)
             }
             Text(
-                if (filterName != null) "Logs — $filterName" else "Logs",
+                if (filterName != null) "Logcat — $filterName" else "Logcat",
                 color = C.Text,
                 fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold,
