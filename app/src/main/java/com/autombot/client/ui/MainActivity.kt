@@ -94,6 +94,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         com.autombot.client.util.AppLog.init(applicationContext)
+        com.autombot.client.util.AppLog.log("App iniciado (onCreate) — reconstruindo a tela e os gerenciadores de conexão", com.autombot.client.util.AppLog.Level.INFO)
         wireGuardManager = WireGuardManager(applicationContext)
         sshManager = SshTunnelManager(applicationContext)
         vlessManager = com.autombot.client.protocols.vless.VlessTunnelManager(applicationContext)
@@ -124,6 +125,38 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // CORRECAO: usuario pediu uma ferramenta tipo "Logcat" dentro do proprio app,
+    // que registre automaticamente o comportamento do app inteiro (abertura,
+    // fechamento, indo e voltando de segundo plano, navegacao entre telas) — nao so
+    // eventos de conexao como ja tinhamos. Esses 5 metodos cobrem o ciclo de vida
+    // completo da Activity; junto com o LaunchedEffect(screen) dentro do AppRoot
+    // (loga toda troca de tela), da pra reconstruir exatamente o que o usuario fez
+    // e quando, olhando so o Logcat depois.
+    override fun onStart() {
+        super.onStart()
+        com.autombot.client.util.AppLog.log("App em primeiro plano (onStart)", com.autombot.client.util.AppLog.Level.INFO)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        com.autombot.client.util.AppLog.log("App interativo (onResume) — tela visível e respondendo a toques", com.autombot.client.util.AppLog.Level.INFO)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        com.autombot.client.util.AppLog.log("App perdendo o foco (onPause)", com.autombot.client.util.AppLog.Level.INFO)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        com.autombot.client.util.AppLog.log("App em segundo plano (onStop) — tela não visível, mas o processo (e a VPN, se ativa) continua rodando", com.autombot.client.util.AppLog.Level.INFO)
+    }
+
+    override fun onDestroy() {
+        com.autombot.client.util.AppLog.log("App encerrando (onDestroy) — essa instância da tela está sendo destruída", com.autombot.client.util.AppLog.Level.INFO)
+        super.onDestroy()
     }
 
     private fun requestVpnPermission(onGranted: () -> Unit) {
@@ -262,6 +295,16 @@ private fun AppRoot(
     val appPrefs = remember { context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE) }
 
     var screen by remember { mutableStateOf<Screen>(Screen.Splash) }
+
+    // CORRECAO: parte do pedido do "Logcat" — registra toda troca de tela
+    // automaticamente, sem precisar instrumentar cada onClick manualmente. Roda de
+    // novo toda vez que "screen" muda de valor (troca de tela de verdade).
+    LaunchedEffect(screen) {
+        com.autombot.client.util.AppLog.log(
+            "Navegação: tela agora é ${screen::class.simpleName}",
+            com.autombot.client.util.AppLog.Level.INFO
+        )
+    }
     var trialSecondsRemaining by remember { mutableStateOf<Long?>(null) }
     var isManagedMode by remember { mutableStateOf(appPrefs.getBoolean("managed_mode", false)) }
     val manualConnections = remember { mutableStateListOf<ManualConnectionConfig>() }
