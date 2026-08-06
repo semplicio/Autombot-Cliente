@@ -1896,3 +1896,29 @@ um ajuste do usuário ou do Agent do Studio, decisão razoável — 1280 é o m�
 pra evitar fragmentação) — mas o motor nativo (`NativeTun2Socks.kt`) continuava em 1500, sem ninguém
 atualizar o outro lado. Mesma categoria de bug da Etapa 69, reintroduzida. Sincronizado: motor nativo agora
 também em 1280.
+
+## 74. onTaskRemoved() — sobreviver à limpeza dos apps recentes (parcial, ver ressalva)
+
+Usuário relatou: conecta a VPN, fecha o app sem desconectar (limpa a lista de apps recentes), e ao reabrir,
+o app volta ao estado original — como se tivesse reiniciado do zero, em vez de continuar rodando em segundo
+plano.
+
+**Causa confirmada**: `AutomBotVpnService` não sobrescrevia `onTaskRemoved()`. Vários fabricantes (Motorola
+incluso) tratam "limpar apps recentes" como sinal pra matar o processo inteiro, mesmo com um serviço em
+primeiro plano ativo, a não ser que o serviço sinalize explicitamente "não me mate por isso" através desse
+método. Corrigido: `onTaskRemoved()` agora só loga e não chama `stopVpn()`/`stopSelf()` — deixa o serviço
+(e a conexão de rede real por trás dele) continuar rodando.
+
+### Ressalva importante — problema arquitetural mais profundo, ainda não resolvido
+Mesmo com essa correção, **a INTERFACE do app pode continuar mostrando "desconectado" ao reabrir**, mesmo
+que a conexão de rede real tenha sobrevivido por baixo dos panos. Motivo: os `*TunnelManager` (SSH, VLESS,
+etc — quem de fato guarda as conexões ativas) são instanciados dentro do `MainActivity.onCreate()`, não em
+escopo de aplicativo. Se a Activity for destruída e recriada (o que acontece ao limpar os apps recentes,
+mesmo que o PROCESSO sobreviva graças à correção acima), o `onCreate()` roda de novo e cria instâncias
+NOVAS e vazias desses gerenciadores — a UI passa a observar esses objetos novos, sem saber nada sobre as
+conexões antigas que (se o processo sobreviveu) podem ainda estar rodando de verdade em segundo plano,
+"órfãs" da UI.
+
+Resolver isso de verdade exigiria uma mudança de arquitetura maior: tornar os `*TunnelManager` singletons
+de escopo de aplicativo (não mais recriados a cada `onCreate()` da Activity) — trabalho ainda não iniciado,
+fica como próximo passo se o teste confirmar que esse é o comportamento restante.
