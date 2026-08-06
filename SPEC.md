@@ -1922,3 +1922,23 @@ conexões antigas que (se o processo sobreviveu) podem ainda estar rodando de ve
 Resolver isso de verdade exigiria uma mudança de arquitetura maior: tornar os `*TunnelManager` singletons
 de escopo de aplicativo (não mais recriados a cada `onCreate()` da Activity) — trabalho ainda não iniciado,
 fica como próximo passo se o teste confirmar que esse é o comportamento restante.
+
+## 75. "Logcat" próprio do app — registro abrangente de ciclo de vida + navegação
+
+Usuário esclareceu o pedido do "logcat próprio do app": não é sobre capturar o tráfego de rede de outros
+apps (já discutido e descartado — limitação real do Android, só uma VPN ativa por vez), é sobre um registro
+**abrangente do comportamento do próprio AutomBot Connect** — abertura, fechamento, indo/voltando de segundo
+plano, navegação entre telas — sempre ativo desde que o app abre, com botão de copiar.
+
+Boa parte da infraestrutura já existia (`AppLog` + `LogsScreen.kt`, com botão de copiar e visualização sem
+filtro quando acessada por "Mais → Logs") — faltava (1) captar eventos de ciclo de vida/navegação, que até
+agora só tínhamos eventos de conexão/protocolo, e (2) o nome "Logcat" que o usuário pediu especificamente.
+
+### Implementado
+- `MainActivity.kt`: adicionados `onStart()`/`onResume()`/`onPause()`/`onStop()`/`onDestroy()` (só existia
+  `onCreate()` antes), cada um logando um evento claro — reconstrói o ciclo de vida completo da Activity.
+- `AppRoot`: novo `LaunchedEffect(screen)` registra toda troca de tela automaticamente (nome da tela), sem
+  precisar instrumentar cada botão manualmente.
+- Renomeado "Logs" → "Logcat" no menu ("Mais") e no título da tela.
+- Envio/recebimento de dados: já coberto pelos logs de conexão/erro existentes em cada protocolo — não
+  adicionado log por pacote (isso inundaria o registro sem trazer valor real).
