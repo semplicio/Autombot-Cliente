@@ -16,6 +16,13 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration.Companion.milliseconds
 
+typealias UdpAssociateOpener = suspend (destHost: String, destPort: Int, onIncoming: (ByteArray) -> Unit) -> UdpBackendSession?
+
+interface UdpBackendSession {
+    suspend fun send(payload: ByteArray)
+    fun close()
+}
+
 /**
  * Servidor SOCKS5 mínimo, local (127.0.0.1), sem autenticação.
  * Implementação própria (RFC 1928).
@@ -293,13 +300,13 @@ class Socks5Server(
         }
     }
 
-    private suspend fun resolveDnsDirectly(dnsServerHost: String, dnsQuery: ByteArray): ByteArray? {
-        val protect = protectDatagramSocket ?: return null
-        return try {
+    private suspend fun resolveDnsDirectly(dnsServerHost: String, dnsQuery: ByteArray): ByteArray? = withContext(Dispatchers.IO) {
+        val protect = protectDatagramSocket ?: return@withContext null
+        return@withContext try {
             val socket = DatagramSocket()
             if (!protect(socket)) {
                 socket.close()
-                return null
+                return@withContext null
             }
             socket.soTimeout = 3000
             val dstAddr = InetAddress.getByName(dnsServerHost)
@@ -416,7 +423,7 @@ class Socks5Server(
         try {
             joinAll(job1, job2)
         } catch (e: CancellationException) {
-            // Normal
+            // Cancelamento gracioso
         } finally {
             runCatching { client.close() }
             runCatching { clientIn.close() }
@@ -426,19 +433,18 @@ class Socks5Server(
         }
     }
 
-    private suspend fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong) {
+    private fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong) {
         val buffer = ByteArray(16384)
         try {
             while (isActive) {
-                val n = withContext(Dispatchers.IO) { from.read(buffer) }
+                val n = from.read(buffer)
                 if (n <= 0) break
-                withContext(Dispatchers.IO) {
-                    to.write(buffer, 0, n)
-                    to.flush() // CORRIGIDO: Força o envio imediato do pacote pela rede/SSH!
-                }
+                to.write(buffer, 0, n)
+                to.flush()
                 counter.addAndGet(n.toLong())
             }
         } catch (e: Exception) {
+            // Socket foi fechado ou interrompido
         }
     }
 
