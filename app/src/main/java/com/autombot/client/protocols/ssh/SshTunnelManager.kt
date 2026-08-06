@@ -7,7 +7,9 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
@@ -85,6 +87,7 @@ class SshTunnelManager(context: Context) {
     private val activeSocksServers = mutableMapOf<String, Socks5Server>()
     private val activeSlowDnsClients = mutableMapOf<String, com.autombot.client.protocols.slowdns.SlowDnsClient>()
     private val activeUdpGwClients = mutableMapOf<String, UdpGwClient>()
+    private val udpGwCreationMutex = Mutex()
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     // CORRECAO: limite de 24 canais simultaneos (padrao seguro p/ Dropbear e OpenSSH).
@@ -354,9 +357,13 @@ class SshTunnelManager(context: Context) {
      * (alcançada por um canal direct-tcpip do SSH) atende TODOS os destinos UDP
      * dessa conexão SSH, multiplexados por conid — não é "uma conexão nova por
      * destino" como os outros protocolos.
+     *
+     * CORRECAO: essa função precisa ser suspend (chama openDirectChannel, que
+     * também é suspend) — por isso usa Mutex (de coroutines) pra proteger a
+     * criação do cliente compartilhado, não @Synchronized (que é da JVM/threads e
+     * não pode ser usado numa suspend fun — travava a compilação).
      */
-    @Synchronized
-    private fun openUdpOverGateway(
+    private suspend fun openUdpOverGateway(
         client: SSHClient,
         connectionName: String,
         gwHost: String,
@@ -365,21 +372,21 @@ class SshTunnelManager(context: Context) {
         destPort: Int,
         onIncoming: (ByteArray) -> Unit
     ): UdpBackendSession? {
-        val existing = activeUdpGwClients[connectionName]
-        if (existing != null) {
-            return existing.openSession(destHost, destPort, onIncoming)
-        }
-
-        val streams = openDirectChannel(client, gwHost, gwPort)
-        if (streams == null) {
-            AppLog.log("SSH \"$connectionName\": falha ao conectar no gateway UDP ($gwHost:$gwPort)", AppLog.Level.ERROR)
-            return null
-        }
-        val (channelIn, channelOut) = streams
-        val gwClient = UdpGwClient(channelIn, channelOut, managerScope)
-        gwClient.start()
-        activeUdpGwClients[connectionName] = gwClient
-        AppLog.log("SSH \"$connectionName\": gateway UDP conectado ($gwHost:$gwPort)", AppLog.Level.INFO)
+        val gwClient = udpGwCreationMutex.withLock {
+            activeUdpGwClients[connectionName] ?: run {
+                val streams = openDirectChannel(client, gwHost, gwPort)
+                if (streams == null) {
+                    AppLog.log("SSH \"$connectionName\": falha ao conectar no gateway UDP ($gwHost:$gwPort)", AppLog.Level.ERROR)
+                    return@run null
+                }
+                val (channelIn, channelOut) = streams
+                val newClient = UdpGwClient(channelIn, channelOut, managerScope)
+                newClient.start()
+                activeUdpGwClients[connectionName] = newClient
+                AppLog.log("SSH \"$connectionName\": gateway UDP conectado ($gwHost:$gwPort)", AppLog.Level.INFO)
+                newClient
+            }
+        } ?: return null
 
         return gwClient.openSession(destHost, destPort, onIncoming)
     }
