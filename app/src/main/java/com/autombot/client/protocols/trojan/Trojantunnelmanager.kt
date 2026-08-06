@@ -102,7 +102,8 @@ class TrojanTunnelManager(context: Context) {
                     onUdpAssociateRequest = { destHost, destPort, onIncoming ->
                         openTrojanUdpSession(config, connectionName, destHost, destPort, onIncoming)
                     },
-                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) }
+                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) },
+                    logPrefix = "Trojan \"$connectionName\""
                 )
                 socksServer.start()
                 activeSocksServers[connectionName] = socksServer
