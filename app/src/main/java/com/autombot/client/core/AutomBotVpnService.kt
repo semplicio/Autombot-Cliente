@@ -133,6 +133,34 @@ class AutomBotVpnService : VpnService() {
         return START_STICKY
     }
 
+    /**
+     * CORRECAO: usuario relatou que, ao "limpar os apps recentes" com a VPN ativa,
+     * o app volta ao estado original (sem conexão) na próxima vez que abre — como
+     * se tivesse sido reiniciado do zero, em vez de continuar rodando em segundo
+     * plano e só reabrir a tela por cima do que já estava rodando.
+     *
+     * Isso é um comportamento real e bem conhecido do Android: por padrão, alguns
+     * fabricantes (Motorola incluso) tratam "limpar apps recentes" como um sinal
+     * forte pra matar o PROCESSO INTEIRO — mesmo com um serviço em primeiro plano
+     * rodando — a não ser que o serviço diga explicitamente "não me mate por
+     * isso", sobrescrevendo esse método. Se o processo morre de verdade (não só a
+     * Activity), o Service some junto, e reabrir o app cria tudo do zero — bate
+     * exatamente com o relatado.
+     *
+     * Não sobrescrever esse método (deixar vazio, sem chamar stopSelf()) já é o
+     * suficiente pra sinalizar a intenção de continuar rodando — combinado com o
+     * pedido de isenção de otimização de bateria (Etapa 72) e o START_STICKY já
+     * usado acima (se o sistema matar o processo mesmo assim sob pressão de
+     * memória, o Android tenta reiniciar o serviço sozinho depois).
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        AppLog.log("VPN de sistema: app removido dos recentes — mantendo a conexão ativa em segundo plano", AppLog.Level.INFO)
+        super.onTaskRemoved(rootIntent)
+        // Deliberadamente NAO chama stopVpn()/stopSelf() aqui — e exatamente esse
+        // comportamento padrao (que alguns fabricantes forcam por conta propria)
+        // que estava causando o problema relatado.
+    }
+
     private fun startVpn(socksPort: Int, dns1: String, dns2: String) {
         if (tunInterface != null) {
             if (activeDns1 != dns1 || activeDns2 != dns2) {
