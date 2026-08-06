@@ -1798,3 +1798,43 @@ consistente.
 inconsistência real que encontrei por revisão de código, não por evidência de log. Pode ajudar, pode ser
 irrelevante. Preciso de um log fresco do teste mais recente (pós Etapa 67+68) pra continuar investigando
 com evidência de verdade, em vez de mais suposição.
+## 70. BadVPN/UDPGW implementado corretamente — substitui protocolo inventado
+
+Manual de conexões do AutomBot Core (finalizado pelo usuário) revelou que o backend já expõe um serviço
+BadVPN/UDPGW dedicado especificamente pra resolver o problema de UDP em túneis TCP — a mesma categoria de
+problema que vínhamos tentando resolver com o "jeitinho de porta 443" do SSH.
+
+Ao investigar, descobri que **já existia uma tentativa de implementação** (`openUdpOverGateway`,
+provavelmente do Agent do Studio) — mas ela citava um arquivo `PROTOCOL` que **não existe de verdade** no
+repositório oficial do badvpn, e usava um formato de pacote (`[tipo][tamanho_host][host][porta]`,
+baseado em nome de host) que não bate com o protocolo real (baseado em ID de conexão numérico + endereço
+IP binário).
+
+### Verificação contra a fonte real
+Em vez de arriscar outro palpite, buscamos o código-fonte oficial DIRETO (`protocol/udpgw_proto.h` e
+`protocol/packetproto.h` do github.com/ambrop72/badvpn, BSD-3-clause) via `curl`/`git clone` no ambiente
+na nuvem do usuário. Confirmou:
+- Framing externo (PacketProto): 2 bytes de tamanho **little-endian** + payload
+- Payload: 1 byte flags + 2 bytes conid (LE) + (só na primeira mensagem de cada conid) endereço IPv4 (4
+  bytes IP + 2 bytes porta, **ambos little-endian** — pegadinha real: é o oposto da convenção usual de
+  rede/sockaddr, que é big-endian. Confirmar isso evitou um bug real.
+- UMA conexão persistente multiplexa vários destinos diferentes por conid — não é "uma conexão nova por
+  destino" como VLESS/VMess.
+
+### Implementado
+- `UdpGwClient.kt` (novo) — cliente completo do protocolo, com keepalive periódico, alocação de conid,
+  multiplexação de sessões.
+- `SshTunnelManager.kt`: `openUdpOverGateway` reescrita do zero pra usar o `UdpGwClient` compartilhado (um
+  por conexão SSH, reaproveitado entre destinos diferentes) em vez do protocolo inventado anterior.
+- UI (`SshConfigScreen.kt`) já existia (campos "Gateway UDP host/porta") — nenhuma mudança necessária ali.
+
+### Lição sobre o SPEC.md
+Durante essa correção, achei que minha própria cópia local do `SPEC.md` (usada internamente pra ir
+documentando) tinha perdido o histórico acumulado (só 33 linhas) — a cópia real e completa estava no
+projeto que o usuário mandou (1799 linhas, até a Etapa 69). Restaurei a partir dali antes de continuar.
+Isso é um lembrete: o `SPEC.md` que vale sempre é o que está no projeto do usuário — minha cópia de
+trabalho é só um cache, que pode ficar desatualizado ou se perder ao longo de uma sessão tão longa quanto
+essa.
+
+Ainda não testado contra um `badvpn-udpgw` de verdade rodando no VPS — mas agora com base em especificação
+oficial confirmada, não em suposição.
