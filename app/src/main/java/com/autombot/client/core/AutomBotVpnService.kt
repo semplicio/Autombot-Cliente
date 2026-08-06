@@ -41,6 +41,17 @@ class AutomBotVpnService : VpnService() {
     private var activeDns2: String? = null
     private var openVpnClient: OpenVpnManagementClient? = null
     private var openVpnConnectionName: String? = null
+    // CORRECAO: usuario notou (evidencia real, nao suposicao) que o WireGuard
+    // continua funcionando em segundo plano perfeitamente, enquanto os outros 6
+    // protocolos (que passam por ESSE servico, escrito por nos) travam assim que o
+    // app sai de vista. Isso descarta a teoria de gerenciador de bateria do
+    // fabricante (mataria todos igual, nao so alguns) — aponta pra diferenca real
+    // no nosso proprio codigo. O WireGuard usa uma biblioteca propria, madura,
+    // que quase certamente ja segura isso por dentro — o nosso servico NUNCA
+    // segurava um WakeLock, o que pode deixar a CPU entrar em modo de economia
+    // (mesmo com o servico em primeiro plano) assim que a tela apaga/o app sai de
+    // vista, travando a entrada/saida de dados dos nossos sockets.
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
 
     companion object {
         const val ACTION_START = "com.autombot.client.core.START_VPN"
@@ -209,6 +220,23 @@ class AutomBotVpnService : VpnService() {
             AppLog.log("VPN de sistema: falha ao mostrar notificação (${e.message}) — motor continua normalmente", AppLog.Level.ERROR)
         }
 
+        // CORRECAO: sem isso, a CPU pode entrar em modo de economia assim que a
+        // tela apaga ou o app sai de vista — mesmo com o servico em primeiro plano
+        // — travando a entrada/saida de dados dos nossos sockets. WakeLock parcial
+        // (so mantem a CPU acordada, NAO a tela) — liberado em stopVpn().
+        try {
+            if (wakeLock == null) {
+                val powerManager = getSystemService(POWER_SERVICE) as android.os.PowerManager
+                wakeLock = powerManager.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                    "AutomBotConnect::VpnWakeLock"
+                ).apply { setReferenceCounted(false) }
+            }
+            wakeLock?.acquire(10 * 60 * 60 * 1000L /* 10h, com limite de seguranca — sempre renovado enquanto a VPN estiver ativa */)
+        } catch (e: Exception) {
+            AppLog.log("VPN de sistema: falha ao adquirir WakeLock (${e.message})", AppLog.Level.ERROR)
+        }
+
         return tun
     }
 
@@ -266,6 +294,7 @@ class AutomBotVpnService : VpnService() {
 
     private fun stopVpn() {
         AppLog.log("VPN de sistema: desligando", AppLog.Level.INFO)
+        runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
         NativeTun2Socks.stop()
         openVpnClient?.stop()
         openVpnClient = null
