@@ -84,6 +84,7 @@ class SshTunnelManager(context: Context) {
     private val activeClients = mutableMapOf<String, SSHClient>()
     private val activeSocksServers = mutableMapOf<String, Socks5Server>()
     private val activeSlowDnsClients = mutableMapOf<String, com.autombot.client.protocols.slowdns.SlowDnsClient>()
+    private val activeUdpGwClients = mutableMapOf<String, UdpGwClient>()
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     // CORRECAO: limite de 24 canais simultaneos (padrao seguro p/ Dropbear e OpenSSH).
@@ -241,7 +242,7 @@ class SshTunnelManager(context: Context) {
                 },
                 onUdpAssociateRequest = { destHost, destPort, onIncoming ->
                     if (config.udpForwardEnabled) {
-                        openUdpOverGateway(client, config.udpGatewayHost, config.udpGatewayPort.toIntOrNull() ?: 7300, destHost, destPort, onIncoming)
+                        openUdpOverGateway(client, connectionName, config.udpGatewayHost, config.udpGatewayPort.toIntOrNull() ?: 7300, destHost, destPort, onIncoming)
                     } else {
                         openUdpOver443Internal(client, destHost, destPort, onIncoming)
                     }
@@ -273,6 +274,7 @@ class SshTunnelManager(context: Context) {
     suspend fun disconnect(connectionName: String) {
         activeSocksServers.remove(connectionName)?.stop()
         activeSlowDnsClients.remove(connectionName)?.stop()
+        activeUdpGwClients.remove(connectionName)?.stop()
         withContext(Dispatchers.IO) {
             runCatching { activeClients.remove(connectionName)?.disconnect() }
         }
@@ -345,74 +347,41 @@ class SshTunnelManager(context: Context) {
      * de 443, retorna null — o Socks5Server entende isso como "esse destino nao e
      * suportado" e loga uma vez so (ver Socks5Server.kt/Tun2SocksEngine.kt antigo).
      */
-    private suspend fun openUdpOverGateway(
+    /**
+     * Abre (ou reaproveita, se já tiver uma pra essa conexão) o UdpGwClient
+     * compartilhado — ver UdpGwClient.kt pro protocolo em si (conferido contra o
+     * código-fonte oficial do badvpn). Uma única conexão TCP com o servidor udpgw
+     * (alcançada por um canal direct-tcpip do SSH) atende TODOS os destinos UDP
+     * dessa conexão SSH, multiplexados por conid — não é "uma conexão nova por
+     * destino" como os outros protocolos.
+     */
+    @Synchronized
+    private fun openUdpOverGateway(
         client: SSHClient,
+        connectionName: String,
         gwHost: String,
         gwPort: Int,
         destHost: String,
         destPort: Int,
         onIncoming: (ByteArray) -> Unit
     ): UdpBackendSession? {
-        val streams = openDirectChannel(client, gwHost, gwPort) ?: return null
+        val existing = activeUdpGwClients[connectionName]
+        if (existing != null) {
+            return existing.openSession(destHost, destPort, onIncoming)
+        }
+
+        val streams = openDirectChannel(client, gwHost, gwPort)
+        if (streams == null) {
+            AppLog.log("SSH \"$connectionName\": falha ao conectar no gateway UDP ($gwHost:$gwPort)", AppLog.Level.ERROR)
+            return null
+        }
         val (channelIn, channelOut) = streams
+        val gwClient = UdpGwClient(channelIn, channelOut, managerScope)
+        gwClient.start()
+        activeUdpGwClients[connectionName] = gwClient
+        AppLog.log("SSH \"$connectionName\": gateway UDP conectado ($gwHost:$gwPort)", AppLog.Level.INFO)
 
-        // Protocolo badvpn-udpgw: assim que conecta, manda o destino (1 byte type + host + port)
-        // Ver https://github.com/ambrop72/badvpn/blob/master/udpgw/PROTOCOL
-        val readerJob = managerScope.launch(Dispatchers.IO) {
-            try {
-                // Header inicial pro udpgw: [type:1][host_len:1][host][port:2]
-                val hostBytes = destHost.toByteArray()
-                val header = mutableListOf<Byte>()
-                header.add(0) // type 0: connect
-                header.add(hostBytes.size.toByte())
-                header.addAll(hostBytes.toList())
-                header.add((destPort shr 8).toByte())
-                header.add((destPort and 0xFF).toByte())
-                
-                channelOut.write(header.toByteArray())
-                channelOut.flush()
-
-                val buffer = ByteArray(16384)
-                while (isActive) {
-                    // No udpgw, cada pacote vem com prefixo de 2 bytes (tamanho)
-                    val len1 = channelIn.read()
-                    val len2 = channelIn.read()
-                    if (len1 < 0 || len2 < 0) break
-                    val pktLen = (len1 shl 8) or len2
-                    
-                    var read = 0
-                    while (read < pktLen) {
-                        val r = channelIn.read(buffer, read, pktLen - read)
-                        if (r < 0) break
-                        read += r
-                    }
-                    if (read == pktLen) {
-                        onIncoming(buffer.copyOf(pktLen))
-                    }
-                }
-            } catch (e: Exception) {
-            } finally {
-                runCatching { channelIn.close() }
-                runCatching { channelOut.close() }
-            }
-        }
-
-        return object : UdpBackendSession {
-            override suspend fun send(payload: ByteArray) {
-                runCatching {
-                    val len = payload.size
-                    channelOut.write((len shr 8) and 0xFF)
-                    channelOut.write(len and 0xFF)
-                    channelOut.write(payload)
-                    channelOut.flush()
-                }
-            }
-            override fun close() {
-                readerJob.cancel()
-                runCatching { channelIn.close() }
-                runCatching { channelOut.close() }
-            }
-        }
+        return gwClient.openSession(destHost, destPort, onIncoming)
     }
 
     private suspend fun openUdpOver443Internal(
