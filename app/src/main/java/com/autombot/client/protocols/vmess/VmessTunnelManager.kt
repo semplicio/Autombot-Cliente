@@ -99,7 +99,8 @@ class VmessTunnelManager(context: Context) {
                     onUdpAssociateRequest = { destHost, destPort, onIncoming ->
                         openVmessUdpSession(config, connectionName, destHost, destPort, onIncoming)
                     },
-                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) }
+                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) },
+                    logPrefix = "VMess \"$connectionName\""
                 )
                 socksServer.start()
                 activeSocksServers[connectionName] = socksServer
