@@ -454,6 +454,7 @@ private fun AppRoot(
             onOpenStatistics = { screen = Screen.Statistics },
             onOpenDevices = { screen = Screen.Devices },
             onOpenSupport = { screen = Screen.Support },
+            onOpenLogcat = { screen = Screen.Logs(origin = Screen.Shell) },
             onOpenLogs = { screen = Screen.Logs(origin = Screen.Shell) },
             onOpenPlan = { screen = Screen.Plan },
             onOpenConnections = { screen = Screen.Connections }
@@ -478,6 +479,7 @@ private fun MainShell(
     onOpenStatistics: () -> Unit,
     onOpenDevices: () -> Unit,
     onOpenSupport: () -> Unit,
+    onOpenLogcat: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenPlan: () -> Unit,
     onOpenConnections: () -> Unit
@@ -497,6 +499,7 @@ private fun MainShell(
                 onDevices = onOpenDevices,
                 onSettings = onOpenSettings,
                 onSupport = onOpenSupport,
+                onLogcat = onOpenLogcat,
                 onLogout = onReset
             )
         }
