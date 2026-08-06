@@ -25,7 +25,10 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
-import java.nio.channels.SocketChannel
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import javax.net.SocketFactory
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
@@ -33,7 +36,7 @@ import javax.net.ssl.SSLParameters
 import javax.net.ssl.SSLSocket
 
 /**
- * Núcleo da conexão SSH (sshj + servidor SOCKS5 próprio).
+ * Núcleo real da conexão SSH (sshj + servidor SOCKS5 próprio).
  */
 class SshTunnelManager(context: Context) {
 
@@ -57,8 +60,8 @@ class SshTunnelManager(context: Context) {
     private val udpGwCreationMutex = Mutex()
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    // Limite de canais diretos simultâneos (previne "Connection reset" no servidor SSH)
     private val channelSemaphore = Semaphore(24)
+    private val channelOpenExecutor = Executors.newCachedThreadPool()
 
     init {
         loadPersistedProfiles()
@@ -150,7 +153,7 @@ class SshTunnelManager(context: Context) {
                 )
                 client.socketFactory = composedSocketFactory(config, slowDnsLocalPort)
                 client.connect(config.server, port)
-
+                
                 client.connection.keepAlive.keepAliveInterval = 20
 
                 AppLog.log("SSH \"$connectionName\": [2/4] handshake SSH concluído, autenticando (${config.authMethod.label})", AppLog.Level.INFO)
@@ -221,9 +224,6 @@ class SshTunnelManager(context: Context) {
         AppLog.log("SSH \"$connectionName\" desconectado", AppLog.Level.INFO)
     }
 
-    /**
-     * Abre um canal direct-tcpip pelo SSH com suporte assíncrono a timeouts e coroutines.
-     */
     private suspend fun openDirectChannel(client: SSHClient, destHost: String, destPort: Int): Pair<InputStream, OutputStream>? {
         if (!client.isConnected || !client.isAuthenticated) {
             val name = activeClients.entries.firstOrNull { it.value == client }?.key
@@ -233,16 +233,21 @@ class SshTunnelManager(context: Context) {
 
         return try {
             channelSemaphore.withPermit {
-                val channel = withTimeout(10_000L) {
+                val future = channelOpenExecutor.submit(Callable {
+                    client.newDirectConnection(destHost, destPort)
+                })
+                val channel = try {
                     withContext(Dispatchers.IO) {
-                        client.newDirectConnection(destHost, destPort)
+                        future.get(10, TimeUnit.SECONDS)
                     }
+                } catch (e: TimeoutException) {
+                    future.cancel(true)
+                    throw IOException("Timeout ao abrir canal SSH para $destHost:$destPort")
+                } catch (e: Exception) {
+                    throw e.cause ?: e
                 }
                 channel.inputStream to channel.outputStream
             }
-        } catch (e: TimeoutCancellationException) {
-            AppLog.log("Timeout ao abrir canal SSH para $destHost:$destPort", AppLog.Level.ERROR)
-            null
         } catch (e: Exception) {
             if (e is TransportException || e.message?.contains("Socket closed") == true) {
                 val name = activeClients.entries.firstOrNull { it.value == client }?.key
@@ -299,7 +304,7 @@ class SshTunnelManager(context: Context) {
                     if (read <= 0) break
                     onIncoming(buffer.copyOf(read))
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
             } finally {
                 runCatching { channelIn.close() }
                 runCatching { channelOut.close() }
@@ -318,9 +323,6 @@ class SshTunnelManager(context: Context) {
         }
     }
 
-    /**
-     * Decorador completo de java.net.Socket com delegação total dos estados internos.
-     */
     private class ComposedSocket(
         private val config: SshConnectionConfig,
         private val slowDnsLocalPort: Int? = null
@@ -355,7 +357,7 @@ class SshTunnelManager(context: Context) {
                 throw lastError ?: IOException("Não foi possível conectar a $host:$port")
             }
         }
-
+        
         private var delegate: Socket? = null
 
         override fun connect(endpoint: java.net.SocketAddress) = connect(endpoint, 0)
@@ -372,8 +374,13 @@ class SshTunnelManager(context: Context) {
                 localSocket
             } else if (config.useProxy) {
                 val proxyPort = config.proxyPort.toIntOrNull() ?: 1080
-                val proxyType = if (config.proxyType == ProxyType.SOCKS) Proxy.Type.SOCKS else Proxy.Type.HTTP
-                val proxySocket = Socket(Proxy(proxyType, InetSocketAddress(config.proxyHost, proxyPort)))
+                
+                val javaProxyType = when (config.proxyType.name.uppercase()) {
+                    "SOCKS", "SOCKS5" -> Proxy.Type.SOCKS
+                    else -> Proxy.Type.HTTP
+                }
+
+                val proxySocket = Socket(Proxy(javaProxyType, InetSocketAddress(config.proxyHost, proxyPort)))
                 if (!AutomBotVpnService.protectSocket(proxySocket)) {
                     throw IOException("Não consegui isentar a conexão de proxy SSH da VPN (protect() falhou)")
                 }
@@ -407,28 +414,16 @@ class SshTunnelManager(context: Context) {
             delegate = socket
         }
 
-        // --- Delegação explícita dos métodos do Socket Java ---
-        override fun getInputStream(): InputStream = delegate?.getInputStream() ?: throw IOException("Socket não conectado")
-        override fun getOutputStream(): OutputStream = delegate?.getOutputStream() ?: throw IOException("Socket não conectado")
+        override fun getInputStream() = delegate?.getInputStream() ?: throw IOException("Socket não conectado")
+        override fun getOutputStream() = delegate?.getOutputStream() ?: throw IOException("Socket não conectado")
         override fun isConnected(): Boolean = delegate?.isConnected ?: false
         override fun isClosed(): Boolean = delegate?.isClosed ?: false
-        override fun isBound(): Boolean = delegate?.isBound ?: false
-        override fun isInputShutdown(): Boolean = delegate?.isInputShutdown ?: false
-        override fun isOutputShutdown(): Boolean = delegate?.isOutputShutdown ?: false
         override fun close() { delegate?.close() }
-        override fun getInetAddress(): InetAddress? = delegate?.inetAddress
+        override fun getInetAddress() = delegate?.inetAddress
         override fun getPort(): Int = delegate?.port ?: -1
         override fun getLocalPort(): Int = delegate?.localPort ?: -1
-        override fun getLocalAddress(): InetAddress? = delegate?.localAddress
-        override fun getLocalSocketAddress(): java.net.SocketAddress? = delegate?.localSocketAddress
-        override fun getRemoteSocketAddress(): java.net.SocketAddress? = delegate?.remoteSocketAddress
-        override fun getChannel(): SocketChannel? = delegate?.channel
         override fun setSoTimeout(timeout: Int) { delegate?.soTimeout = timeout }
-        override fun getSoTimeout(): Int = delegate?.soTimeout ?: 0
         override fun setTcpNoDelay(on: Boolean) { delegate?.tcpNoDelay = on }
-        override fun getTcpNoDelay(): Boolean = delegate?.tcpNoDelay ?: false
-        override fun setKeepAlive(on: Boolean) { delegate?.keepAlive = on }
-        override fun getKeepAlive(): Boolean = delegate?.keepAlive ?: false
         override fun shutdownInput() { delegate?.shutdownInput() }
         override fun shutdownOutput() { delegate?.shutdownOutput() }
     }
@@ -469,7 +464,7 @@ data class ManagedSshConnection(
     val config: SshConnectionConfig,
     val status: SshStatus = SshStatus.DISCONNECTED,
     val localSocksPort: Int? = null,
+    val lastError: String? = null,
     val rxBytes: Long = 0L,
-    val txBytes: Long = 0L,
-    val lastError: String? = null
+    val txBytes: Long = 0L
 )
