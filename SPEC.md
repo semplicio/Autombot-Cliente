@@ -1998,3 +1998,22 @@ reforçando que é mesmo falta de proteção contra o sistema cortando rede na h
 `"VPN de sistema: desligando"` aparece em pares (às vezes até 4x seguidas) pra uma única ação de desconectar
 — não parece causar dano real (operação idempotente), mas vale investigar a causa da duplicação em algum
 momento futuro.
+
+## 78. Confirmado: WakeLock resolveu a queda ao sair do app + log agora registra cada conexão TCP
+
+Log novo do usuário (pós Etapa 77) mostrou a conexão SSH sobrevivendo **43 segundos em segundo plano sem
+cair** — antes, a queda acontecia no mesmo segundo do `onPause`. A correção da permissão `WAKE_LOCK`
+funcionou de verdade para esse problema específico.
+
+Usuário confirmou que o problema principal (navegar de verdade na internet) continua, mas esse log
+específico não trouxe evidência de uma tentativa de navegação falhando — motivo encontrado:
+`Socks5Server.handleConnect()` (trata cada conexão TCP individual — exatamente o que o navegador usa pra
+abrir cada site) **não registrava nada**, nem tentativa, nem sucesso, nem falha. Toda essa camada era
+invisível pro Logcat.
+
+**Corrigido**: `Socks5Server.kt` ganhou um parâmetro `logPrefix` (identifica de qual protocolo/conexão vêm
+as linhas) e `handleConnect()` agora loga cada tentativa — sucesso ou falha — com o destino
+(`host:porta`). Propagado nos 5 protocolos que usam esse servidor (SSH, VLESS, VMess, Shadowsocks, Trojan).
+
+Próximo teste deve finalmente mostrar, linha a linha, quais sites/destinos estão falhando ao conectar —
+peça que faltava pra fechar esse problema de vez.
