@@ -1838,3 +1838,14 @@ essa.
 
 Ainda não testado contra um `badvpn-udpgw` de verdade rodando no VPS — mas agora com base em especificação
 oficial confirmada, não em suposição.
+
+## 71. Correção rápida: erro de compilação real no UdpGwClient (suspend fun)
+
+Usuário compilou no ambiente na nuvem e pegou um erro real que eu introduzi na Etapa 70: fiz
+`openUdpOverGateway` virar uma função comum com `@Synchronized` (pra evitar criar dois `UdpGwClient` ao
+mesmo tempo por engano), mas ela chama `openDirectChannel`, que é `suspend fun` — `@Synchronized` é da
+JVM/threads, não funciona (nem devia ser usado) dentro de uma função suspensa em Kotlin.
+
+Corrigido: `openUdpOverGateway` voltou a ser `suspend fun`, e a proteção contra criação duplicada agora usa
+`Mutex` (de `kotlinx.coroutines.sync`, o jeito certo de fazer exclusão mútua em código suspenso) em vez de
+`@Synchronized`.
