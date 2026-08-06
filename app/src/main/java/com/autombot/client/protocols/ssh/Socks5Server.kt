@@ -16,13 +16,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration.Companion.milliseconds
 
-typealias UdpAssociateOpener = suspend (destHost: String, destPort: Int, onIncoming: (ByteArray) -> Unit) -> UdpBackendSession?
-
-interface UdpBackendSession {
-    suspend fun send(payload: ByteArray)
-    fun close()
-}
-
 /**
  * Servidor SOCKS5 mínimo, local (127.0.0.1), sem autenticação.
  * Implementação própria (RFC 1928).
@@ -73,11 +66,10 @@ class Socks5Server(
 
     private suspend fun handleClient(client: Socket) {
         try {
-            client.tcpNoDelay = true // Reduz latência no socket local SOCKS5
+            client.tcpNoDelay = true
             val input = client.getInputStream()
             val output = client.getOutputStream()
 
-            // Handshake de métodos (RFC 1928 seção 3)
             val ver = input.read()
             if (ver != 0x05) { client.close(); return }
             val nMethods = input.read()
@@ -86,10 +78,9 @@ class Socks5Server(
             output.write(byteArrayOf(0x05, 0x00))
             output.flush()
 
-            // Request (RFC 1928 seção 4)
             val reqVer = input.read()
             val cmd = input.read()
-            input.read() // RSV
+            input.read()
             val atyp = input.read()
             if (reqVer != 0x05) { client.close(); return }
 
@@ -122,19 +113,19 @@ class Socks5Server(
 
     private fun readAddressAndPort(input: InputStream, atyp: Int): Pair<String, Int>? {
         val destHost = when (atyp) {
-            0x01 -> { // IPv4
+            0x01 -> {
                 val addr = ByteArray(4)
                 readFully(input, addr)
                 addr.joinToString(".") { (it.toInt() and 0xFF).toString() }
             }
-            0x03 -> { // Domain name
+            0x03 -> {
                 val len = input.read()
                 if (len <= 0) return null
                 val nameBytes = ByteArray(len)
                 readFully(input, nameBytes)
                 String(nameBytes, Charsets.US_ASCII)
             }
-            0x04 -> { // IPv6
+            0x04 -> {
                 val addr = ByteArray(16)
                 readFully(input, addr)
                 InetAddress.getByAddress(addr).hostAddress ?: "::1"
@@ -250,8 +241,6 @@ class Socks5Server(
                                 if (peer != null) {
                                     runCatching { relaySocket.send(DatagramPacket(wrapped, wrapped.size, peer)) }
                                 }
-                            } else {
-                                Log.w("Socks5Server", "Falha total ao resolver DNS ($fragDestHost)")
                             }
                         }
                         continue
@@ -423,7 +412,6 @@ class Socks5Server(
         try {
             joinAll(job1, job2)
         } catch (e: CancellationException) {
-            // Cancelamento gracioso
         } finally {
             runCatching { client.close() }
             runCatching { clientIn.close() }
@@ -444,7 +432,6 @@ class Socks5Server(
                 counter.addAndGet(n.toLong())
             }
         } catch (e: Exception) {
-            // Socket foi fechado ou interrompido
         }
     }
 
