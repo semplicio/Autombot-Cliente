@@ -145,7 +145,32 @@ class Socks5Server(
         return destHost to destPort
     }
 
+    private val ipv6UnsupportedLogged = ConcurrentHashMap.newKeySet<String>()
+
     private suspend fun handleConnect(client: Socket, input: InputStream, output: OutputStream, destHost: String, destPort: Int) {
+        // CORRECAO: log real do usuario mostrou o celular tentando IPv6 primeiro
+        // (padrao do Android/navegador quando o site oferece os dois — "Happy
+        // Eyeballs"), TODA tentativa falhando (nenhum protocolo aqui suporta IPv6
+        // ainda), e só DEPOIS o mesmo destino em IPv4 funcionando. Deixar essas
+        // tentativas IPv6 tentarem de verdade (e esperar o timeout de conexao
+        // inteiro) e lento — rejeita na hora, sem tentar, pra o navegador cair pro
+        // IPv4 (que funciona) o mais rapido possivel, em vez de esperar.
+        // Deteccao simples: literal IPv6 sempre tem ":" no meio (hostname e IPv4
+        // nunca tem).
+        if (destHost.contains(":")) {
+            if (ipv6UnsupportedLogged.add(destHost)) {
+                AppLog.log(
+                    "$logPrefix: IPv6 ainda não suportado — $destHost:$destPort recusado na hora " +
+                        "(o app/navegador deve cair pro IPv4 sozinho, sem demora)",
+                    AppLog.Level.ERROR
+                )
+            }
+            output.write(byteArrayOf(0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0)) // 0x08 = tipo de endereco nao suportado
+            output.flush()
+            client.close()
+            return
+        }
+
         val remote = connectSemaphore.withPermit { onConnectRequest(destHost, destPort) }
         if (remote == null) {
             AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
