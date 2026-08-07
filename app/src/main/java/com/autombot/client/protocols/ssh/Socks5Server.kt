@@ -259,20 +259,41 @@ class Socks5Server(
 
                     if (fragDestPort == 53) {
                         scope.launch(Dispatchers.IO) {
-                            var respPayload = if (protectDatagramSocket != null && (dns1 == "8.8.8.8" || dns1 == "1.1.1.1")) {
-                                withTimeoutOrNull(1500.milliseconds) { resolveDnsDirectly(dns1, payload) }
-                            } else null
+                            // CORRECAO: este era o UNICO caminho do Socks5Server sem log
+                            // nenhum — exatamente a resolucao de DNS que o navegador usa
+                            // pra qualquer site (UDP porta 53). Log real mostrou zero
+                            // conexoes de navegacao de verdade, so DNS-over-TLS do sistema
+                            // (853) e uma checagem de conectividade — sinal forte de que a
+                            // resolucao aqui estava falhando/travando em silencio, sem
+                            // deixar rastro. Cada etapa agora loga tentativa e resultado.
+                            val directTried = protectDatagramSocket != null && (dns1 == "8.8.8.8" || dns1 == "1.1.1.1")
+                            var respPayload: ByteArray? = null
 
-                            if (respPayload == null) {
-                                respPayload = withTimeoutOrNull(4000.milliseconds) {
-                                    resolveDnsViaTcp(dns1, payload)
-                                }
+                            if (directTried) {
+                                respPayload = withTimeoutOrNull(1500.milliseconds) { resolveDnsDirectly(dns1, payload) }
+                                AppLog.log(
+                                    "$logPrefix: DNS direto (fora do túnel) pra $dns1 — " +
+                                        if (respPayload != null) "respondeu" else "falhou/timeout",
+                                    if (respPayload != null) AppLog.Level.INFO else AppLog.Level.ERROR
+                                )
                             }
 
                             if (respPayload == null) {
-                                respPayload = withTimeoutOrNull(4000.milliseconds) {
-                                    resolveDnsViaTcp(dns2, payload)
-                                }
+                                respPayload = withTimeoutOrNull(4000.milliseconds) { resolveDnsViaTcp(dns1, payload) }
+                                AppLog.log(
+                                    "$logPrefix: DNS via túnel (TCP) pra $dns1 — " +
+                                        if (respPayload != null) "respondeu" else "falhou/timeout",
+                                    if (respPayload != null) AppLog.Level.INFO else AppLog.Level.ERROR
+                                )
+                            }
+
+                            if (respPayload == null) {
+                                respPayload = withTimeoutOrNull(4000.milliseconds) { resolveDnsViaTcp(dns2, payload) }
+                                AppLog.log(
+                                    "$logPrefix: DNS via túnel (TCP) pra $dns2 (2º servidor) — " +
+                                        if (respPayload != null) "respondeu" else "falhou/timeout",
+                                    if (respPayload != null) AppLog.Level.INFO else AppLog.Level.ERROR
+                                )
                             }
 
                             if (respPayload != null) {
@@ -282,6 +303,11 @@ class Socks5Server(
                                 if (peer != null) {
                                     runCatching { relaySocket.send(DatagramPacket(wrapped, wrapped.size, peer)) }
                                 }
+                            } else {
+                                AppLog.log(
+                                    "$logPrefix: DNS ESGOTOU todas as opções (direto + túnel x2) — resolução falhou de vez, navegador não vai receber resposta nenhuma",
+                                    AppLog.Level.ERROR
+                                )
                             }
                         }
                         continue
