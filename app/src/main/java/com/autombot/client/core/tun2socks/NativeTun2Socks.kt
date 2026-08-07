@@ -139,7 +139,12 @@ object NativeTun2Socks {
           port: 53
         """.trimIndent()
         if (logFilePath == null) return base
-        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: debug\n"
+        // CORRECAO: log-level "debug" gerou 135 linhas em ~1 segundo de uso real —
+        // isso sozinho ja estoura o limite de 200 entradas do AppLog e empurra pra
+        // fora exatamente o trecho que importa (o momento em que a navegacao de
+        // verdade acontece). "warn" mantem erro/aviso real (o que queremos ver) sem
+        // afogar o log com "construct/destruct" de cada sessao interna.
+        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: warn\n"
     }
 
     private external fun nativeStart(configYaml: String, tunFd: Int): Boolean
