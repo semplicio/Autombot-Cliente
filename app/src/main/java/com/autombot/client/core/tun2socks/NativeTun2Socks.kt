@@ -99,6 +99,42 @@ object NativeTun2Socks {
         tailJob = null
     }
 
+    private var statsJob: Job? = null
+
+    /**
+     * CORRECAO: usuario com ERR_CONNECTION_RESET consistente no navegador, mas o
+     * NOSSO Socks5Server mostra dado real fluindo nos dois sentidos sem erro nenhum
+     * — ou seja, o problema so pode estar DEPOIS do nosso codigo, no trecho que
+     * pega o que escrevemos e devolve pela interface TUN de verdade (dentro da
+     * propria hev-socks5-tunnel). nativeGetStats() existe desde sempre mas nunca
+     * foi chamado em lugar nenhum — e a UNICA visao real que temos desse pedaco.
+     * Compara com os totais do Socks5Server: se os numeros nao baterem, mostra
+     * exatamente onde o dado esta se perdendo (dentro da lib nativa, nao no nosso
+     * codigo nem no SSH/VPS).
+     */
+    fun startStatsLogging() {
+        statsJob?.cancel()
+        statsJob = CoroutineScope(Dispatchers.IO).launch {
+            while (isActive) {
+                delay(5000)
+                runCatching {
+                    val s = nativeGetStats() // [tx_packets, tx_bytes, rx_packets, rx_bytes]
+                    if (s.size >= 4) {
+                        com.autombot.client.util.AppLog.log(
+                            "hev stats: TUN enviou ${s[0]} pacotes/${s[1]}B, recebeu ${s[2]} pacotes/${s[3]}B (acumulado desde que ligou)",
+                            com.autombot.client.util.AppLog.Level.INFO
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun stopStatsLogging() {
+        statsJob?.cancel()
+        statsJob = null
+    }
+
     /** Para o túnel. Bloqueia até a thread nativa terminar de verdade — chamar fora da main thread. */
     fun stop() = nativeStop()
 
