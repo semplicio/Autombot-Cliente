@@ -2055,3 +2055,10 @@ ter passado.
 Não identifiquei um bug óbvio na lógica do `relay`/`pipe` só de ler o código — o padrão de "se uma direção
 acabar, cancela a outra" é razoável em teoria. A instrumentação é o próximo passo necessário pra achar a
 causa raiz de verdade, em vez de adivinhar de novo.
+
+## 81. Correção rápida: erro de compilação — esqueci de atualizar a outra chamada de relay()
+
+Ao adicionar `destHost`/`destPort` na assinatura de `relay()` (Etapa 80), esqueci que existe uma SEGUNDA
+chamada (`handleDnsOverTcp`, função de DNS-sobre-TCP adicionada no outro chat, ainda não documentada por
+mim antes) que também usa essa função — só atualizei a do `handleConnect()`. Corrigido: passa o DNS de
+destino (`targetDns`, porta 53) nessa segunda chamada também.
