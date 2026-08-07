@@ -181,7 +181,7 @@ object NativeTun2Socks {
         // falta de confirmacao a tempo). "misc.tcp-buffer-size" da lib vem em 64KB de
         // fabrica (doc oficial); com varias conexoes simultaneas de uma pagina real,
         // isso pode nao dar conta e forcar descarte. Aumentado pra 256KB.
-        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: warn\n  read-write-timeout: 20000\n  tcp-buffer-size: 262144\n"
+        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: warn\n  connect-timeout: 10000\n  tcp-read-write-timeout: 300000\n  udp-read-write-timeout: 60000\n  tcp-buffer-size: 262144\n"
     }
 
     private external fun nativeStart(configYaml: String, tunFd: Int): Boolean
