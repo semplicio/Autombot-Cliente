@@ -185,7 +185,7 @@ class Socks5Server(
         output.flush()
 
         val (remoteIn, remoteOut) = remote
-        relay(input, remoteOut, output, remoteIn, client)
+        relay(input, remoteOut, output, remoteIn, client, destHost, destPort)
     }
 
     private suspend fun handleDnsOverTcp(client: Socket, originalDest: String) {
@@ -432,14 +432,22 @@ class Socks5Server(
     private suspend fun relay(
         clientIn: InputStream, remoteOut: OutputStream,
         clientOut: OutputStream, remoteIn: InputStream,
-        client: Socket
+        client: Socket, destHost: String, destPort: Int
     ) = coroutineScope {
+        // CORRECAO: essa funcao (quem de fato move os dados DEPOIS que "conectado"
+        // ja apareceu no log) nao registrava nada — nem quantos bytes passaram, nem
+        // por que uma direcao parou. Usuario confirmou que "conectado" aparece no
+        // log, mas o navegador nao recebe dado NENHUM — ou seja, o problema pode
+        // estar bem aqui, nao na conexao em si. Esse log novo mostra exatamente
+        // quantos bytes fluiram em cada direcao e o motivo de parar (fim normal,
+        // erro, ou cancelado pela outra ponta).
+        val tag = "$destHost:$destPort"
         val job1 = launch(Dispatchers.IO) { 
-            try { pipe(clientIn, remoteOut, totalTx) } 
+            try { pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]") } 
             finally { this@coroutineScope.cancel() } 
         }
         val job2 = launch(Dispatchers.IO) { 
-            try { pipe(remoteIn, clientOut, totalRx) } 
+            try { pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]") } 
             finally { this@coroutineScope.cancel() } 
         }
         
@@ -447,6 +455,10 @@ class Socks5Server(
             joinAll(job1, job2)
         } catch (e: CancellationException) {
         } finally {
+            AppLog.log(
+                "$logPrefix: relay encerrado pra $tag — total enviado ${totalTx.get()}B, recebido ${totalRx.get()}B (desde que o servidor ligou; nao so essa conexao)",
+                AppLog.Level.INFO
+            )
             runCatching { client.close() }
             runCatching { clientIn.close() }
             runCatching { remoteOut.close() }
@@ -455,17 +467,23 @@ class Socks5Server(
         }
     }
 
-    private fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong) {
+    private fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong, tag: String) {
         val buffer = ByteArray(16384)
+        var bytesThisPipe = 0L
         try {
             while (isActive) {
                 val n = from.read(buffer)
-                if (n <= 0) break
+                if (n <= 0) {
+                    AppLog.log("$tag: fim do fluxo (read retornou $n) após $bytesThisPipe bytes", AppLog.Level.INFO)
+                    break
+                }
                 to.write(buffer, 0, n)
                 to.flush()
                 counter.addAndGet(n.toLong())
+                bytesThisPipe += n
             }
         } catch (e: Exception) {
+            AppLog.log("$tag: interrompido por erro (${e.javaClass.simpleName}: ${e.message}) após $bytesThisPipe bytes", AppLog.Level.ERROR)
         }
     }
 
