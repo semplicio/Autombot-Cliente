@@ -483,44 +483,47 @@ class Socks5Server(
         // proprio fim natural (fim de fluxo ou erro), e SO no final, com as DUAS
         // ja terminadas (joinAll), fecha tudo de vez.
         val tag = "$destHost:$destPort"
-        val job1 = launch(Dispatchers.IO) {
-            pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
-        }
-        val job2 = launch(Dispatchers.IO) {
-            pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
-        }
+        var job1: Job? = null
+        var job2: Job? = null
+        try {
+            val upstream = launch(Dispatchers.IO) {
+                pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
+            }
+            val downstream = launch(Dispatchers.IO) {
+                pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
+            }
+            job1 = upstream
+            job2 = downstream
 
-        val firstFinished = CompletableDeferred<Unit>()
-        job1.invokeOnCompletion { firstFinished.complete(Unit) }
-        job2.invokeOnCompletion { firstFinished.complete(Unit) }
-        firstFinished.await()
+            val firstFinished = CompletableDeferred<Unit>()
+            upstream.invokeOnCompletion { firstFinished.complete(Unit) }
+            downstream.invokeOnCompletion { firstFinished.complete(Unit) }
+            firstFinished.await()
 
-        // Uma ponta encerrada normalmente significa que esta conexao esta sendo
-        // finalizada. Damos alguns segundos para a resposta/FIN pendente e depois
-        // fechamos os streams para desbloquear qualquer read() que tenha ficado
-        // preso. Sem esse prazo, o relay mantinha o canal SSH e seu permit para
-        // sempre, degradando toda a VPN depois de alguns minutos.
-        val endedGracefully = withTimeoutOrNull(5_000L) {
-            joinAll(job1, job2)
-            true
-        } ?: false
-        if (!endedGracefully) {
+            val endedGracefully = withTimeoutOrNull(5_000L) {
+                joinAll(upstream, downstream)
+                true
+            } ?: false
+            if (!endedGracefully) {
+                AppLog.log("$logPrefix: encerrando relay preso pra $tag após 5s de meia-conexão", AppLog.Level.INFO)
+            }
             AppLog.log(
-                "$logPrefix: encerrando relay preso pra $tag após 5s de meia-conexão",
+                "$logPrefix: relay encerrado pra $tag — total enviado ${totalTx.get()}B, recebido ${totalRx.get()}B (desde que o servidor ligou; nao so essa conexao)",
                 AppLog.Level.INFO
             )
+        } finally {
+            // V4: cancelamento de scope também passa obrigatoriamente por aqui. O
+            // fechamento dos wrappers devolve o permit do canal exatamente uma vez.
+            withContext(NonCancellable + Dispatchers.IO) {
+                runCatching { client.close() }
+                runCatching { clientIn.close() }
+                runCatching { remoteOut.close() }
+                runCatching { clientOut.close() }
+                runCatching { remoteIn.close() }
+                job1?.cancel()
+                job2?.cancel()
+            }
         }
-        AppLog.log(
-            "$logPrefix: relay encerrado pra $tag — total enviado ${totalTx.get()}B, recebido ${totalRx.get()}B (desde que o servidor ligou; nao so essa conexao)",
-            AppLog.Level.INFO
-        )
-        runCatching { client.close() }
-        runCatching { clientIn.close() }
-        runCatching { remoteOut.close() }
-        runCatching { clientOut.close() }
-        runCatching { remoteIn.close() }
-        job1.cancel()
-        job2.cancel()
     }
 
     private fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong, tag: String) {

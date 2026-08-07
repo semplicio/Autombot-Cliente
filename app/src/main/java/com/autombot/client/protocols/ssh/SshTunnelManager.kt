@@ -28,9 +28,12 @@ import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.SocketFactory
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
@@ -70,6 +73,10 @@ import javax.net.ssl.SSLSocket
 class SshTunnelManager(context: Context) {
 
     companion object {
+        private const val REGULAR_CHANNEL_LIMIT = 63
+        private const val UDP_GATEWAY_CHANNEL_LIMIT = 1
+        private const val TOTAL_CHANNEL_LIMIT = REGULAR_CHANNEL_LIMIT + UDP_GATEWAY_CHANNEL_LIMIT
+
         init {
             // Remove o "BC" capado do Android e registra o BouncyCastle completo no
             // lugar — precisa ser feito uma vez, antes de qualquer SSHClient() ser
@@ -85,17 +92,23 @@ class SshTunnelManager(context: Context) {
     private val _connections = MutableStateFlow<List<ManagedSshConnection>>(emptyList())
     val connections: StateFlow<List<ManagedSshConnection>> = _connections
 
-    private val activeClients = mutableMapOf<String, SSHClient>()
-    private val activeSocksServers = mutableMapOf<String, Socks5Server>()
-    private val activeSlowDnsClients = mutableMapOf<String, com.autombot.client.protocols.slowdns.SlowDnsClient>()
-    private val activeUdpGwClients = mutableMapOf<String, UdpGwClient>()
+    private val activeClients = ConcurrentHashMap<String, SSHClient>()
+    private val activeSocksServers = ConcurrentHashMap<String, Socks5Server>()
+    private val activeSlowDnsClients = ConcurrentHashMap<String, com.autombot.client.protocols.slowdns.SlowDnsClient>()
+    private val activeUdpGwClients = ConcurrentHashMap<String, UdpGwClient>()
     private val udpGwCreationMutex = Mutex()
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    // Limite global de canais SSH ATIVOS. O permit acompanha o canal ate close();
-    // antes ele era devolvido logo depois de newDirectConnection(), então não
-    // limitava a carga real no servidor.
-    private val channelSemaphore = Semaphore(24)
+    // V4: 64 canais no total. Sessenta e tres atendem navegacao/DNS e uma vaga e
+    // exclusiva do badvpn-udpgw, para que uma rajada TCP nunca impeça o gateway UDP
+    // de subir. Cada canal aberto também fica registrado por SSHClient; assim a
+    // desconexao consegue fecha-lo e devolver o permit mesmo se o relay foi cancelado.
+    private val regularChannelSemaphore = Semaphore(REGULAR_CHANNEL_LIMIT)
+    private val udpGatewayChannelSemaphore = Semaphore(UDP_GATEWAY_CHANNEL_LIMIT)
+    private val activeChannelLeases = ConcurrentHashMap<SSHClient, MutableSet<DirectChannelLease>>()
+    private val waitingChannelRequests = AtomicInteger(0)
+    @Volatile private var lastChannelStats = ""
+    private val lastChannelStatsLogAt = AtomicLong(0L)
 
     // CORRECAO CRITICA: client.newDirectConnection(...) (dentro do synchronized do
     // openDirectChannel) nao tem timeout nenhum — se o servidor SSH nao responder ao
@@ -126,6 +139,7 @@ class SshTunnelManager(context: Context) {
                         }
                     }
                 }
+                logChannelStatsIfChanged()
             }
         }
     }
@@ -171,6 +185,9 @@ class SshTunnelManager(context: Context) {
         val managed = _connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return
         val config = managed.config
 
+        // Uma reconexao deve começar limpa. Isso também recupera qualquer canal que
+        // tenha sobrevivido a um cancelamento inesperado da VPN anterior.
+        cleanupConnection(connectionName)
         markStatus(connectionName, SshStatus.CONNECTING)
         AppLog.log("SSH \"$connectionName\": iniciando conexão (${config.describeLayers()})", AppLog.Level.INFO)
 
@@ -179,8 +196,10 @@ class SshTunnelManager(context: Context) {
         // connect()), o que disparava NetworkOnMainThreadException — o Android proibe
         // rede na thread de UI de proposito. withContext(Dispatchers.IO) resolve isso.
         withContext(Dispatchers.IO) {
+        var connectingClient: SSHClient? = null
         try {
             val client = SSHClient()
+            connectingClient = client
             client.addHostKeyVerifier(PromiscuousVerifier()) // ver aviso (1) no cabecalho do arquivo
 
             val port = config.port.toIntOrNull() ?: 22
@@ -274,20 +293,32 @@ class SshTunnelManager(context: Context) {
                 AppLog.Level.SUCCESS
             )
         } catch (e: Exception) {
+            cleanupConnection(connectionName)
+            connectingClient?.let { failedClient ->
+                closeChannelsForClient(failedClient)
+                runCatching { failedClient.disconnect() }
+            }
             markError(connectionName, e.message ?: e.javaClass.simpleName)
         }
         }
     }
 
     suspend fun disconnect(connectionName: String) {
+        cleanupConnection(connectionName)
+        markStatus(connectionName, SshStatus.DISCONNECTED)
+        AppLog.log("SSH \"$connectionName\" desconectado", AppLog.Level.INFO)
+    }
+
+    private suspend fun cleanupConnection(connectionName: String) {
         activeSocksServers.remove(connectionName)?.stop()
         activeSlowDnsClients.remove(connectionName)?.stop()
         activeUdpGwClients.remove(connectionName)?.stop()
-        withContext(Dispatchers.IO) {
-            runCatching { activeClients.remove(connectionName)?.disconnect() }
+        val client = activeClients.remove(connectionName)
+        if (client != null) {
+            closeChannelsForClient(client)
+            withContext(Dispatchers.IO) { runCatching { client.disconnect() } }
         }
-        markStatus(connectionName, SshStatus.DISCONNECTED)
-        AppLog.log("SSH \"$connectionName\" desconectado", AppLog.Level.INFO)
+        logChannelStatsIfChanged(force = true)
     }
 
     /**
@@ -300,23 +331,34 @@ class SshTunnelManager(context: Context) {
      * O permit do semaforo permanece adquirido durante toda a vida do canal e so e
      * devolvido quando os streams forem fechados.
      */
-    private suspend fun openDirectChannel(client: SSHClient, destHost: String, destPort: Int): Pair<InputStream, OutputStream>? {
+    private suspend fun openDirectChannel(
+        client: SSHClient,
+        destHost: String,
+        destPort: Int,
+        reservedForUdpGateway: Boolean = false
+    ): Pair<InputStream, OutputStream>? {
         if (!client.isConnected || !client.isAuthenticated) {
             val name = activeClients.entries.firstOrNull { it.value == client }?.key
             if (name != null) markError(name, "Conexão SSH perdida (cliente desconectado)")
             return null
         }
 
+        val semaphore = if (reservedForUdpGateway) udpGatewayChannelSemaphore else regularChannelSemaphore
         var permitAcquired = false
         var permitTransferred = false
         var openedChannel: DirectConnection? = null
         return try {
-            val gotPermit = withTimeoutOrNull(10_000L) {
-                channelSemaphore.acquire()
-                true
-            } ?: false
+            waitingChannelRequests.incrementAndGet()
+            val gotPermit = try {
+                withTimeoutOrNull(10_000L) {
+                    semaphore.acquire()
+                    true
+                } ?: false
+            } finally {
+                waitingChannelRequests.decrementAndGet()
+            }
             if (!gotPermit) {
-                throw IOException("Todos os canais SSH estão ocupados há 10s")
+                throw IOException("Todos os canais SSH estão ocupados há 10s (${channelStatsText()})")
             }
             permitAcquired = true
 
@@ -339,8 +381,18 @@ class SshTunnelManager(context: Context) {
             }
             openedChannel = channel
 
-            val lease = DirectChannelLease(channel) { channelSemaphore.release() }
+            lateinit var lease: DirectChannelLease
+            lease = DirectChannelLease(channel) {
+                activeChannelLeases[client]?.let { leases ->
+                    leases.remove(lease)
+                    if (leases.isEmpty()) activeChannelLeases.remove(client, leases)
+                }
+                semaphore.release()
+                logChannelStatsIfChanged()
+            }
+            activeChannelLeases.computeIfAbsent(client) { ConcurrentHashMap.newKeySet() }.add(lease)
             permitTransferred = true
+            logChannelStatsIfChanged()
             lease.inputStream to lease.outputStream
         } catch (e: Exception) {
             val detail = "${e.javaClass.simpleName}: ${e.message}"
@@ -357,8 +409,32 @@ class SshTunnelManager(context: Context) {
         } finally {
             if (permitAcquired && !permitTransferred) {
                 runCatching { openedChannel?.close() }
-                channelSemaphore.release()
+                semaphore.release()
             }
+        }
+    }
+
+    private fun closeChannelsForClient(client: SSHClient) {
+        val leases = activeChannelLeases.remove(client)?.toList().orEmpty()
+        leases.forEach { it.close() }
+        if (leases.isNotEmpty()) {
+            AppLog.log("SSH: ${leases.size} canal(is) ativo(s) fechado(s) durante a desconexão", AppLog.Level.INFO)
+        }
+    }
+
+    private fun channelStatsText(): String {
+        val active = activeChannelLeases.values.sumOf { it.size }
+        return "ativos $active/$TOTAL_CHANNEL_LIMIT, aguardando ${waitingChannelRequests.get()}"
+    }
+
+    private fun logChannelStatsIfChanged(force: Boolean = false) {
+        val stats = channelStatsText()
+        val now = android.os.SystemClock.elapsedRealtime()
+        val enoughTimePassed = now - lastChannelStatsLogAt.get() >= 5_000L
+        if (force || (stats != lastChannelStats && enoughTimePassed)) {
+            lastChannelStats = stats
+            lastChannelStatsLogAt.set(now)
+            AppLog.log("SSH canais: $stats", AppLog.Level.INFO)
         }
     }
 
@@ -376,6 +452,8 @@ class SshTunnelManager(context: Context) {
         val outputStream: OutputStream = object : FilterOutputStream(channel.outputStream) {
             override fun close() = closeChannel()
         }
+
+        fun close() = closeChannel()
 
         private fun closeChannel() {
             if (closed.compareAndSet(false, true)) {
@@ -438,7 +516,7 @@ class SshTunnelManager(context: Context) {
                         AppLog.Level.INFO
                     )
                 }
-                val streams = openDirectChannel(client, gwHost, gwPort)
+                val streams = openDirectChannel(client, gwHost, gwPort, reservedForUdpGateway = true)
                 if (streams == null) {
                     AppLog.log("SSH \"$connectionName\": falha ao conectar no gateway UDP ($gwHost:$gwPort)", AppLog.Level.ERROR)
                     return@run null
