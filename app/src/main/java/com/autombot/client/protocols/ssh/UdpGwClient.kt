@@ -83,6 +83,8 @@ class UdpGwClient(
         runCatching { channelOut.close() }
     }
 
+    fun isClosed(): Boolean = closed
+
     /** Abre um conid exclusivo para esta sessão SOCKS5 UDP. */
     fun openSession(destHost: String, destPort: Int, onIncoming: (ByteArray) -> Unit): UdpBackendSession? {
         if (closed) return null

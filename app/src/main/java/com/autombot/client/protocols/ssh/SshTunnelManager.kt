@@ -311,7 +311,13 @@ class SshTunnelManager(context: Context) {
         var permitTransferred = false
         var openedChannel: DirectConnection? = null
         return try {
-            channelSemaphore.acquire()
+            val gotPermit = withTimeoutOrNull(10_000L) {
+                channelSemaphore.acquire()
+                true
+            } ?: false
+            if (!gotPermit) {
+                throw IOException("Todos os canais SSH estão ocupados há 10s")
+            }
             permitAcquired = true
 
             if (!client.isConnected || !client.isAuthenticated) {
@@ -338,8 +344,11 @@ class SshTunnelManager(context: Context) {
             lease.inputStream to lease.outputStream
         } catch (e: Exception) {
             val detail = "${e.javaClass.simpleName}: ${e.message}"
-            // android.util.Log.w("SshTunnelManager", "Falha ao abrir canal SSH para $destHost:$destPort: $detail")
-            
+            AppLog.log(
+                "SSH: falha ao abrir canal para $destHost:$destPort ($detail)",
+                AppLog.Level.ERROR
+            )
+
             if (e is TransportException || e.message?.contains("Socket closed") == true) {
                 val name = activeClients.entries.firstOrNull { it.value == client }?.key
                 if (name != null) markError(name, "Túnel SSH caiu: ${e.message}")
@@ -370,11 +379,10 @@ class SshTunnelManager(context: Context) {
 
         private fun closeChannel() {
             if (closed.compareAndSet(false, true)) {
-                try {
-                    channel.close()
-                } finally {
-                    onClosed()
-                }
+                // A vaga precisa voltar imediatamente. channel.close() pode esperar
+                // a confirmacao remota e nao deve bloquear novas navegacoes.
+                onClosed()
+                runCatching { channel.close() }
             }
         }
     }
@@ -418,7 +426,18 @@ class SshTunnelManager(context: Context) {
         onIncoming: (ByteArray) -> Unit
     ): UdpBackendSession? {
         val gwClient = udpGwCreationMutex.withLock {
-            activeUdpGwClients[connectionName] ?: run {
+            val existing = activeUdpGwClients[connectionName]
+            if (existing != null && !existing.isClosed()) {
+                existing
+            } else run {
+                if (existing != null) {
+                    activeUdpGwClients.remove(connectionName)
+                    existing.stop()
+                    AppLog.log(
+                        "SSH \"$connectionName\": gateway UDP anterior encerrou; reconectando",
+                        AppLog.Level.INFO
+                    )
+                }
                 val streams = openDirectChannel(client, gwHost, gwPort)
                 if (streams == null) {
                     AppLog.log("SSH \"$connectionName\": falha ao conectar no gateway UDP ($gwHost:$gwPort)", AppLog.Level.ERROR)

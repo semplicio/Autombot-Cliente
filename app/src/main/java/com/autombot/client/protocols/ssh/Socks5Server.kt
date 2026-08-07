@@ -1,9 +1,7 @@
 package com.autombot.client.protocols.ssh
 
-import android.util.Log
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Semaphore
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramPacket
@@ -37,16 +35,6 @@ class Socks5Server(
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var running = false
-
-    // CORRECAO: log real do usuario mostrou 14 destinos diferentes abertos ao
-    // mesmo tempo, seguido de "Conexao SSH perdida" derrubando TODOS eles juntos —
-    // sinal claro de que o servidor (Dropbear, leve, pensado pra pouco uso
-    // simultaneo) nao aguenta tantos canais ao mesmo tempo e fecha a conexao
-    // inteira. 128 era alto demais; 16 ainda e generoso pra navegacao normal (esse
-    // limite controla a vida inteira da conexao, nao apenas a abertura do canal.
-    // Isso evita que varias paginas mantenham dezenas de canais SSH ativos ao mesmo
-    // tempo e derrubem a sessao principal no servidor.
-    private val connectSemaphore = Semaphore(permits = 16)
 
     val totalRx = AtomicLong(0L)
     val totalTx = AtomicLong(0L)
@@ -178,48 +166,38 @@ class Socks5Server(
             return
         }
 
-        connectSemaphore.acquire()
-        try {
-            val remote = onConnectRequest(destHost, destPort)
-            if (remote == null) {
-                AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
-                output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
-                output.flush()
-                client.close()
-                return
-            }
-            AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
-
-            output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        val remote = onConnectRequest(destHost, destPort)
+        if (remote == null) {
+            AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
+            output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
-
-            val (remoteIn, remoteOut) = remote
-            relay(input, remoteOut, output, remoteIn, client, destHost, destPort)
-        } finally {
-            connectSemaphore.release()
+            client.close()
+            return
         }
+        AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
+
+        output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        output.flush()
+
+        val (remoteIn, remoteOut) = remote
+        relay(input, remoteOut, output, remoteIn, client, destHost, destPort)
     }
 
     private suspend fun handleDnsOverTcp(client: Socket, originalDest: String) {
         val targetDns = dns1
-        connectSemaphore.acquire()
-        try {
-            val remote = onConnectRequest(targetDns, 53)
-            if (remote == null) {
-                client.getOutputStream().write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
-                client.getOutputStream().flush()
-                client.close()
-                return
-            }
-
-            client.getOutputStream().write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        val remote = onConnectRequest(targetDns, 53)
+        if (remote == null) {
+            client.getOutputStream().write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             client.getOutputStream().flush()
-
-            val (remoteIn, remoteOut) = remote
-            relay(client.getInputStream(), remoteOut, client.getOutputStream(), remoteIn, client, targetDns, 53)
-        } finally {
-            connectSemaphore.release()
+            client.close()
+            return
         }
+
+        client.getOutputStream().write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        client.getOutputStream().flush()
+
+        val (remoteIn, remoteOut) = remote
+        relay(client.getInputStream(), remoteOut, client.getOutputStream(), remoteIn, client, targetDns, 53)
     }
 
     private suspend fun handleUdpAssociate(client: Socket, output: OutputStream) {
@@ -389,7 +367,6 @@ class Socks5Server(
     }
 
     private suspend fun resolveDnsViaTcp(dnsServerHost: String, dnsQuery: ByteArray): ByteArray? {
-        connectSemaphore.acquire()
         var remote: Pair<InputStream, OutputStream>? = null
         return try {
             val opened = onConnectRequest(dnsServerHost, 53) ?: return null
@@ -418,7 +395,6 @@ class Socks5Server(
                 runCatching { remoteIn.close() }
                 runCatching { remoteOut.close() }
             }
-            connectSemaphore.release()
         }
     }
 
@@ -514,7 +490,26 @@ class Socks5Server(
             pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
         }
 
-        joinAll(job1, job2)
+        val firstFinished = CompletableDeferred<Unit>()
+        job1.invokeOnCompletion { firstFinished.complete(Unit) }
+        job2.invokeOnCompletion { firstFinished.complete(Unit) }
+        firstFinished.await()
+
+        // Uma ponta encerrada normalmente significa que esta conexao esta sendo
+        // finalizada. Damos alguns segundos para a resposta/FIN pendente e depois
+        // fechamos os streams para desbloquear qualquer read() que tenha ficado
+        // preso. Sem esse prazo, o relay mantinha o canal SSH e seu permit para
+        // sempre, degradando toda a VPN depois de alguns minutos.
+        val endedGracefully = withTimeoutOrNull(5_000L) {
+            joinAll(job1, job2)
+            true
+        } ?: false
+        if (!endedGracefully) {
+            AppLog.log(
+                "$logPrefix: encerrando relay preso pra $tag após 5s de meia-conexão",
+                AppLog.Level.INFO
+            )
+        }
         AppLog.log(
             "$logPrefix: relay encerrado pra $tag — total enviado ${totalTx.get()}B, recebido ${totalRx.get()}B (desde que o servidor ligou; nao so essa conexao)",
             AppLog.Level.INFO
@@ -524,6 +519,8 @@ class Socks5Server(
         runCatching { remoteOut.close() }
         runCatching { clientOut.close() }
         runCatching { remoteIn.close() }
+        job1.cancel()
+        job2.cancel()
     }
 
     private fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong, tag: String) {
