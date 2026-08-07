@@ -175,13 +175,13 @@ object NativeTun2Socks {
           port: 53
         """.trimIndent()
         if (logFilePath == null) return base
-        // CORRECAO: usuario relatou mensagem do WhatsApp travando ~1 MINUTO antes de
-        // sair — bate exatamente com o padrao de fabrica da lib pra
-        // "misc.read-write-timeout" (60000ms = 60s), nunca configurado explicitamente
-        // ate agora. Baixado pra 20s: se uma conexao parada nao trocar dado em 20s ja
-        // desiste, deixando o protocolo (WhatsApp/navegador) tentar de novo mais
-        // rapido em vez de segurar por um minuto inteiro.
-        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: warn\n  read-write-timeout: 20000\n"
+        // CORRECAO: numeros reais (nativeGetStats) mostraram o motor nativo enviando
+        // MAIS DO DOBRO do que o nosso SOCKS5 realmente recebeu dele (671KB vs 314KB
+        // na mesma janela) — marca classica de retransmissao (TCP reenviando por
+        // falta de confirmacao a tempo). "misc.tcp-buffer-size" da lib vem em 64KB de
+        // fabrica (doc oficial); com varias conexoes simultaneas de uma pagina real,
+        // isso pode nao dar conta e forcar descarte. Aumentado pra 256KB.
+        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: warn\n  read-write-timeout: 20000\n  tcp-buffer-size: 262144\n"
     }
 
     private external fun nativeStart(configYaml: String, tunFd: Int): Boolean
