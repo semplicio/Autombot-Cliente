@@ -63,7 +63,7 @@ object AppLog {
             Level.SUCCESS -> Log.i(tag, "SUCCESS: $message")
             Level.ERROR -> Log.e(tag, message)
         }
-        _entries.update { current -> (listOf(Entry(System.currentTimeMillis(), message, level)) + current).take(200) }
+        _entries.update { current -> (listOf(Entry(System.currentTimeMillis(), message, level)) + current).take(600) }
         // Persiste em background pra não bloquear quem chamou (pode ser a thread de UI).
         ioScope.launch { persist() }
     }
