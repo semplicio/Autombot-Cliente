@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
 import net.schmizz.sshj.transport.TransportException
@@ -18,6 +17,8 @@ import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.json.JSONArray
 import java.io.File
+import java.io.FilterInputStream
+import java.io.FilterOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -29,6 +30,7 @@ import java.net.Socket
 import java.util.concurrent.Callable
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.SocketFactory
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
@@ -90,7 +92,9 @@ class SshTunnelManager(context: Context) {
     private val udpGwCreationMutex = Mutex()
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    // CORRECAO: limite de 24 canais simultaneos (padrao seguro p/ Dropbear e OpenSSH).
+    // Limite global de canais SSH ATIVOS. O permit acompanha o canal ate close();
+    // antes ele era devolvido logo depois de newDirectConnection(), então não
+    // limitava a carga real no servidor.
     private val channelSemaphore = Semaphore(24)
 
     // CORRECAO CRITICA: client.newDirectConnection(...) (dentro do synchronized do
@@ -293,8 +297,8 @@ class SshTunnelManager(context: Context) {
      */
     /**
      * Abre um canal direct-tcpip pelo SSH ate (destHost, destPort).
-     * CORRECAO: transformada em suspend fun e usando Semaphore.withPermit de forma
-     * nativa (sem runBlocking). Isso evita travar as threads do Dispatchers.IO.
+     * O permit do semaforo permanece adquirido durante toda a vida do canal e so e
+     * devolvido quando os streams forem fechados.
      */
     private suspend fun openDirectChannel(client: SSHClient, destHost: String, destPort: Int): Pair<InputStream, OutputStream>? {
         if (!client.isConnected || !client.isAuthenticated) {
@@ -303,26 +307,35 @@ class SshTunnelManager(context: Context) {
             return null
         }
 
+        var permitAcquired = false
+        var permitTransferred = false
+        var openedChannel: DirectConnection? = null
         return try {
-            // CORRECAO: o navegador abre VARIAS conexoes ao mesmo tempo. Sem limite,
-            // isso pode causar "Connection reset by peer" no servidor SSH.
-            // Aumentado para 24 canais para melhor performance em sites pesados.
-            channelSemaphore.withPermit {
-                val future = channelOpenExecutor.submit(Callable {
-                    client.newDirectConnection(destHost, destPort)
-                })
-                val channel = try {
-                    withContext(Dispatchers.IO) {
-                        future.get(10, TimeUnit.SECONDS)
-                    }
-                } catch (e: TimeoutException) {
-                    future.cancel(true)
-                    throw IOException("Timeout ao abrir canal SSH pra $destHost:$destPort")
-                } catch (e: Exception) {
-                    throw e.cause ?: e
-                }
-                channel.inputStream to channel.outputStream
+            channelSemaphore.acquire()
+            permitAcquired = true
+
+            if (!client.isConnected || !client.isAuthenticated) {
+                throw IOException("Conexão SSH encerrada enquanto aguardava vaga para o canal")
             }
+
+            val future = channelOpenExecutor.submit(Callable {
+                client.newDirectConnection(destHost, destPort)
+            })
+            val channel = try {
+                withContext(Dispatchers.IO) {
+                    future.get(10, TimeUnit.SECONDS)
+                }
+            } catch (e: TimeoutException) {
+                future.cancel(true)
+                throw IOException("Timeout ao abrir canal SSH pra $destHost:$destPort")
+            } catch (e: Exception) {
+                throw e.cause ?: e
+            }
+            openedChannel = channel
+
+            val lease = DirectChannelLease(channel) { channelSemaphore.release() }
+            permitTransferred = true
+            lease.inputStream to lease.outputStream
         } catch (e: Exception) {
             val detail = "${e.javaClass.simpleName}: ${e.message}"
             // android.util.Log.w("SshTunnelManager", "Falha ao abrir canal SSH para $destHost:$destPort: $detail")
@@ -332,6 +345,37 @@ class SshTunnelManager(context: Context) {
                 if (name != null) markError(name, "Túnel SSH caiu: ${e.message}")
             }
             null
+        } finally {
+            if (permitAcquired && !permitTransferred) {
+                runCatching { openedChannel?.close() }
+                channelSemaphore.release()
+            }
+        }
+    }
+
+    /** Fecha o canal inteiro e devolve seu permit exatamente uma vez. */
+    private class DirectChannelLease(
+        private val channel: DirectConnection,
+        private val onClosed: () -> Unit
+    ) {
+        private val closed = AtomicBoolean(false)
+
+        val inputStream: InputStream = object : FilterInputStream(channel.inputStream) {
+            override fun close() = closeChannel()
+        }
+
+        val outputStream: OutputStream = object : FilterOutputStream(channel.outputStream) {
+            override fun close() = closeChannel()
+        }
+
+        private fun closeChannel() {
+            if (closed.compareAndSet(false, true)) {
+                try {
+                    channel.close()
+                } finally {
+                    onClosed()
+                }
+            }
         }
     }
 
@@ -416,20 +460,7 @@ class SshTunnelManager(context: Context) {
         destHost: String,
         destPort: Int,
         onIncoming: (ByteArray) -> Unit
-    ): UdpBackendSession? {
-        // CORRECAO: essa funcao so retornava null calada, sem log nenhum — impossivel
-        // de distinguir "Gateway UDP realmente ligado mas falhando em algum lugar" de
-        // "nunca foi ativado de verdade" so olhando o log. Usuario confirmou ter
-        // desconectado/reconectado depois de ligar o toggle, mas nenhuma das duas
-        // mensagens de log do openUdpOverGateway (sucesso ou falha) apareceu — ou
-        // seja, esse caminho aqui (o desativado) que estava sendo usado. Log novo
-        // deixa isso visivel de vez.
-        AppLog.log(
-            "SSH: UDP pra $destHost:$destPort recusado (Gateway UDP desligado pra essa conexão — udpForwardEnabled=false)",
-            AppLog.Level.ERROR
-        )
-        return null
-    }
+    ): UdpBackendSession? = null
 
     /**
      * ComposedSocket: um Socket "decorador" que so faz a conexao de verdade dentro do
