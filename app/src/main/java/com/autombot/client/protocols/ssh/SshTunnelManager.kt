@@ -311,13 +311,7 @@ class SshTunnelManager(context: Context) {
         var permitTransferred = false
         var openedChannel: DirectConnection? = null
         return try {
-            val gotPermit = withTimeoutOrNull(10_000L) {
-                channelSemaphore.acquire()
-                true
-            } ?: false
-            if (!gotPermit) {
-                throw IOException("Todos os canais SSH estao ocupados ha 10s")
-            }
+            channelSemaphore.acquire()
             permitAcquired = true
 
             if (!client.isConnected || !client.isAuthenticated) {
@@ -344,15 +338,8 @@ class SshTunnelManager(context: Context) {
             lease.inputStream to lease.outputStream
         } catch (e: Exception) {
             val detail = "${e.javaClass.simpleName}: ${e.message}"
-            if (e.message?.contains("canais SSH estao ocupados") == true ||
-                e.message?.contains("Timeout ao abrir canal SSH") == true
-            ) {
-                AppLog.log(
-                    "SSH: falha ao abrir canal para $destHost:$destPort ($detail)",
-                    AppLog.Level.ERROR
-                )
-            }
-
+            // android.util.Log.w("SshTunnelManager", "Falha ao abrir canal SSH para $destHost:$destPort: $detail")
+            
             if (e is TransportException || e.message?.contains("Socket closed") == true) {
                 val name = activeClients.entries.firstOrNull { it.value == client }?.key
                 if (name != null) markError(name, "Túnel SSH caiu: ${e.message}")
@@ -377,15 +364,8 @@ class SshTunnelManager(context: Context) {
             override fun close() = closeChannel()
         }
 
-        val outputStream: OutputStream = object : FilterOutputStream(channel.outputStream), HalfCloseableOutput {
+        val outputStream: OutputStream = object : FilterOutputStream(channel.outputStream) {
             override fun close() = closeChannel()
-
-            override fun shutdownOutput() {
-                // ChannelOutputStream.close() no SSHJ envia CHANNEL_EOF, mas nao
-                // fecha imediatamente o canal de leitura. Isso permite que o
-                // servidor termine de devolver a resposta antes do close final.
-                channel.outputStream.close()
-            }
         }
 
         private fun closeChannel() {
@@ -438,18 +418,7 @@ class SshTunnelManager(context: Context) {
         onIncoming: (ByteArray) -> Unit
     ): UdpBackendSession? {
         val gwClient = udpGwCreationMutex.withLock {
-            val existing = activeUdpGwClients[connectionName]
-            if (existing != null && !existing.isClosed()) {
-                existing
-            } else run {
-                if (existing != null) {
-                    activeUdpGwClients.remove(connectionName)
-                    existing.stop()
-                    AppLog.log(
-                        "SSH \"$connectionName\": gateway UDP anterior encerrou; reconectando",
-                        AppLog.Level.INFO
-                    )
-                }
+            activeUdpGwClients[connectionName] ?: run {
                 val streams = openDirectChannel(client, gwHost, gwPort)
                 if (streams == null) {
                     AppLog.log("SSH \"$connectionName\": falha ao conectar no gateway UDP ($gwHost:$gwPort)", AppLog.Level.ERROR)
@@ -590,12 +559,6 @@ class SshTunnelManager(context: Context) {
                 // cai pra IPv6 se nenhum IPv4 funcionar.
                 connectPreferringIPv4(host, port, effectiveTimeout)
             }
-
-            // Um unico socket SSH carrega todos os canais do navegador. Nagle nesse
-            // transporte adiciona atraso a cada grupo de pacotes pequenos e pode
-            // fazer varias conexoes parecerem travadas ao mesmo tempo.
-            runCatching { socket.tcpNoDelay = true }
-            runCatching { socket.keepAlive = true }
 
             // CORRECAO IMPORTANTE: TLS tem que vir ANTES do payload, nao depois.
             // Servidores/CDNs que recebem TLS na porta 443 (ex: CloudFront) esperam um
