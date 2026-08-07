@@ -392,48 +392,31 @@ class SshTunnelManager(context: Context) {
         return gwClient.openSession(destHost, destPort, onIncoming)
     }
 
+    /**
+     * CORRECAO: log real do usuario mostrou ERR_QUIC_PROTOCOL_ERROR no navegador —
+     * QUIC (usado por padrao pelo Chrome em varios sites, inclusive Google) e UDP de
+     * verdade, com cada pacote sendo uma unidade propria e delimitada. Essa funcao
+     * pegava os bytes de cada "datagrama" e so escrevia direto num canal SSH
+     * direct-tcpip (TCP, um FLUXO continuo sem limite nenhum entre pedacos) — dois
+     * pacotes QUIC podiam ser fundidos num so, ou um pacote cortado ao meio, e o
+     * lado que recebe (o navegador, aqui) tenta interpretar isso como QUIC valido e
+     * da erro de protocolo. Funcionava por acidente pra coisas que sao TCP/TLS
+     * disfarcado de UDP (por isso o comentario antigo dizia "funciona na pratica"),
+     * mas quebra qualquer protocolo que seja UDP de verdade — QUIC sendo o mais
+     * comum. Sem um jeito real de fazer UDP sem o Gateway UDP dedicado (badvpn-udpgw,
+     * so ligado quando o usuario ativa udpForwardEnabled), a opcao mais segura e
+     * RECUSAR aqui: a sessao UDP simplesmente nao abre, o pacote e descartado sem
+     * resposta, e o Chrome (que ja tenta TCP em paralelo/como fallback pra todo
+     * QUIC) cai pro HTTPS normal por conta propria — que ja confirmamos funcionando.
+     * Preferimos um "sem resposta" limpo a um "resposta corrompida" que gera erro
+     * na tela.
+     */
     private suspend fun openUdpOver443Internal(
         client: SSHClient,
         destHost: String,
         destPort: Int,
         onIncoming: (ByteArray) -> Unit
-    ): UdpBackendSession? {
-        if (destPort != 443) return null
-
-        val streams = openDirectChannel(client, destHost, 443) ?: return null
-        val (channelIn, channelOut) = streams
-
-        // Le continuamente o que a conexao TCP mandar de volta, entregando cada
-        // pedaco como se fosse um "datagrama" de resposta — nao preserva os limites
-        // exatos de pacote UDP originais (impossivel sobre um fluxo TCP puro), mas
-        // funciona na pratica pra esse caso de uso (TLS/HTTP sobre TCP).
-        val readerJob = managerScope.launch(Dispatchers.IO) {
-            val buffer = ByteArray(16384)
-            try {
-                while (isActive) {
-                    val read = channelIn.read(buffer)
-                    if (read <= 0) break
-                    onIncoming(buffer.copyOf(read))
-                }
-            } catch (e: Exception) {
-                // canal fechado ou erro — cai pro finally
-            } finally {
-                runCatching { channelIn.close() }
-                runCatching { channelOut.close() }
-            }
-        }
-
-        return object : UdpBackendSession {
-            override suspend fun send(payload: ByteArray) {
-                runCatching { channelOut.write(payload); channelOut.flush() }
-            }
-            override fun close() {
-                readerJob.cancel()
-                runCatching { channelIn.close() }
-                runCatching { channelOut.close() }
-            }
-        }
-    }
+    ): UdpBackendSession? = null
 
     /**
      * ComposedSocket: um Socket "decorador" que so faz a conexao de verdade dentro do
