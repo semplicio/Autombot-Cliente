@@ -83,6 +83,9 @@ class UdpGwClient(
         runCatching { channelOut.close() }
     }
 
+    /** Permite ao gerenciador recriar o canal se o udpgw remoto o encerrar. */
+    fun isClosed(): Boolean = closed
+
     /** Abre um conid exclusivo para esta sessão SOCKS5 UDP. */
     fun openSession(destHost: String, destPort: Int, onIncoming: (ByteArray) -> Unit): UdpBackendSession? {
         if (closed) return null

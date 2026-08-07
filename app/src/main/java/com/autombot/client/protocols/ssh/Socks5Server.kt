@@ -1,9 +1,7 @@
 package com.autombot.client.protocols.ssh
 
-import android.util.Log
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Semaphore
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramPacket
@@ -15,6 +13,15 @@ import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration.Companion.milliseconds
+
+/**
+ * Alguns backends (como o canal direct-tcpip do SSHJ) conseguem encerrar apenas
+ * o sentido de escrita sem fechar o canal inteiro. Isso e necessario para
+ * propagar FIN/EOF corretamente e ainda permitir que a resposta pendente chegue.
+ */
+internal interface HalfCloseableOutput {
+    fun shutdownOutput()
+}
 
 /**
  * Servidor SOCKS5 mínimo, local (127.0.0.1), sem autenticação.
@@ -37,16 +44,6 @@ class Socks5Server(
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var running = false
-
-    // CORRECAO: log real do usuario mostrou 14 destinos diferentes abertos ao
-    // mesmo tempo, seguido de "Conexao SSH perdida" derrubando TODOS eles juntos —
-    // sinal claro de que o servidor (Dropbear, leve, pensado pra pouco uso
-    // simultaneo) nao aguenta tantos canais ao mesmo tempo e fecha a conexao
-    // inteira. 128 era alto demais; 16 ainda e generoso pra navegacao normal (esse
-    // limite controla a vida inteira da conexao, nao apenas a abertura do canal.
-    // Isso evita que varias paginas mantenham dezenas de canais SSH ativos ao mesmo
-    // tempo e derrubem a sessao principal no servidor.
-    private val connectSemaphore = Semaphore(permits = 16)
 
     val totalRx = AtomicLong(0L)
     val totalTx = AtomicLong(0L)
@@ -178,48 +175,41 @@ class Socks5Server(
             return
         }
 
-        connectSemaphore.acquire()
-        try {
-            val remote = onConnectRequest(destHost, destPort)
-            if (remote == null) {
-                AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
-                output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
-                output.flush()
-                client.close()
-                return
-            }
-            AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
-
-            output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        // O limite real de canais e controlado no SshTunnelManager. Manter um
+        // segundo semaforo aqui fazia navegadores com conexoes persistentes
+        // esgotarem 16 vagas e deixarem novas requisicoes esperando sem log.
+        val remote = onConnectRequest(destHost, destPort)
+        if (remote == null) {
+            AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
+            output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
-
-            val (remoteIn, remoteOut) = remote
-            relay(input, remoteOut, output, remoteIn, client, destHost, destPort)
-        } finally {
-            connectSemaphore.release()
+            client.close()
+            return
         }
+        AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
+
+        output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        output.flush()
+
+        val (remoteIn, remoteOut) = remote
+        relay(input, remoteOut, output, remoteIn, client, destHost, destPort)
     }
 
     private suspend fun handleDnsOverTcp(client: Socket, originalDest: String) {
         val targetDns = dns1
-        connectSemaphore.acquire()
-        try {
-            val remote = onConnectRequest(targetDns, 53)
-            if (remote == null) {
-                client.getOutputStream().write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
-                client.getOutputStream().flush()
-                client.close()
-                return
-            }
-
-            client.getOutputStream().write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        val remote = onConnectRequest(targetDns, 53)
+        if (remote == null) {
+            client.getOutputStream().write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             client.getOutputStream().flush()
-
-            val (remoteIn, remoteOut) = remote
-            relay(client.getInputStream(), remoteOut, client.getOutputStream(), remoteIn, client, targetDns, 53)
-        } finally {
-            connectSemaphore.release()
+            client.close()
+            return
         }
+
+        client.getOutputStream().write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        client.getOutputStream().flush()
+
+        val (remoteIn, remoteOut) = remote
+        relay(client.getInputStream(), remoteOut, client.getOutputStream(), remoteIn, client, targetDns, 53)
     }
 
     private suspend fun handleUdpAssociate(client: Socket, output: OutputStream) {
@@ -389,7 +379,6 @@ class Socks5Server(
     }
 
     private suspend fun resolveDnsViaTcp(dnsServerHost: String, dnsQuery: ByteArray): ByteArray? {
-        connectSemaphore.acquire()
         var remote: Pair<InputStream, OutputStream>? = null
         return try {
             val opened = onConnectRequest(dnsServerHost, 53) ?: return null
@@ -418,7 +407,6 @@ class Socks5Server(
                 runCatching { remoteIn.close() }
                 runCatching { remoteOut.close() }
             }
-            connectSemaphore.release()
         }
     }
 
@@ -489,29 +477,34 @@ class Socks5Server(
         clientOut: OutputStream, remoteIn: InputStream,
         client: Socket, destHost: String, destPort: Int
     ) = coroutineScope {
-        // CORRECAO: log real do usuario mostrou o padrao exato do bug ORIGINAL —
-        // "[enviando]" terminava cedo e o "[recebendo]" da MESMA conexao nunca
-        // aparecia no log, porque cada ponta cancelava o coroutineScope INTEIRO ao
-        // terminar. Meu conserto anterior trocou isso por "so fecha a metade que
-        // terminou" (remoteOut.close() / clientOut.close()) — MAS isso nao e um
-        // meio-fechamento de verdade: pra um java.net.Socket comum (e bem provavel
-        // pro canal SSH tambem), fechar so o OutputStream fecha o SOCKET INTEIRO,
-        // as duas direcoes junto — nao existe meio-fechamento real sem chamar
-        // shutdownOutput() no Socket de verdade, que a assinatura generica
-        // (InputStream/OutputStream) nem permite. Resultado pratico: a "correcao"
-        // anterior ainda derrubava a ligacao no meio do caminho — so que agora de
-        // um jeito mais brusco (fechar o socket com dado ainda por vir gera RST, nao
-        // FIN), e isso e exatamente o que vira ERR_CONNECTION_RESET no navegador em
-        // vez do ERR_TIMED_OUT de antes. Ou seja: bug parecido, sintoma novo.
-        // Agora nenhuma das duas pontas fecha nada sozinha — cada uma roda ate o
-        // proprio fim natural (fim de fluxo ou erro), e SO no final, com as DUAS
-        // ja terminadas (joinAll), fecha tudo de vez.
+        // Cada direcao precisa propagar seu FIN/EOF assim que termina. Sem isso, o
+        // outro lado nunca descobre que nao vira mais dado: uma coroutine fica
+        // bloqueada no read(), o relay nao termina e o canal continua ocupando uma
+        // vaga. Depois de varias conexoes assim, a navegacao inteira para ate algum
+        // endpoint remoto encerrar por timeout.
+        //
+        // No SSHJ 0.38, fechar o ChannelOutputStream envia SSH_MSG_CHANNEL_EOF e
+        // mantem o canal aberto para a resposta. No socket local, shutdownOutput()
+        // envia FIN ao HEV sem fechar o sentido de entrada. O wrapper criado pelo
+        // SshTunnelManager expoe esse primeiro comportamento via HalfCloseableOutput.
         val tag = "$destHost:$destPort"
         val job1 = launch(Dispatchers.IO) {
-            pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
+            try {
+                pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
+            } finally {
+                runCatching {
+                    (remoteOut as? HalfCloseableOutput)?.shutdownOutput()
+                }
+            }
         }
         val job2 = launch(Dispatchers.IO) {
-            pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
+            try {
+                pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
+            } finally {
+                runCatching {
+                    if (!client.isClosed && !client.isOutputShutdown) client.shutdownOutput()
+                }
+            }
         }
 
         joinAll(job1, job2)
@@ -527,7 +520,10 @@ class Socks5Server(
     }
 
     private fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong, tag: String) {
-        val buffer = ByteArray(16384)
+        // 64 KiB permite que transferencias grandes acompanhem melhor a janela do
+        // canal SSH. Leituras pequenas continuam sendo enviadas imediatamente pelo
+        // flush abaixo, preservando a latencia de mensagens interativas.
+        val buffer = ByteArray(65536)
         var bytesThisPipe = 0L
         try {
             while (isActive) {
