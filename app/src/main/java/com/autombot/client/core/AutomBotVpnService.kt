@@ -229,8 +229,6 @@ class AutomBotVpnService : VpnService() {
             .addDnsServer(dns1)
             .addDnsServer(dns2)
             .addRoute("0.0.0.0", 0)
-            .addAddress("fd00:1:fd00:1::1", 128)
-            .addRoute("::", 0)
             .setMtu(1280)
 
         // CORRECAO: alem do protect() por socket (que deveria bastar sozinho, mas por
