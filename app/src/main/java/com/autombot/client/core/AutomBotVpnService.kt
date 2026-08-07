@@ -209,6 +209,7 @@ class AutomBotVpnService : VpnService() {
             // (log-file na config) e isso aqui fica repassando linha por linha pro
             // AppLog, que ja aparece na tela "Ver log" de sempre — sem precisar de PC.
             NativeTun2Socks.startTailingToAppLog(hevLogPath)
+            NativeTun2Socks.startStatsLogging()
         }
     }
 
@@ -342,6 +343,7 @@ class AutomBotVpnService : VpnService() {
         AppLog.log("VPN de sistema: desligando", AppLog.Level.INFO)
         runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
         NativeTun2Socks.stopTailing()
+        NativeTun2Socks.stopStatsLogging()
         NativeTun2Socks.stop()
         openVpnClient?.stop()
         openVpnClient = null
