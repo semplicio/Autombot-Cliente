@@ -202,7 +202,7 @@ class Socks5Server(
         client.getOutputStream().flush()
 
         val (remoteIn, remoteOut) = remote
-        relay(client.getInputStream(), remoteOut, client.getOutputStream(), remoteIn, client)
+        relay(client.getInputStream(), remoteOut, client.getOutputStream(), remoteIn, client, targetDns, 53)
     }
 
     private suspend fun handleUdpAssociate(client: Socket, output: OutputStream) {
