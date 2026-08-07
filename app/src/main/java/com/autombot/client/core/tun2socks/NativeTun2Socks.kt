@@ -1,5 +1,12 @@
 package com.autombot.client.core.tun2socks
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+
 /**
  * Ponte pro motor de tun2socks NATIVO (biblioteca C de terceiros hev-socks5-tunnel,
  * https://github.com/heiher/hev-socks5-tunnel), no lugar do Tun2SocksEngine.kt
@@ -35,9 +42,61 @@ object NativeTun2Socks {
      * passado para não depender do DNS padrão do sistema (que pode estar dentro do
      * próprio túnal, causando loop).
      */
-    fun start(tunFd: Int, socksHost: String, socksPort: Int, dns: String = "8.8.8.8"): Boolean {
-        val config = buildConfig(socksHost, socksPort, dns)
+    // CORRECAO: usuario sem acesso a PC/adb pra puxar o Logcat real do sistema (unico
+    // jeito de ver os logs INTERNOS da hev-socks5-tunnel — coisas como falha de
+    // handshake SOCKS5, timeout de conexao, sessao TCP/UDP descartada — que nunca
+    // passavam pelo nosso AppLog porque essa parte e uma biblioteca de terceiros,
+    // nao codigo nosso). Documentacao da lib confirma que ela aceita
+    // "misc.log-file: <caminho>" apontando pra QUALQUER arquivo, nao so
+    // stdout/stderr. Agora aponta pra um arquivo dentro da pasta do proprio app
+    // (nao precisa de permissao nenhuma) com log-level "debug" (maximo detalhe) —
+    // e o startTailingToAppLog() abaixo fica lendo esse arquivo e repassando linha
+    // por linha pro AppLog, que ja aparece na tela "Ver log" que o usuario ja usa.
+    // Sem isso, essa metade inteira do pipeline (TUN -> lib nativa -> SOCKS5) era
+    // uma caixa preta.
+    fun logFilePath(context: android.content.Context): String =
+        java.io.File(context.filesDir, "hev_tunnel.log").absolutePath
+
+    fun start(tunFd: Int, socksHost: String, socksPort: Int, dns: String = "8.8.8.8", logFilePath: String? = null): Boolean {
+        if (logFilePath != null) runCatching { java.io.File(logFilePath).writeText("") } // limpa do teste anterior
+        val config = buildConfig(socksHost, socksPort, dns, logFilePath)
         return nativeStart(config, tunFd)
+    }
+
+    private var tailJob: Job? = null
+
+    /** Fica lendo o arquivo de log da lib nativa e repassando linha por linha pro AppLog. */
+    fun startTailingToAppLog(logFilePath: String) {
+        tailJob?.cancel()
+        tailJob = CoroutineScope(Dispatchers.IO).launch {
+            val file = java.io.File(logFilePath)
+            var lastSize = 0L
+            while (isActive) {
+                runCatching {
+                    if (file.exists() && file.length() > lastSize) {
+                        file.inputStream().use { input ->
+                            input.skip(lastSize)
+                            input.bufferedReader().forEachLine { line ->
+                                if (line.isNotBlank()) {
+                                    val isError = line.contains("[E]") || line.contains("error", ignoreCase = true)
+                                    com.autombot.client.util.AppLog.log(
+                                        "hev (motor nativo): $line",
+                                        if (isError) com.autombot.client.util.AppLog.Level.ERROR else com.autombot.client.util.AppLog.Level.INFO
+                                    )
+                                }
+                            }
+                        }
+                        lastSize = file.length()
+                    }
+                }
+                delay(1500)
+            }
+        }
+    }
+
+    fun stopTailing() {
+        tailJob?.cancel()
+        tailJob = null
     }
 
     /** Para o túnel. Bloqueia até a thread nativa terminar de verdade — chamar fora da main thread. */
@@ -66,7 +125,8 @@ object NativeTun2Socks {
     //    maioria do DNS vem como pacote UDP da interface TUN), usa esse servidor
     //    em vez de herdar o DNS do sistema — que pode estar dentro do tunel, causando
     //    loop.
-    private fun buildConfig(socksHost: String, socksPort: Int, dns: String = "8.8.8.8"): String = """
+    private fun buildConfig(socksHost: String, socksPort: Int, dns: String = "8.8.8.8", logFilePath: String? = null): String {
+        val base = """
         tunnel:
           mtu: 1280
           ipv4: 198.18.0.1
@@ -77,7 +137,10 @@ object NativeTun2Socks {
         dns:
           address: $dns
           port: 53
-    """.trimIndent()
+        """.trimIndent()
+        if (logFilePath == null) return base
+        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: debug\n"
+    }
 
     private external fun nativeStart(configYaml: String, tunFd: Int): Boolean
     private external fun nativeStop()
