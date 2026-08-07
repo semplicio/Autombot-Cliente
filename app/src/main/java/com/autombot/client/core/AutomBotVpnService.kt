@@ -177,8 +177,12 @@ class AutomBotVpnService : VpnService() {
                 NativeTun2Socks.stop()
                 val fd = tunInterface?.fd
                 if (fd != null) {
-                    val restarted = NativeTun2Socks.start(fd, "127.0.0.1", socksPort, dns1)
-                    if (restarted) activeSocksPort = socksPort
+                    val hevLogPath = NativeTun2Socks.logFilePath(applicationContext)
+                    val restarted = NativeTun2Socks.start(fd, "127.0.0.1", socksPort, dns1, hevLogPath)
+                    if (restarted) {
+                        activeSocksPort = socksPort
+                        NativeTun2Socks.startTailingToAppLog(hevLogPath)
+                    }
                 }
                 return
             } else {
@@ -193,9 +197,18 @@ class AutomBotVpnService : VpnService() {
         activeDns2 = dns2
         activeSocksPort = socksPort
 
-        val started = NativeTun2Socks.start(tun.fd, "127.0.0.1", socksPort, dns1)
+        val hevLogPath = NativeTun2Socks.logFilePath(applicationContext)
+        val started = NativeTun2Socks.start(tun.fd, "127.0.0.1", socksPort, dns1, hevLogPath)
         if (!started) {
             AppLog.log("VPN de sistema: motor nativo falhou ao iniciar", AppLog.Level.ERROR)
+        } else {
+            // CORRECAO: usuario sem acesso a PC/adb pra ver o Logcat real do sistema —
+            // unico jeito, ate agora, de enxergar erro interno da biblioteca nativa
+            // hev-socks5-tunnel (a metade do pipeline TUN -> lib -> SOCKS5 que nunca
+            // aparecia em lugar nenhum do app). Agora ela escreve num arquivo proprio
+            // (log-file na config) e isso aqui fica repassando linha por linha pro
+            // AppLog, que ja aparece na tela "Ver log" de sempre — sem precisar de PC.
+            NativeTun2Socks.startTailingToAppLog(hevLogPath)
         }
     }
 
@@ -328,6 +341,7 @@ class AutomBotVpnService : VpnService() {
     private fun stopVpn() {
         AppLog.log("VPN de sistema: desligando", AppLog.Level.INFO)
         runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
+        NativeTun2Socks.stopTailing()
         NativeTun2Socks.stop()
         openVpnClient?.stop()
         openVpnClient = null
