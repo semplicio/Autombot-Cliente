@@ -467,37 +467,42 @@ class Socks5Server(
         clientOut: OutputStream, remoteIn: InputStream,
         client: Socket, destHost: String, destPort: Int
     ) = coroutineScope {
-        // CORRECAO: essa funcao (quem de fato move os dados DEPOIS que "conectado"
-        // ja apareceu no log) nao registrava nada — nem quantos bytes passaram, nem
-        // por que uma direcao parou. Usuario confirmou que "conectado" aparece no
-        // log, mas o navegador nao recebe dado NENHUM — ou seja, o problema pode
-        // estar bem aqui, nao na conexao em si. Esse log novo mostra exatamente
-        // quantos bytes fluiram em cada direcao e o motivo de parar (fim normal,
-        // erro, ou cancelado pela outra ponta).
+        // CORRECAO: log real do usuario mostrou o padrao exato do bug — "[enviando]"
+        // terminava cedo (ex: so 215 bytes, o ClientHello do TLS) e o "[recebendo]"
+        // daquela MESMA conexao nunca aparecia no log, nem com sucesso nem com erro.
+        // Motivo: cada uma das duas pontas, ao terminar, cancelava o coroutineScope
+        // INTEIRO (this@coroutineScope.cancel()) — matando a OUTRA ponta no meio do
+        // caminho, silenciosamente (cancelamento nao cai no catch(Exception) do
+        // pipe(), so faz o loop parar sem logar nada). Ou seja: o cliente manda o
+        // ClientHello, aquele lado termina (fim normal, cliente so tem isso pra
+        // mandar por enquanto), e a gente MESMO matava o lado que ia trazer a
+        // resposta do servidor — antes dela chegar. Isso explica navegador nunca
+        // receber nada mesmo com "conectado" no log.
+        // Agora cada direcao roda ate o SEU proprio fim natural (fim de fluxo ou
+        // erro) sem derrubar a outra; ao terminar, so fecha a metade que lhe
+        // corresponde (meio-fechamento de verdade), deixando a outra ponta livre
+        // pra continuar entregando dado. So fecha tudo de vez quando as DUAS
+        // direcoes ja tiverem terminado (joinAll).
         val tag = "$destHost:$destPort"
-        val job1 = launch(Dispatchers.IO) { 
-            try { pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]") } 
-            finally { this@coroutineScope.cancel() } 
+        val job1 = launch(Dispatchers.IO) {
+            try { pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]") }
+            finally { runCatching { remoteOut.close() } }
         }
-        val job2 = launch(Dispatchers.IO) { 
-            try { pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]") } 
-            finally { this@coroutineScope.cancel() } 
+        val job2 = launch(Dispatchers.IO) {
+            try { pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]") }
+            finally { runCatching { clientOut.close() } }
         }
-        
-        try {
-            joinAll(job1, job2)
-        } catch (e: CancellationException) {
-        } finally {
-            AppLog.log(
-                "$logPrefix: relay encerrado pra $tag — total enviado ${totalTx.get()}B, recebido ${totalRx.get()}B (desde que o servidor ligou; nao so essa conexao)",
-                AppLog.Level.INFO
-            )
-            runCatching { client.close() }
-            runCatching { clientIn.close() }
-            runCatching { remoteOut.close() }
-            runCatching { clientOut.close() }
-            runCatching { remoteIn.close() }
-        }
+
+        joinAll(job1, job2)
+        AppLog.log(
+            "$logPrefix: relay encerrado pra $tag — total enviado ${totalTx.get()}B, recebido ${totalRx.get()}B (desde que o servidor ligou; nao so essa conexao)",
+            AppLog.Level.INFO
+        )
+        runCatching { client.close() }
+        runCatching { clientIn.close() }
+        runCatching { remoteOut.close() }
+        runCatching { clientOut.close() }
+        runCatching { remoteIn.close() }
     }
 
     private fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong, tag: String) {
