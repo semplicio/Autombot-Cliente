@@ -2036,3 +2036,22 @@ protocolo. O navegador/app deve cair pro IPv4 quase instantaneamente, em vez de 
 
 IPv6 de verdade (suporte completo, não só rejeição rápida) fica como possível trabalho futuro — por
 enquanto, IPv4 é o caminho funcional em todos os protocolos.
+
+## 80. "Conectado" não significa "dados fluíram" — relay/pipe sem log nenhum até agora
+
+Usuário esclareceu, depois de eu apontar que o log mostrava 48 conexões bem-sucedidas: a conexão de fato
+**não funciona** — tentou carregar o Speedtest e não carregou nem a primeira página, apesar do log mostrar
+"conectado" várias vezes. Isso revela uma lacuna real de entendimento: **"conectado" só confirma que o
+handshake SOCKS5/TCP funcionou** — não garante que dado nenhum tenha fluído depois disso. A função que
+faz o trabalho de verdade (`relay`/`pipe`, que fica copiando bytes nos dois sentidos depois do "conectado")
+**não registrava nada** — nem quantos bytes passaram, nem por que uma direção parou.
+
+**Instrumentado agora**: `relay()` loga o total de bytes (enviado/recebido) quando a conexão termina;
+`pipe()` loga, pra cada direção separadamente, quantos bytes passaram e o motivo exato de parar (fim normal
+do fluxo vs erro específico, com o tipo da exceção). Isso deve mostrar, no próximo teste, exatamente onde a
+transferência de dados trava — se é logo no início (handshake TLS nunca completa) ou depois de algum dado já
+ter passado.
+
+Não identifiquei um bug óbvio na lógica do `relay`/`pipe` só de ler o código — o padrão de "se uma direção
+acabar, cancela a outra" é razoável em teoria. A instrumentação é o próximo passo necessário pra achar a
+causa raiz de verdade, em vez de adivinhar de novo.
