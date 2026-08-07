@@ -14,6 +14,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.autombot.client.ui.theme.AutomBotColors as C
+import com.autombot.client.ui.components.AutomBotGradientButton
+import com.autombot.client.ui.components.AutomBotTopBar
 import kotlinx.coroutines.delay
 
 /**
@@ -44,12 +46,7 @@ fun ConnectionTestScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
-        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onCancel) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Voltar", tint = C.Text)
-            }
-            Text("Testando Conexão", color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-        }
+        AutomBotTopBar("Testando conexão", onCancel, config.protocolName)
 
         Column(
             modifier = Modifier
@@ -62,8 +59,9 @@ fun ConnectionTestScreen(
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.size(120.dp)) {
                     CircularProgressIndicator(
                         progress = percent / 100f,
-                        color = C.Accent,
-                        strokeWidth = 6.dp,
+                        color = C.AccentLight,
+                        trackColor = C.Line,
+                        strokeWidth = 5.dp,
                         modifier = Modifier.fillMaxSize()
                     )
                     Text("$percent%", color = C.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -83,10 +81,7 @@ fun ConnectionTestScreen(
                     textAlign = TextAlign.Center
                 )
                 Spacer(Modifier.height(20.dp))
-                Button(
-                    onClick = onFinished,
-                    colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-                ) { Text("Voltar para Conexões") }
+                AutomBotGradientButton("Voltar para conexões", onFinished, accent = C.Accent)
             }
         }
 

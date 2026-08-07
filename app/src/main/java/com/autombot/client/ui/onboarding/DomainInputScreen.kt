@@ -9,10 +9,15 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.autombot.client.ui.theme.AutomBotColors as C
+import com.autombot.client.ui.components.AutomBotBackground
+import com.autombot.client.ui.components.AutomBotGradientButton
+import com.autombot.client.ui.components.AutomBotTopBar
+import androidx.compose.material.icons.filled.Language
 
 /** Tela 03 do mockup: input do domínio do provedor (fluxo "já tenho um domínio"). */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -23,21 +28,17 @@ fun DomainInputScreen(
 ) {
     var domain by remember { mutableStateOf("") }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(C.Background)
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Voltar", tint = C.Text)
+    AutomBotBackground {
+        Column(modifier = Modifier.fillMaxSize()) {
+            AutomBotTopBar(title = "Já tenho um domínio", onBack = onBack, eyebrow = "Configuração gerenciada")
+            Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp)) {
+            Box(
+                modifier = Modifier.size(56.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(17.dp)).background(C.Primary.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.Language, contentDescription = null, tint = C.PrimaryLight, modifier = Modifier.size(28.dp))
             }
-        }
-
-        Column(modifier = Modifier.padding(horizontal = 24.dp)) {
+            Spacer(Modifier.height(20.dp))
             Text("Já tenho um domínio", color = C.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
             Text(
@@ -53,6 +54,7 @@ fun DomainInputScreen(
                 placeholder = { Text("https://seudominio.com") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(13.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = C.Text,
                     unfocusedTextColor = C.Text,
@@ -67,14 +69,12 @@ fun DomainInputScreen(
             Text("Exemplo: painel.seudominio.com", color = C.TextDim, fontSize = 11.sp)
 
             Spacer(Modifier.height(20.dp))
-            Button(
+            AutomBotGradientButton(
+                text = "Conectar",
                 onClick = { onConnect(domain.trim()) },
                 enabled = domain.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = C.Primary, contentColor = C.OnPrimary)
-            ) {
-                Text("Conectar")
-            }
+                modifier = Modifier.fillMaxWidth()
+            )
 
             Spacer(Modifier.height(14.dp))
             Text(
@@ -83,6 +83,7 @@ fun DomainInputScreen(
                 fontSize = 12.sp,
                 modifier = Modifier.clickable { /* TODO: link de ajuda */ }
             )
+            }
         }
     }
 }

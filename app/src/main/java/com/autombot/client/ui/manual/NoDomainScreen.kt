@@ -19,15 +19,18 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.autombot.client.ui.theme.AutomBotColors as C
+import com.autombot.client.ui.components.AutomBotBackground
+import com.autombot.client.ui.components.AutomBotGradientButton
+import com.autombot.client.ui.components.AutomBotTopBar
 
 /** Tela 16 do mockup: introdução ao modo manual/profissional. */
 @Composable
-fun NoDomainScreen(onConfigureManually: () -> Unit) {
+fun NoDomainScreen(onBack: () -> Unit, onConfigureManually: () -> Unit) {
+    AutomBotBackground {
+    Column(modifier = Modifier.fillMaxSize()) {
+        AutomBotTopBar("Não tenho um domínio", onBack, "Modo manual")
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(C.Background)
-            .padding(28.dp),
+        modifier = Modifier.weight(1f).padding(28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -61,12 +64,8 @@ fun NoDomainScreen(onConfigureManually: () -> Unit) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Button(
-            onClick = onConfigureManually,
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-        ) {
-            Text("Configurar Manualmente")
-        }
+        AutomBotGradientButton("Configurar manualmente", onConfigureManually, Modifier.fillMaxWidth(), accent = C.Accent)
+    }
+    }
     }
 }

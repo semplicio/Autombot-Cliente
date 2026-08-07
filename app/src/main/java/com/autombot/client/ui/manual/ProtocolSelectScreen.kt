@@ -22,16 +22,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.autombot.client.ui.theme.AutomBotColors as C
+import com.autombot.client.ui.components.AutomBotCard
+import com.autombot.client.ui.components.AutomBotTopBar
+import com.autombot.client.ui.components.protocolVisual
 
 data class ProtocolOption(val id: String, val displayName: String, val implemented: Boolean)
 
 val ManualProtocolOptions = listOf(
-    ProtocolOption("wireguard", "WireGuard", implemented = true),
     ProtocolOption("ssh", "SSH", implemented = true),
-    ProtocolOption("vless", "VLESS", implemented = true),
-    ProtocolOption("vmess", "VMess", implemented = true),
+    ProtocolOption("vmess", "VMess / V2Ray", implemented = true),
+    ProtocolOption("wireguard", "WireGuard / VPN", implemented = true),
     ProtocolOption("shadowsocks", "Shadowsocks", implemented = true),
-    ProtocolOption("trojan", "Trojan", implemented = true)
+    ProtocolOption("vless", "VLESS", implemented = true),
+    ProtocolOption("trojan", "Trojan", implemented = true),
+    ProtocolOption("openvpn", "OpenVPN", implemented = true),
+    ProtocolOption("socks5", "SOCKS5", implemented = false)
 )
 
 /**
@@ -42,42 +47,27 @@ val ManualProtocolOptions = listOf(
 @Composable
 fun ProtocolSelectScreen(onBack: () -> Unit, onSelect: (ProtocolOption) -> Unit) {
     Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
-        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Voltar", tint = C.Text)
-            }
-            Text("Selecionar Protocolo", color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-        }
+        AutomBotTopBar("Selecionar protocolo", onBack, "Configuração manual")
 
         LazyColumn(
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(ManualProtocolOptions, key = { it.id }) { option ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(C.Surface)
-                        .border(1.dp, C.Line, RoundedCornerShape(14.dp))
-                        .clickable { onSelect(option) }
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                val (protocolIcon, protocolColor) = protocolVisual(option.id)
+                AutomBotCard(modifier = Modifier.fillMaxWidth(), padding = 12.dp, onClick = { onSelect(option) }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(if (option.implemented) C.Green else C.TextDim)
-                    )
+                        modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(protocolColor.copy(alpha = 0.14f)),
+                        contentAlignment = Alignment.Center
+                    ) { Icon(protocolIcon, contentDescription = null, tint = protocolColor, modifier = Modifier.size(21.dp)) }
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(option.displayName, color = C.Text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        if (!option.implemented) {
-                            Text("Configuração disponível, driver em desenvolvimento", color = C.TextDim, fontSize = 10.sp)
-                        }
+                        Text(if (option.implemented) "Disponível" else "Configuração manual", color = if (option.implemented) C.Green else C.TextDim, fontSize = 10.sp)
                     }
                     Icon(Icons.Default.ChevronRight, contentDescription = null, tint = C.TextDim)
+                }
                 }
             }
         }

@@ -1,6 +1,7 @@
 package com.autombot.client.ui.dashboard
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
@@ -16,6 +17,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import com.autombot.client.ui.theme.AutomBotColors as C
 
 enum class MainTab(val label: String) {
@@ -33,8 +36,9 @@ fun BottomNavBar(selected: MainTab, onSelect: (MainTab) -> Unit, showPlan: Boole
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(C.Surface)
-            .padding(vertical = 10.dp),
+            .background(C.Surface.copy(alpha = 0.98f))
+            .border(width = 1.dp, color = C.Line.copy(alpha = 0.7f))
+            .padding(horizontal = 8.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceAround
     ) {
         val iconFor = mapOf(
@@ -57,12 +61,16 @@ private fun NavItem(
     val active = tab == selected
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.clickable { onSelect(tab) }
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (active) C.Primary.copy(alpha = 0.11f) else androidx.compose.ui.graphics.Color.Transparent)
+            .clickable { onSelect(tab) }
+            .padding(horizontal = 13.dp, vertical = 4.dp)
     ) {
-        Icon(icon, contentDescription = tab.label, tint = if (active) C.Primary else C.TextDim)
+        Icon(icon, contentDescription = tab.label, tint = if (active) C.PrimaryLight else C.TextDim, modifier = Modifier.size(20.dp))
         Text(
             tab.label,
-            color = if (active) C.Primary else C.TextDim,
+            color = if (active) C.PrimaryLight else C.TextDim,
             fontSize = 10.sp,
             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal
         )

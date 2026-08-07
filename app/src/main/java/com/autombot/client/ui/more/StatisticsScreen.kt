@@ -1,75 +1,62 @@
 package com.autombot.client.ui.more
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.autombot.client.ui.components.AutomBotCard
+import com.autombot.client.ui.components.AutomBotTopBar
 import com.autombot.client.ui.theme.AutomBotColors as C
 
-/**
- * Tela 22 do mockup: Estatisticas. Mostra apenas o trafego real da sessao atual
- * (somado dos tuneis WireGuard ativos). NAO mostra grafico de historico "hoje/7
- * dias/30 dias" porque isso exigiria armazenamento persistente que ainda nao existe
- * — ver TODO abaixo.
- *
- * TODO: quando houver persistencia de trafego (SPEC.md — pendente), reativar o
- * grafico historico do mockup (tela 22 original).
- */
 @Composable
-fun StatisticsScreen(rxBytesLabel: String, txBytesLabel: String, totalLabel: String, onBack: () -> Unit) {
-    Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
-        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Voltar", tint = C.Text)
-            }
-            Text("Estatísticas", color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-        }
-
-        Column(modifier = Modifier.padding(20.dp)) {
-            Text("Sessão atual", color = C.TextDim, fontSize = 11.sp)
-            Spacer(Modifier.height(8.dp))
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(C.Surface)
-                    .border(1.dp, C.Line, RoundedCornerShape(16.dp))
-                    .padding(16.dp)
-            ) {
-                Text("Tráfego total", color = C.TextDim, fontSize = 11.sp)
-                Text(totalLabel, color = C.Text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(12.dp))
+fun StatisticsScreen(
+    rxBytesLabel: String,
+    txBytesLabel: String,
+    totalLabel: String,
+    downloadFraction: Float,
+    onBack: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        AutomBotTopBar("Estatísticas", onBack, "Sessão atual")
+        Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+            AutomBotCard(modifier = Modifier.fillMaxWidth()) {
+                Text("TRÁFEGO TOTAL", color = C.TextDim, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Text(totalLabel, color = C.Text, fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(18.dp))
+                Row(modifier = Modifier.fillMaxWidth().height(9.dp).clip(RoundedCornerShape(8.dp))) {
+                    Box(Modifier.weight(downloadFraction.coerceAtLeast(0.01f)).fillMaxSize().background(C.Accent))
+                    Box(Modifier.weight((1f - downloadFraction).coerceAtLeast(0.01f)).fillMaxSize().background(C.Primary))
+                }
+                Spacer(Modifier.height(16.dp))
                 Row {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("↓ Download", color = C.TextDim, fontSize = 11.sp)
-                        Text(rxBytesLabel, color = C.Accent, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("↑ Upload", color = C.TextDim, fontSize = 11.sp)
-                        Text(txBytesLabel, color = C.Primary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                    }
+                    TrafficValue("Download", rxBytesLabel, C.AccentLight, Modifier.weight(1f))
+                    TrafficValue("Upload", txBytesLabel, C.PrimaryLight, Modifier.weight(1f))
                 }
             }
-
-            Spacer(Modifier.height(16.dp))
-            Text(
-                "Histórico por período (hoje / 7 dias / 30 dias) entra quando o app tiver armazenamento persistente de tráfego.",
-                color = C.TextDim,
-                fontSize = 11.sp
-            )
+            Spacer(Modifier.height(14.dp))
+            Text("Os valores representam somente a sessão real atual. O histórico por período será exibido quando a persistência de tráfego estiver disponível.", color = C.TextDim, fontSize = 11.sp)
         }
+    }
+}
+
+@Composable
+private fun TrafficValue(label: String, value: String, color: androidx.compose.ui.graphics.Color, modifier: Modifier) {
+    Column(modifier = modifier) {
+        Text(label, color = C.TextDim, fontSize = 10.sp)
+        Text(value, color = color, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
     }
 }
