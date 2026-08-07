@@ -139,12 +139,13 @@ object NativeTun2Socks {
           port: 53
         """.trimIndent()
         if (logFilePath == null) return base
-        // CORRECAO: log-level "debug" gerou 135 linhas em ~1 segundo de uso real —
-        // isso sozinho ja estoura o limite de 200 entradas do AppLog e empurra pra
-        // fora exatamente o trecho que importa (o momento em que a navegacao de
-        // verdade acontece). "warn" mantem erro/aviso real (o que queremos ver) sem
-        // afogar o log com "construct/destruct" de cada sessao interna.
-        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: warn\n"
+        // CORRECAO: usuario relatou mensagem do WhatsApp travando ~1 MINUTO antes de
+        // sair — bate exatamente com o padrao de fabrica da lib pra
+        // "misc.read-write-timeout" (60000ms = 60s), nunca configurado explicitamente
+        // ate agora. Baixado pra 20s: se uma conexao parada nao trocar dado em 20s ja
+        // desiste, deixando o protocolo (WhatsApp/navegador) tentar de novo mais
+        // rapido em vez de segurar por um minuto inteiro.
+        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: warn\n  read-write-timeout: 20000\n"
     }
 
     private external fun nativeStart(configYaml: String, tunFd: Int): Boolean
