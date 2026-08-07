@@ -2088,3 +2088,53 @@ tentativas de conexão podem estar em andamento ao mesmo tempo, não o total já
 O comportamento de desligar a VPN automaticamente depois da queda do SSH (`"VPN de sistema: desligando"`)
 é o sistema funcionando como deveria — reage corretamente à perda da conexão principal, não é bug em si.
 O problema de fundo é a queda do SSH, não a reação a ela.
+
+## 83. "Só WhatsApp funciona" — suspeita de fila silenciosa no limite de conexões simultâneas
+
+Usuário esclareceu: o log da Etapa 82 (zero quedas, tudo limpo) não significa que a navegação funcionou —
+funcionou **só pro WhatsApp**, mais nenhum app/site. Reexaminando aquele log: a maioria das conexões
+"bem-sucedidas" eram pra faixas de IP também associadas à Meta (dona do WhatsApp) — ou seja, é bem possível
+que aquele teste nem tenha capturado uma tentativa real de outro app.
+
+**Suspeita nova**: o limite de 16 conexões simultâneas (baixado na Etapa 82 pra não derrubar o Dropbear)
+pode estar baixo demais pra tráfego de navegador — que dispara 20-50+ pedidos de uma vez ao carregar uma
+única página, bem diferente do padrão esparso do WhatsApp (poucas conexões, de longa duração). Quem excede
+o limite fica esperando **na fila do semáforo, em silêncio** — nem sucesso nem erro, simplesmente não
+acontece nada do nosso lado. Se o app/navegador desistir de esperar, isso parece exatamente "não funciona",
+sem deixar rastro nenhum no log — explicaria a lacuna entre "log limpo" e "usuário confirma que não
+funcionou".
+
+**Instrumentado**: `handleConnect()` agora mede quanto tempo cada tentativa esperou pra conseguir uma vaga
+no semáforo, e loga como erro se a espera passar de 500ms — próximo teste (idealmente testando algo que
+NÃO seja WhatsApp) deve confirmar ou descartar essa fila silenciosa como causa.
+
+Se confirmado, o próximo passo provável não é subir o limite de volta (isso volta a derrubar o Dropbear) —
+é uma estratégia diferente: um limite moderado combinado com um prazo de espera na fila (falha rápido em
+vez de esperar pra sempre), em vez de um bloqueio rígido.
+
+## 84. Semáforo cobria só o "conectar", não a vida inteira do canal — corrigido, baixado pra 8
+
+Usuário testou Speedtest (que abre várias conexões e empurra bastante dado de propósito, por natureza) —
+caiu de novo, mesmo padrão de sempre ("Conexão SSH perdida" derrubando tudo junto), sem nenhuma espera longa
+na fila (o log da Etapa 83 não disparou) — ou seja, não era fila silenciosa.
+
+**Causa real**: o semáforo (`connectSemaphore`) só segurava a vaga durante a etapa de **conectar** —
+soltava assim que a conexão abria, ANTES de começar a repassar dado de verdade. Ou seja, não limitava
+quantos canais ficavam **ativos simultaneamente** no Dropbear, só quantos estavam "no meio do aperto de
+mão" ao mesmo tempo — sob carga pesada (Speedtest), muitos canais conseguiam abrir dentro do limite e
+depois ficavam TODOS ativos ao mesmo tempo, sobrecarregando o servidor de verdade.
+
+**Corrigido**: o mesmo semáforo agora cobre o tempo de vida inteiro de cada canal (conectar + repassar dado
+até fechar) — protege de verdade contra excesso de canais simultâneos. Reduzido também pra 8 (mais
+conservador, já que 16 "só conectando" tinha sido insuficiente).
+
+### Esclarecimento importante pro usuário
+As mensagens de "IPv6 ainda não suportado" no log **não são o problema** — são a rejeição rápida
+funcionando como planejado (Etapa 79). A queda de conexão acontece igual pra destinos IPv4 também, como o
+log confirma claramente. IPv6 de verdade fica como tópico separado, de menor prioridade — resolver a
+instabilidade sob carga é o que importa primeiro.
+
+### Se isso não resolver
+Pode ser limitação inerente do Dropbear (implementação de SSH bem leve, pensada pra pouco uso simultâneo)
+que nenhum ajuste do lado do cliente resolve sozinho — nesse caso, o próximo passo seria verificar se existe
+um SSH mais robusto (OpenSSH) disponível na VPS, em vez de continuar ajustando limites.
