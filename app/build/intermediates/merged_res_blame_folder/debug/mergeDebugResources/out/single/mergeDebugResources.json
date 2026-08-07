@@ -1,7 +1,19 @@
 [
     {
+        "merged": "/home/dev/.gradle/daemon/9.5.0/com.autombot.client.app-debug-41:/drawable_ic_launcher_foreground.xml.flat",
+        "source": "/home/dev/.gradle/daemon/9.5.0/com.autombot.client.app-main-43:/drawable/ic_launcher_foreground.xml"
+    },
+    {
         "merged": "com.autombot.client.app-debug-41:/drawable_ic_launcher_foreground.xml.flat",
         "source": "com.autombot.client.app-main-43:/drawable/ic_launcher_foreground.xml"
+    },
+    {
+        "merged": "com.autombot.client.app-debug-41:/drawable_ic_launcher_monochrome.xml.flat",
+        "source": "com.autombot.client.app-main-43:/drawable/ic_launcher_monochrome.xml"
+    },
+    {
+        "merged": "/home/dev/.gradle/daemon/9.5.0/com.autombot.client.app-debug-41:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "/home/dev/.gradle/daemon/9.5.0/com.autombot.client.app-main-43:/mipmap-anydpi-v26/ic_launcher.xml"
     },
     {
         "merged": "com.autombot.client.app-debug-41:/mipmap-anydpi-v26_ic_launcher.xml.flat",
