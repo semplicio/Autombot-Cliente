@@ -2062,3 +2062,29 @@ Ao adicionar `destHost`/`destPort` na assinatura de `relay()` (Etapa 80), esquec
 chamada (`handleDnsOverTcp`, função de DNS-sobre-TCP adicionada no outro chat, ainda não documentada por
 mim antes) que também usa essa função — só atualizei a do `handleConnect()`. Corrigido: passa o DNS de
 destino (`targetDns`, porta 53) nessa segunda chamada também.
+
+## 82. Causa raiz real (log definitivo): 128 conexões simultâneas derrubavam o Dropbear inteiro
+
+A instrumentação da Etapa 80/81 (log de bytes/motivo no relay) trouxe finalmente a resposta clara. Usuário
+testou WhatsApp + YouTube em sequência, gerando bastante tráfego simultâneo real, e o log mostrou:
+
+- Vários "relay encerrado" com bytes reais passando nos dois sentidos (ex: 213KB enviados, 182KB recebidos)
+  — ou seja, dados **estavam** fluindo em boa parte dos casos, contradizendo a suspeita de que o relay
+  nunca funcionava
+- No momento da queda: **14 destinos diferentes conectados ao mesmo tempo**, e então
+  `"Conexão SSH perdida (cliente desconectado)"` — TODOS os 14 caem juntos, no mesmo segundo, com
+  `SocketException: Socket closed` (lado de envio) e `ConnectionException: Getting data on EOF'ed stream`
+  (lado de recebimento)
+
+Esse padrão — muitos canais simultâneos, depois a conexão INTEIRA cai de uma vez — é o sinal clássico de um
+servidor SSH leve (Dropbear, pensado pra pouco uso simultâneo) recusando/derrubando a sessão inteira por
+excesso de canais abertos ao mesmo tempo. O limite de conexões simultâneas do nosso lado
+(`connectSemaphore`) estava em **128** — alto demais pra esse tipo de servidor.
+
+**Corrigido**: reduzido pra 16 (ainda generoso pra navegação normal — esse limite só controla quantas
+tentativas de conexão podem estar em andamento ao mesmo tempo, não o total já estabelecido).
+
+### Confirma também
+O comportamento de desligar a VPN automaticamente depois da queda do SSH (`"VPN de sistema: desligando"`)
+é o sistema funcionando como deveria — reage corretamente à perda da conexão principal, não é bug em si.
+O problema de fundo é a queda do SSH, não a reação a ela.

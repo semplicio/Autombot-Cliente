@@ -39,7 +39,14 @@ class Socks5Server(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var running = false
 
-    private val connectSemaphore = Semaphore(permits = 128)
+    // CORRECAO: log real do usuario mostrou 14 destinos diferentes abertos ao
+    // mesmo tempo, seguido de "Conexao SSH perdida" derrubando TODOS eles juntos —
+    // sinal claro de que o servidor (Dropbear, leve, pensado pra pouco uso
+    // simultaneo) nao aguenta tantos canais ao mesmo tempo e fecha a conexao
+    // inteira. 128 era alto demais; 16 ainda e generoso pra navegacao normal (esse
+    // limite so controla quantas tentativas de conexao podem estar "em andamento"
+    // ao mesmo tempo, nao o total de conexoes ja estabelecidas).
+    private val connectSemaphore = Semaphore(permits = 16)
 
     val totalRx = AtomicLong(0L)
     val totalTx = AtomicLong(0L)
