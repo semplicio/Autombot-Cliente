@@ -18,6 +18,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.autombot.client.ui.theme.AutomBotColors as C
+import com.autombot.client.ui.components.AutomBotBackground
+import com.autombot.client.ui.components.AutomBotGradientButton
+import com.autombot.client.ui.components.AutomBotCard
+import androidx.compose.foundation.border
 
 /**
  * Tela 06 do mockup: conta criada com sucesso, exibindo o contador do teste gratis.
@@ -30,19 +34,18 @@ fun AccountCreatedScreen(
     countdownLabel: String,
     onGoToDashboard: () -> Unit
 ) {
+    AutomBotBackground {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(C.Background)
-            .padding(28.dp),
+        modifier = Modifier.fillMaxSize().padding(28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         Box(
             modifier = Modifier
-                .size(84.dp)
+                .size(92.dp)
                 .clip(CircleShape)
-                .background(C.Green.copy(alpha = 0.15f)),
+                .background(C.Green.copy(alpha = 0.12f))
+                .border(1.dp, C.Green.copy(alpha = 0.45f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Icon(Icons.Default.Check, contentDescription = null, tint = C.Green, modifier = Modifier.size(40.dp))
@@ -59,8 +62,12 @@ fun AccountCreatedScreen(
         )
 
         Spacer(Modifier.height(20.dp))
-        Text("Tempo restante", color = C.TextDim, fontSize = 11.sp)
-        Text(countdownLabel, color = C.Green, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+        AutomBotCard(modifier = Modifier.fillMaxWidth(), accent = C.Green, padding = 14.dp) {
+            Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Tempo restante", color = C.TextDim, fontSize = 10.sp)
+                Text(countdownLabel, color = C.Green, fontSize = 30.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            }
+        }
 
         Spacer(Modifier.height(8.dp))
         Text(
@@ -71,12 +78,7 @@ fun AccountCreatedScreen(
         )
 
         Spacer(Modifier.height(28.dp))
-        Button(
-            onClick = onGoToDashboard,
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = C.Primary, contentColor = C.OnPrimary)
-        ) {
-            Text("Ir para o Dashboard")
-        }
+        AutomBotGradientButton("Ir para o Dashboard", onGoToDashboard, Modifier.fillMaxWidth())
+    }
     }
 }

@@ -20,7 +20,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.autombot.client.ui.components.AutomBotMark
+import com.autombot.client.ui.components.AutomBotBackground
+import com.autombot.client.ui.components.AutomBotWordmark
 import com.autombot.client.ui.theme.AutomBotColors as C
+import androidx.compose.ui.graphics.Brush
 
 /** Tela 02 do mockup: escolha entre fluxo por domínio (gerenciado) ou manual (profissional). */
 @Composable
@@ -29,56 +32,63 @@ fun ChoiceScreen(
     onNoDomain: () -> Unit,
     onViewTutorial: () -> Unit = {}
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(C.Background)
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        AutomBotMark(size = 64.dp)
-        Spacer(Modifier.height(20.dp))
-        Text(
-            "Bem-vindo ao\nAutomBot Connect",
-            color = C.Text,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Escolha como deseja configurar o aplicativo",
-            color = C.TextDim,
-            fontSize = 13.sp,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-        )
+    AutomBotBackground {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AutomBotMark(size = 58.dp)
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    AutomBotWordmark(compact = true)
+                    Text("CONNECT", color = C.PrimaryLight, fontSize = 8.sp, letterSpacing = 2.2.sp)
+                }
+            }
+            Spacer(Modifier.height(28.dp))
+            Text(
+                "Bem-vindo ao\nAutomBot Connect",
+                color = C.Text,
+                fontSize = 23.sp,
+                lineHeight = 28.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Escolha como deseja configurar o aplicativo",
+                color = C.TextDim,
+                fontSize = 13.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
 
-        Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(28.dp))
 
-        ChoiceCard(
-            icon = Icons.Default.Language,
-            iconTint = C.Primary,
-            title = "Já tenho um domínio",
-            subtitle = "Conectar e importar configurações do provedor",
-            onClick = onHasDomain
-        )
-        Spacer(Modifier.height(12.dp))
-        ChoiceCard(
-            icon = Icons.Default.Settings,
-            iconTint = C.Accent,
-            title = "Não tenho um domínio",
-            subtitle = "Configurar manualmente todas as conexões",
-            onClick = onNoDomain
-        )
+            ChoiceCard(
+                icon = Icons.Default.Language,
+                iconTint = C.PrimaryLight,
+                title = "Já tenho um domínio",
+                subtitle = "Conectar e importar configurações do provedor",
+                onClick = onHasDomain
+            )
+            Spacer(Modifier.height(12.dp))
+            ChoiceCard(
+                icon = Icons.Default.Settings,
+                iconTint = C.AccentLight,
+                title = "Não tenho um domínio",
+                subtitle = "Configurar manualmente todas as conexões",
+                onClick = onNoDomain
+            )
 
-        Spacer(Modifier.height(20.dp))
-        Text(
-            "Precisa de ajuda? Ver tutorial",
-            color = C.Primary,
-            fontSize = 12.sp,
-            modifier = Modifier.clickable(onClick = onViewTutorial)
-        )
+            Spacer(Modifier.height(22.dp))
+            Text(
+                "Precisa de ajuda?  Ver tutorial",
+                color = C.PrimaryLight,
+                fontSize = 12.sp,
+                modifier = Modifier.clickable(onClick = onViewTutorial)
+            )
+        }
     }
 }
 
@@ -94,13 +104,22 @@ private fun ChoiceCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(C.Surface)
-            .border(1.dp, C.Line, RoundedCornerShape(16.dp))
+            .background(
+                Brush.horizontalGradient(
+                    listOf(iconTint.copy(alpha = 0.32f), C.SurfaceRaised, C.Surface)
+                )
+            )
+            .border(1.dp, iconTint.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
             .clickable(onClick = onClick)
-            .padding(16.dp),
+            .padding(horizontal = 16.dp, vertical = 17.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, contentDescription = null, tint = iconTint)
+        Box(
+            modifier = Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(iconTint.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(23.dp))
+        }
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(title, color = C.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)

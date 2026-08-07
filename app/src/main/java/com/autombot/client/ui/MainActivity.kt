@@ -93,6 +93,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.statusBarColor = android.graphics.Color.rgb(7, 17, 27)
+        window.navigationBarColor = android.graphics.Color.rgb(5, 11, 18)
+        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
         com.autombot.client.util.AppLog.init(applicationContext)
         com.autombot.client.util.AppLog.log("App iniciado (onCreate) — reconstruindo a tela e os gerenciadores de conexão", com.autombot.client.util.AppLog.Level.INFO)
         wireGuardManager = WireGuardManager(applicationContext)
@@ -107,7 +113,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             AutomBotClientTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                Surface(modifier = Modifier.fillMaxSize(), color = C.Background) {
                     AppRoot(
                         wireGuardManager = wireGuardManager,
                         sshManager = sshManager,
@@ -271,6 +277,10 @@ private sealed class Screen {
     data object Devices : Screen()
     data object Support : Screen()
     data object Plan : Screen()
+    data object PlansAvailable : Screen()
+    data class PixPayment(val plan: PlanOption) : Screen()
+    data class AwaitingPayment(val plan: PlanOption) : Screen()
+    data class PaymentApproved(val plan: PlanOption) : Screen()
     data object Connections : Screen()
 }
 
@@ -361,13 +371,26 @@ private fun AppRoot(
 
     when (val current = screen) {
         is Screen.Splash -> SplashScreen(onFinished = { screen = if (appPrefs.getBoolean("onboarded", false)) Screen.Shell else Screen.Choice })
-        is Screen.Choice -> ChoiceScreen(onHasDomain = { screen = Screen.DomainInput }, onNoDomain = { markOnboarded(managed = false); screen = Screen.Shell })
+        is Screen.Choice -> ChoiceScreen(onHasDomain = { screen = Screen.DomainInput }, onNoDomain = { screen = Screen.NoDomainIntro })
         is Screen.DomainInput -> DomainInputScreen(onBack = { screen = Screen.Choice }, onConnect = { domain -> screen = Screen.Connecting(domain) })
-        is Screen.Connecting -> ProgressStepsScreen(title = "Conectando…", subtitle = "Aguarde...", steps = listOf("Verificando"), onComplete = { screen = Screen.CreatingAccount(current.domain) })
-        is Screen.CreatingAccount -> ProgressStepsScreen(title = "Criando conta", subtitle = "Aguarde...", steps = listOf("Criando"), onComplete = { trialSecondsRemaining = TRIAL_DURATION_SECONDS; markOnboarded(managed = true); screen = Screen.AccountCreated })
+        is Screen.Connecting -> ProgressStepsScreen(
+            title = "Conectando…",
+            subtitle = "Aguarde enquanto verificamos o servidor e importamos as configurações.",
+            steps = listOf("Verificando servidor", "Autenticando domínio", "Importando configurações", "Preparando sua conta"),
+            onComplete = { screen = Screen.CreatingAccount(current.domain) }
+        )
+        is Screen.CreatingAccount -> ProgressStepsScreen(
+            title = "Criando sua conta",
+            subtitle = "Seu acesso de teste está sendo configurado automaticamente.",
+            steps = listOf("Enviando dados", "Criando conta", "Configurando serviços", "Finalizando"),
+            onComplete = { trialSecondsRemaining = TRIAL_DURATION_SECONDS; markOnboarded(managed = true); screen = Screen.AccountCreated }
+        )
         is Screen.AccountCreated -> AccountCreatedScreen(countdownLabel = formatCountdown(trialSecondsRemaining ?: 0), onGoToDashboard = { screen = Screen.Shell })
-        is Screen.NoDomainIntro -> NoDomainScreen(onConfigureManually = { screen = Screen.ProtocolSelect })
-        is Screen.ProtocolSelect -> ProtocolSelectScreen(onBack = { screen = Screen.Shell }, onSelect = { opt -> screen = when(opt.id) { "wireguard" -> Screen.WireGuard; "ssh" -> Screen.SshConfig(); "vless" -> Screen.VlessAdd; "vmess" -> Screen.VmessAdd; "shadowsocks" -> Screen.ShadowsocksAdd; "trojan" -> Screen.TrojanAdd; else -> Screen.ManualConfig(opt) } })
+        is Screen.NoDomainIntro -> NoDomainScreen(
+            onBack = { screen = Screen.Choice },
+            onConfigureManually = { markOnboarded(managed = false); screen = Screen.ProtocolSelect }
+        )
+        is Screen.ProtocolSelect -> ProtocolSelectScreen(onBack = { screen = Screen.Shell }, onSelect = { opt -> screen = when(opt.id) { "wireguard" -> Screen.WireGuard; "ssh" -> Screen.SshConfig(); "vless" -> Screen.VlessAdd; "vmess" -> Screen.VmessAdd; "shadowsocks" -> Screen.ShadowsocksAdd; "trojan" -> Screen.TrojanAdd; "openvpn" -> Screen.OpenVpnAdd; else -> Screen.ManualConfig(opt) } })
         is Screen.SshConfig -> SshConfigScreen(initialConfig = current.editing, onBack = { screen = if (current.editing != null) Screen.Ssh else Screen.ProtocolSelect }, onSave = { sshManager.saveProfile(it); screen = Screen.Ssh })
         is Screen.Ssh -> SshScreen(manager = sshManager, onBack = { screen = Screen.Shell }, onAddProfile = { screen = Screen.SshConfig() }, onEditProfile = { screen = Screen.SshConfig(it) }, onViewLog = { screen = Screen.Logs(it, Screen.Ssh) })
         is Screen.Vless -> com.autombot.client.ui.vless.VlessScreen(manager = vlessManager, onBack = { screen = Screen.Shell }, onAddProfile = { screen = Screen.VlessAdd }, onViewLog = { screen = Screen.Logs(it, Screen.Vless) })
@@ -411,12 +434,35 @@ private fun AppRoot(
                 rxBytesLabel = formatBytes(totalRx),
                 txBytesLabel = formatBytes(totalTx),
                 totalLabel = formatBytes(totalRx + totalTx),
+                downloadFraction = if (totalRx + totalTx > 0) totalRx.toFloat() / (totalRx + totalTx).toFloat() else 0.5f,
                 onBack = { screen = Screen.Shell }
             )
         }
         is Screen.Devices -> DevicesScreen(onBack = { screen = Screen.Shell })
         is Screen.Support -> SupportScreen(onBack = { screen = Screen.Shell })
-        is Screen.Plan -> PlanScreen(trialCountdown = trialSecondsRemaining?.let { formatCountdown(it) }, onSeePlans = {})
+        is Screen.Plan -> PlanScreen(
+            trialCountdown = trialSecondsRemaining?.let { formatCountdown(it) },
+            onBack = { screen = Screen.Shell },
+            onSeePlans = { screen = Screen.PlansAvailable }
+        )
+        is Screen.PlansAvailable -> PlansAvailableScreen(
+            onBack = { screen = Screen.Plan },
+            onSelect = { plan -> screen = Screen.PixPayment(plan) }
+        )
+        is Screen.PixPayment -> PixPaymentScreen(
+            plan = current.plan,
+            onBack = { screen = Screen.PlansAvailable },
+            onContinue = { screen = Screen.AwaitingPayment(current.plan) }
+        )
+        is Screen.AwaitingPayment -> AwaitingPaymentScreen(
+            plan = current.plan,
+            onBack = { screen = Screen.PixPayment(current.plan) },
+            onVerify = { screen = Screen.PaymentApproved(current.plan) }
+        )
+        is Screen.PaymentApproved -> PaymentApprovedScreen(
+            plan = current.plan,
+            onContinue = { screen = Screen.Shell }
+        )
         is Screen.Connections -> {
             val wgTunnels by wireGuardManager.tunnels.collectAsState()
             val sshConns by sshManager.connections.collectAsState()
@@ -425,18 +471,30 @@ private fun AppRoot(
             val ssConns by shadowsocksManager.connections.collectAsState()
             val trConns by trojanManager.connections.collectAsState()
             val ovpnConns by openVpnManager.connections.collectAsState()
-            val xrayConnected = vlessConns.any { it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED } ||
-                               vmessConns.any { it.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTED } ||
-                               ssConns.any { it.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTED } ||
-                               trConns.any { it.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTED }
-
             val rowList = listOf(
-                ConnectionRow("wireguard", "WireGuard", if(wgTunnels.any { it.status == TunnelStatus.CONNECTED }) "Conectado" else "Desconectado", wgTunnels.any { it.status == TunnelStatus.CONNECTED }, true),
                 ConnectionRow("ssh", "SSH", if(sshConns.any { it.status == SshStatus.CONNECTED }) "Conectado" else "Desconectado", sshConns.any { it.status == SshStatus.CONNECTED }, true),
-                ConnectionRow("xray", "Xray (VLESS, VMess...)", if(xrayConnected) "Conectado" else "Configurar", xrayConnected, true),
+                ConnectionRow("vless", "VLESS", if(vlessConns.any { it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED }) "Conectado" else "Desconectado", vlessConns.any { it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED }, true),
+                ConnectionRow("vmess", "VMess / V2Ray", if(vmessConns.any { it.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTED }) "Conectado" else "Desconectado", vmessConns.any { it.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTED }, true),
+                ConnectionRow("wireguard", "WireGuard", if(wgTunnels.any { it.status == TunnelStatus.CONNECTED }) "Conectado" else "Desconectado", wgTunnels.any { it.status == TunnelStatus.CONNECTED }, true),
+                ConnectionRow("shadowsocks", "Shadowsocks", if(ssConns.any { it.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTED }) "Conectado" else "Desconectado", ssConns.any { it.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTED }, true),
+                ConnectionRow("trojan", "Trojan", if(trConns.any { it.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTED }) "Conectado" else "Desconectado", trConns.any { it.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTED }, true),
                 ConnectionRow("openvpn", "OpenVPN", if(ovpnConns.any { it.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTED }) "Conectado" else "Desconectado", ovpnConns.any { it.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTED }, true)
             )
-            ConnectionsScreen(connections = rowList, onOpenConnection = { row -> screen = when(row.protocolId) { "wireguard" -> Screen.WireGuard; "ssh" -> Screen.Ssh; "openvpn" -> Screen.OpenVpn; "xray" -> Screen.XraySelect; else -> Screen.Shell } }, onNewConnection = { screen = Screen.ProtocolSelect })
+            ConnectionsScreen(
+                connections = rowList,
+                onBack = { screen = Screen.Shell },
+                onOpenConnection = { row -> screen = when(row.protocolId) {
+                    "wireguard" -> Screen.WireGuard
+                    "ssh" -> Screen.Ssh
+                    "vless" -> Screen.Vless
+                    "vmess" -> Screen.Vmess
+                    "shadowsocks" -> Screen.Shadowsocks
+                    "trojan" -> Screen.Trojan
+                    "openvpn" -> Screen.OpenVpn
+                    else -> Screen.Shell
+                } },
+                onNewConnection = { screen = Screen.ProtocolSelect }
+            )
         }
         is Screen.Logs -> LogsScreen(filterName = current.filterName, onBack = { screen = current.origin })
         is Screen.Shell -> MainShell(
@@ -507,10 +565,20 @@ private fun MainShell(
         Scaffold(
             topBar = {
                 CenterAlignedTopAppBar(
-                    title = { Text("AutomBot", color = C.Text, fontWeight = FontWeight.Bold) },
+                    title = { com.autombot.client.ui.components.AutomBotWordmark(compact = true) },
                     navigationIcon = { IconButton(onClick = { scope.launch { drawerState.open() } }) { Icon(Icons.Default.Menu, contentDescription = "Menu", tint = C.Text) } },
-                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = C.Background)
+                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = C.BackgroundTop)
                 )
+            },
+            bottomBar = {
+                BottomNavBar(selected = MainTab.Dashboard, showPlan = isManagedMode, onSelect = { tab ->
+                    when (tab) {
+                        MainTab.Dashboard -> Unit
+                        MainTab.Connections -> onOpenConnections()
+                        MainTab.Plan -> onOpenPlan()
+                        MainTab.More -> scope.launch { drawerState.open() }
+                    }
+                })
             },
             containerColor = C.Background
         ) { padding ->

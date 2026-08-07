@@ -1,12 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Antena -->
     <path
-        android:fillColor="#3DDC84"
-        android:pathData="M31,63.928c0,0 6.4,-2.3 13,-2.3c5.9,0 12,2.3 12,2.3l0.058,-4.452c0,0 -6.158,-2.348 -12.058,-2.348c-6.6,0 -13,2.3 -13,2.3L31,63.928z" />
+        android:fillColor="#C06CFF"
+        android:pathData="M51,21h6v10h-6z" />
     <path
-        android:fillColor="#3DDC84"
-        android:pathData="M66.73,54.4c1.25,3.11 0.6,6.66 -1.58,9.1l5.29,5.29c0.39,0.39 1.02,0.39 1.41,0c0.39,-0.39 0.39,-1.02 0,-1.41l-5.23,-5.23c1.32,-2.28 1.83,-4.93 1.37,-7.62c-0.84,-4.9 -5.13,-8.74 -10.16,-9.11c-6.19,-0.46 -11.38,4.52 -11.38,10.61c0,1.2 0.2,2.35 0.55,3.43l-4.74,4.74c-0.39,0.39 -0.39,1.02 0,1.41c0.39,0.39 1.02,0.39 1.41,0l4.74,-4.74c1.32,2.28 1.83,4.93 1.37,7.62c-0.84,4.9 -5.13,8.74 -10.16,9.11c-6.19,0.46 -11.38,-4.52 -11.38,-10.61c0,-1.2 0.2,-2.35 0.55,-3.43l-4.74,4.74c-0.39,0.39 -0.39,1.02 0,1.41c0.39,0.39 1.02,0.39 1.41,0l4.74,-4.74c0.14,-0.25 0.27,-0.5 0.39,-0.75c-0.12,0.25 -0.25,0.5 -0.39,0.75" />
+        android:fillColor="#C06CFF"
+        android:pathData="M54,14a5,5 0,1 0,0 10a5,5 0,1 0,0 -10" />
+
+    <!-- Orelhas -->
+    <path
+        android:fillColor="#7B27D8"
+        android:pathData="M20,43h9v25h-9c-4,0 -7,-3 -7,-7V50c0,-4 3,-7 7,-7z" />
+    <path
+        android:fillColor="#7B27D8"
+        android:pathData="M88,43h-9v25h9c4,0 7,-3 7,-7V50c0,-4 -3,-7 -7,-7z" />
+
+    <!-- Cabeça do robô -->
+    <path
+        android:fillColor="#A442FF"
+        android:pathData="M35,26h38c9,0 16,7 16,16v31c0,10 -8,18 -18,18H37c-10,0 -18,-8 -18,-18V42c0,-9 7,-16 16,-16z" />
+    <path
+        android:fillColor="#07111B"
+        android:pathData="M38,39h32c7,0 12,5 12,12v13c0,8 -6,14 -14,14H40c-8,0 -14,-6 -14,-14V51c0,-7 5,-12 12,-12z" />
+
+    <!-- Olhos -->
+    <path
+        android:fillColor="#F7FAFF"
+        android:pathData="M38,51h9c3,0 5,2 5,5s-2,5 -5,5h-9c-3,0 -5,-2 -5,-5s2,-5 5,-5z" />
+    <path
+        android:fillColor="#F7FAFF"
+        android:pathData="M61,51h9c3,0 5,2 5,5s-2,5 -5,5h-9c-3,0 -5,-2 -5,-5s2,-5 5,-5z" />
+
+    <!-- Sorriso -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M43,67c3,4 7,6 11,6s8,-2 11,-6"
+        android:strokeColor="#C06CFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="3" />
 </vector>

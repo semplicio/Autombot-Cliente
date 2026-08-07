@@ -12,6 +12,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.autombot.client.ui.theme.AutomBotColors as C
+import com.autombot.client.ui.components.AutomBotGradientButton
+import com.autombot.client.ui.components.AutomBotTopBar
 
 data class ManualConnectionConfig(
     val protocolId: String,
@@ -44,12 +46,7 @@ fun ManualConfigScreen(
     var showAdvanced by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
-        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Voltar", tint = C.Text)
-            }
-            Text("Configurar ${protocol.displayName}", color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-        }
+        AutomBotTopBar("Configurar ${protocol.displayName}", onBack, "Modo manual")
 
         Column(
             modifier = Modifier
@@ -87,7 +84,8 @@ fun ManualConfigScreen(
         }
 
         Column(modifier = Modifier.padding(20.dp)) {
-            Button(
+            AutomBotGradientButton(
+                text = "Salvar conexão",
                 onClick = {
                     onSave(
                         ManualConnectionConfig(
@@ -103,10 +101,8 @@ fun ManualConfigScreen(
                 },
                 enabled = server.isNotBlank() && port.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-            ) {
-                Text("Salvar Conexão")
-            }
+                accent = C.Accent
+            )
         }
     }
 }
@@ -132,6 +128,7 @@ private fun LabeledField(
                 androidx.compose.ui.text.input.PasswordVisualTransformation()
             else androidx.compose.ui.text.input.VisualTransformation.None,
             modifier = Modifier.fillMaxWidth(),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(13.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = C.Text,
                 unfocusedTextColor = C.Text,

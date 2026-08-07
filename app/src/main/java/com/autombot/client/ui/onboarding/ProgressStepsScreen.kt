@@ -10,6 +10,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -20,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.autombot.client.ui.theme.AutomBotColors as C
+import com.autombot.client.ui.components.AutomBotBackground
 import kotlinx.coroutines.delay
 
 /**
@@ -55,35 +59,28 @@ fun ProgressStepsScreen(
         label = "angle"
     )
 
+    AutomBotBackground {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(C.Background)
-            .padding(28.dp),
+        modifier = Modifier.fillMaxSize().padding(28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.size(90.dp)) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .size(74.dp)
                     .clip(CircleShape)
-                    .background(C.Line)
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(4.dp)
-                    .clip(CircleShape)
-                    .background(C.Surface)
+                    .background(C.Primary.copy(alpha = 0.1f))
             )
             CircularProgressIndicator(
-                color = C.Primary,
-                strokeWidth = 4.dp,
+                color = C.PrimaryLight,
+                trackColor = C.Line,
+                strokeWidth = 3.dp,
                 modifier = Modifier
-                    .fillMaxSize()
+                    .size(82.dp)
                     .rotate(angle)
             )
+            Box(modifier = Modifier.size(16.dp).clip(CircleShape).background(C.Primary))
         }
 
         Spacer(Modifier.height(24.dp))
@@ -92,12 +89,16 @@ fun ProgressStepsScreen(
         Text(subtitle, color = C.TextDim, fontSize = 12.sp)
 
         Spacer(Modifier.height(28.dp))
-        Column(horizontalAlignment = Alignment.Start) {
+        Column(
+            horizontalAlignment = Alignment.Start,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 34.dp)
+        ) {
             steps.forEachIndexed { index, step ->
                 StepRow(label = step, done = index < completedCount, active = index == completedCount)
                 if (index != steps.lastIndex) Spacer(Modifier.height(10.dp))
             }
         }
+    }
     }
 }
 
@@ -105,15 +106,17 @@ fun ProgressStepsScreen(
 private fun StepRow(label: String, done: Boolean, active: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
-            modifier = Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(if (done) C.Primary else if (active) C.Accent else C.Line)
-        )
+            modifier = Modifier.size(18.dp).clip(CircleShape)
+                .background(if (done) C.Primary.copy(alpha = 0.2f) else if (active) C.Accent.copy(alpha = 0.2f) else C.SurfaceAlt),
+            contentAlignment = Alignment.Center
+        ) {
+            if (done) Icon(Icons.Default.Check, contentDescription = null, tint = C.PrimaryLight, modifier = Modifier.size(12.dp))
+            else Box(Modifier.size(6.dp).clip(CircleShape).background(if (active) C.Accent else C.TextMuted))
+        }
         Spacer(Modifier.width(10.dp))
         Text(
             text = if (done) "$label…" else if (active) "$label…" else label,
-            color = if (done || active) C.Text else C.TextDim,
+            color = if (done || active) C.Text else C.TextMuted,
             fontSize = 13.sp
         )
     }
