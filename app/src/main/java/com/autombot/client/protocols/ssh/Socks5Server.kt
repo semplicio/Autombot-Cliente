@@ -467,30 +467,29 @@ class Socks5Server(
         clientOut: OutputStream, remoteIn: InputStream,
         client: Socket, destHost: String, destPort: Int
     ) = coroutineScope {
-        // CORRECAO: log real do usuario mostrou o padrao exato do bug — "[enviando]"
-        // terminava cedo (ex: so 215 bytes, o ClientHello do TLS) e o "[recebendo]"
-        // daquela MESMA conexao nunca aparecia no log, nem com sucesso nem com erro.
-        // Motivo: cada uma das duas pontas, ao terminar, cancelava o coroutineScope
-        // INTEIRO (this@coroutineScope.cancel()) — matando a OUTRA ponta no meio do
-        // caminho, silenciosamente (cancelamento nao cai no catch(Exception) do
-        // pipe(), so faz o loop parar sem logar nada). Ou seja: o cliente manda o
-        // ClientHello, aquele lado termina (fim normal, cliente so tem isso pra
-        // mandar por enquanto), e a gente MESMO matava o lado que ia trazer a
-        // resposta do servidor — antes dela chegar. Isso explica navegador nunca
-        // receber nada mesmo com "conectado" no log.
-        // Agora cada direcao roda ate o SEU proprio fim natural (fim de fluxo ou
-        // erro) sem derrubar a outra; ao terminar, so fecha a metade que lhe
-        // corresponde (meio-fechamento de verdade), deixando a outra ponta livre
-        // pra continuar entregando dado. So fecha tudo de vez quando as DUAS
-        // direcoes ja tiverem terminado (joinAll).
+        // CORRECAO: log real do usuario mostrou o padrao exato do bug ORIGINAL —
+        // "[enviando]" terminava cedo e o "[recebendo]" da MESMA conexao nunca
+        // aparecia no log, porque cada ponta cancelava o coroutineScope INTEIRO ao
+        // terminar. Meu conserto anterior trocou isso por "so fecha a metade que
+        // terminou" (remoteOut.close() / clientOut.close()) — MAS isso nao e um
+        // meio-fechamento de verdade: pra um java.net.Socket comum (e bem provavel
+        // pro canal SSH tambem), fechar so o OutputStream fecha o SOCKET INTEIRO,
+        // as duas direcoes junto — nao existe meio-fechamento real sem chamar
+        // shutdownOutput() no Socket de verdade, que a assinatura generica
+        // (InputStream/OutputStream) nem permite. Resultado pratico: a "correcao"
+        // anterior ainda derrubava a ligacao no meio do caminho — so que agora de
+        // um jeito mais brusco (fechar o socket com dado ainda por vir gera RST, nao
+        // FIN), e isso e exatamente o que vira ERR_CONNECTION_RESET no navegador em
+        // vez do ERR_TIMED_OUT de antes. Ou seja: bug parecido, sintoma novo.
+        // Agora nenhuma das duas pontas fecha nada sozinha — cada uma roda ate o
+        // proprio fim natural (fim de fluxo ou erro), e SO no final, com as DUAS
+        // ja terminadas (joinAll), fecha tudo de vez.
         val tag = "$destHost:$destPort"
         val job1 = launch(Dispatchers.IO) {
-            try { pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]") }
-            finally { runCatching { remoteOut.close() } }
+            pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
         }
         val job2 = launch(Dispatchers.IO) {
-            try { pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]") }
-            finally { runCatching { clientOut.close() } }
+            pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
         }
 
         joinAll(job1, job2)
