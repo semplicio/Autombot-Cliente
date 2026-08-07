@@ -39,12 +39,14 @@ class Socks5Server(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var running = false
 
-    // CORRECAO: esse semaforo agora cobre o tempo de vida INTEIRO de cada canal
-    // (conectar + repassar dado, nao so o "conectar") — ver comentario detalhado no
-    // handleConnect(). 8 e conservador de proposito, dado que 16 canais "so
-    // conectando ao mesmo tempo" ja tinha derrubado o Dropbear numa carga pesada
-    // (teste de velocidade).
-    private val connectSemaphore = Semaphore(permits = 8)
+    // CORRECAO: log real do usuario mostrou 14 destinos diferentes abertos ao
+    // mesmo tempo, seguido de "Conexao SSH perdida" derrubando TODOS eles juntos —
+    // sinal claro de que o servidor (Dropbear, leve, pensado pra pouco uso
+    // simultaneo) nao aguenta tantos canais ao mesmo tempo e fecha a conexao
+    // inteira. 128 era alto demais; 16 ainda e generoso pra navegacao normal (esse
+    // limite so controla quantas tentativas de conexao podem estar "em andamento"
+    // ao mesmo tempo, nao o total de conexoes ja estabelecidas).
+    private val connectSemaphore = Semaphore(permits = 16)
 
     val totalRx = AtomicLong(0L)
     val totalTx = AtomicLong(0L)
@@ -176,43 +178,21 @@ class Socks5Server(
             return
         }
 
-        // CORRECAO: o teste anterior (WhatsApp) nao provou nada — usuario confirmou
-        // que outros apps continuam sem funcionar. Esse teste novo (Speedtest, que
-        // por natureza abre varias conexoes e envia bastante dado de proposito)
-        // travou de novo com o MESMO padrao de sempre ("Conexao SSH perdida"
-        // derrubando tudo junto) — mas dessa vez sem nenhuma espera longa na fila
-        // (o log de espera nao disparou), entao nao e fila silenciosa. Suspeita
-        // revisada: o problema nao e quantas conexoes ABREM ao mesmo tempo — e
-        // quantas ficam ATIVAS ao mesmo tempo depois de abertas (o semaforo antigo
-        // so segurava durante o "conectar", soltava na hora de repassar dado — ou
-        // seja, nao limitava de verdade quantos canais ficavam vivos simultaneos
-        // no Dropbear). Agora o mesmo semaforo cobre o tempo de vida INTEIRO
-        // (conectar + repassar dado ate fechar) — protege de verdade contra
-        // sobrecarregar o servidor com canais demais ao mesmo tempo. Baixado tambem
-        // pra 8 (mais conservador, dado que 16 canais "so conectando" ja derrubou
-        // antes) — pode precisar de mais ajuste dependendo do proximo teste.
-        val waitStart = System.currentTimeMillis()
-        connectSemaphore.withPermit {
-            val waitedMs = System.currentTimeMillis() - waitStart
-            if (waitedMs > 500) {
-                AppLog.log("$logPrefix: esperou ${waitedMs}ms na fila (limite de canais ativos) antes de tentar $destHost:$destPort", AppLog.Level.ERROR)
-            }
-            val remote = onConnectRequest(destHost, destPort)
-            if (remote == null) {
-                AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
-                output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
-                output.flush()
-                client.close()
-                return@withPermit
-            }
-            AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
-
-            output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        val remote = connectSemaphore.withPermit { onConnectRequest(destHost, destPort) }
+        if (remote == null) {
+            AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
+            output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
-
-            val (remoteIn, remoteOut) = remote
-            relay(input, remoteOut, output, remoteIn, client, destHost, destPort)
+            client.close()
+            return
         }
+        AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
+
+        output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        output.flush()
+
+        val (remoteIn, remoteOut) = remote
+        relay(input, remoteOut, output, remoteIn, client, destHost, destPort)
     }
 
     private suspend fun handleDnsOverTcp(client: Socket, originalDest: String) {
