@@ -175,13 +175,11 @@ object NativeTun2Socks {
           port: 53
         """.trimIndent()
         if (logFilePath == null) return base
-        // CORRECAO: numeros reais (nativeGetStats) mostraram o motor nativo enviando
-        // MAIS DO DOBRO do que o nosso SOCKS5 realmente recebeu dele (671KB vs 314KB
-        // na mesma janela) — marca classica de retransmissao (TCP reenviando por
-        // falta de confirmacao a tempo). "misc.tcp-buffer-size" da lib vem em 64KB de
-        // fabrica (doc oficial); com varias conexoes simultaneas de uma pagina real,
-        // isso pode nao dar conta e forcar descarte. Aumentado pra 256KB.
-        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: warn\n  connect-timeout: 10000\n  tcp-read-write-timeout: 300000\n  udp-read-write-timeout: 60000\n  tcp-buffer-size: 262144\n"
+        // Mantem o buffer TCP no valor oficial da versao incorporada. Valores acima
+        // de TCP_SND_BUF sao limitados internamente pela biblioteca e apenas elevam
+        // o tamanho minimo das pilhas das tasks, consumindo memoria sem aumentar a
+        // vazao efetiva.
+        return base + "\nmisc:\n  log-file: $logFilePath\n  log-level: warn\n  connect-timeout: 10000\n  tcp-read-write-timeout: 300000\n  udp-read-write-timeout: 60000\n  tcp-buffer-size: 65536\n"
     }
 
     private external fun nativeStart(configYaml: String, tunFd: Int): Boolean
