@@ -4,7 +4,9 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +41,8 @@ object AppLog {
     // commit() síncrono. Todas as gravações em disco passam por aqui (single-thread
     // garante ordenação).
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val persistLock = Any()
+    private var persistJob: Job? = null
 
     /** Chamar uma vez, cedo (MainActivity.onCreate), antes de qualquer log(). */
     fun init(context: Context) {
@@ -64,17 +68,29 @@ object AppLog {
             Level.ERROR -> Log.e(tag, message)
         }
         _entries.update { current -> (listOf(Entry(System.currentTimeMillis(), message, level)) + current).take(600) }
-        // Persiste em background pra não bloquear quem chamou (pode ser a thread de UI).
-        ioScope.launch { persist() }
+        // Agrupa rajadas de eventos. O relay pode gerar dezenas de linhas por
+        // segundo; serializar 600 entradas e gravar o arquivo em cada linha
+        // competia com CPU e armazenamento durante transferencias.
+        schedulePersist()
     }
 
     /** Limpa de verdade (usado pelo botão "Limpar Cache" nas Configurações). */
     fun clear() {
         _entries.value = emptyList()
-        ioScope.launch { persist() }
+        schedulePersist(delayMs = 0L)
     }
 
     fun formatTimestamp(entry: Entry): String = timeFormat.format(Date(entry.timestamp))
+
+    private fun schedulePersist(delayMs: Long = 1000L) {
+        synchronized(persistLock) {
+            persistJob?.cancel()
+            persistJob = ioScope.launch {
+                if (delayMs > 0) delay(delayMs)
+                persist()
+            }
+        }
+    }
 
     private fun persist() {
         val p = prefs ?: return
