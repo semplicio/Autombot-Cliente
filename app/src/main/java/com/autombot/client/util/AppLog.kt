@@ -84,10 +84,17 @@ object AppLog {
 
     private fun schedulePersist(delayMs: Long = 1000L) {
         synchronized(persistLock) {
+            // Throttle, nao debounce: em trafego continuo sempre ha novos logs. Se
+            // reiniciarmos o prazo em cada linha, o arquivo pode nunca ser salvo.
+            if (delayMs > 0 && persistJob?.isActive == true) return
             persistJob?.cancel()
             persistJob = ioScope.launch {
                 if (delayMs > 0) delay(delayMs)
-                persist()
+                try {
+                    persist()
+                } finally {
+                    synchronized(persistLock) { persistJob = null }
+                }
             }
         }
     }
