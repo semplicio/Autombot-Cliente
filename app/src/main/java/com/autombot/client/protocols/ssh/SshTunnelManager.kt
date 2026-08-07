@@ -416,7 +416,20 @@ class SshTunnelManager(context: Context) {
         destHost: String,
         destPort: Int,
         onIncoming: (ByteArray) -> Unit
-    ): UdpBackendSession? = null
+    ): UdpBackendSession? {
+        // CORRECAO: essa funcao so retornava null calada, sem log nenhum — impossivel
+        // de distinguir "Gateway UDP realmente ligado mas falhando em algum lugar" de
+        // "nunca foi ativado de verdade" so olhando o log. Usuario confirmou ter
+        // desconectado/reconectado depois de ligar o toggle, mas nenhuma das duas
+        // mensagens de log do openUdpOverGateway (sucesso ou falha) apareceu — ou
+        // seja, esse caminho aqui (o desativado) que estava sendo usado. Log novo
+        // deixa isso visivel de vez.
+        AppLog.log(
+            "SSH: UDP pra $destHost:$destPort recusado (Gateway UDP desligado pra essa conexão — udpForwardEnabled=false)",
+            AppLog.Level.ERROR
+        )
+        return null
+    }
 
     /**
      * ComposedSocket: um Socket "decorador" que so faz a conexao de verdade dentro do
