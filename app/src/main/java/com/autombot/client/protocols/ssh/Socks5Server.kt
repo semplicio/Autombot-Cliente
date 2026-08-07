@@ -4,7 +4,6 @@ import android.util.Log
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramPacket
@@ -44,8 +43,9 @@ class Socks5Server(
     // sinal claro de que o servidor (Dropbear, leve, pensado pra pouco uso
     // simultaneo) nao aguenta tantos canais ao mesmo tempo e fecha a conexao
     // inteira. 128 era alto demais; 16 ainda e generoso pra navegacao normal (esse
-    // limite so controla quantas tentativas de conexao podem estar "em andamento"
-    // ao mesmo tempo, nao o total de conexoes ja estabelecidas).
+    // limite controla a vida inteira da conexao, nao apenas a abertura do canal.
+    // Isso evita que varias paginas mantenham dezenas de canais SSH ativos ao mesmo
+    // tempo e derrubem a sessao principal no servidor.
     private val connectSemaphore = Semaphore(permits = 16)
 
     val totalRx = AtomicLong(0L)
@@ -178,38 +178,48 @@ class Socks5Server(
             return
         }
 
-        val remote = connectSemaphore.withPermit { onConnectRequest(destHost, destPort) }
-        if (remote == null) {
-            AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
-            output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        connectSemaphore.acquire()
+        try {
+            val remote = onConnectRequest(destHost, destPort)
+            if (remote == null) {
+                AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
+                output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+                output.flush()
+                client.close()
+                return
+            }
+            AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
+
+            output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
-            client.close()
-            return
+
+            val (remoteIn, remoteOut) = remote
+            relay(input, remoteOut, output, remoteIn, client, destHost, destPort)
+        } finally {
+            connectSemaphore.release()
         }
-        AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
-
-        output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
-        output.flush()
-
-        val (remoteIn, remoteOut) = remote
-        relay(input, remoteOut, output, remoteIn, client, destHost, destPort)
     }
 
     private suspend fun handleDnsOverTcp(client: Socket, originalDest: String) {
         val targetDns = dns1
-        val remote = connectSemaphore.withPermit { onConnectRequest(targetDns, 53) }
-        if (remote == null) {
-            client.getOutputStream().write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+        connectSemaphore.acquire()
+        try {
+            val remote = onConnectRequest(targetDns, 53)
+            if (remote == null) {
+                client.getOutputStream().write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+                client.getOutputStream().flush()
+                client.close()
+                return
+            }
+
+            client.getOutputStream().write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             client.getOutputStream().flush()
-            client.close()
-            return
+
+            val (remoteIn, remoteOut) = remote
+            relay(client.getInputStream(), remoteOut, client.getOutputStream(), remoteIn, client, targetDns, 53)
+        } finally {
+            connectSemaphore.release()
         }
-
-        client.getOutputStream().write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
-        client.getOutputStream().flush()
-
-        val (remoteIn, remoteOut) = remote
-        relay(client.getInputStream(), remoteOut, client.getOutputStream(), remoteIn, client, targetDns, 53)
     }
 
     private suspend fun handleUdpAssociate(client: Socket, output: OutputStream) {
@@ -379,9 +389,12 @@ class Socks5Server(
     }
 
     private suspend fun resolveDnsViaTcp(dnsServerHost: String, dnsQuery: ByteArray): ByteArray? {
-        val remote = connectSemaphore.withPermit { onConnectRequest(dnsServerHost, 53) } ?: return null
-        val (remoteIn, remoteOut) = remote
+        connectSemaphore.acquire()
+        var remote: Pair<InputStream, OutputStream>? = null
         return try {
+            val opened = onConnectRequest(dnsServerHost, 53) ?: return null
+            remote = opened
+            val (remoteIn, remoteOut) = opened
             val len = dnsQuery.size
             remoteOut.write((len shr 8) and 0xFF)
             remoteOut.write(len and 0xFF)
@@ -401,8 +414,11 @@ class Socks5Server(
         } catch (e: Exception) {
             null
         } finally {
-            runCatching { remoteIn.close() }
-            runCatching { remoteOut.close() }
+            remote?.let { (remoteIn, remoteOut) ->
+                runCatching { remoteIn.close() }
+                runCatching { remoteOut.close() }
+            }
+            connectSemaphore.release()
         }
     }
 
@@ -444,21 +460,27 @@ class Socks5Server(
 
     private fun buildUdpResponse(srcHost: String, srcPort: Int, payload: ByteArray): ByteArray {
         val ipv4Regex = Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")
-        val addressBytes = if (ipv4Regex.matches(srcHost)) {
+        val addressBytes = if (srcHost.contains(":")) {
+            byteArrayOf(0x04) + InetAddress.getByName(srcHost).address
+        } else if (ipv4Regex.matches(srcHost)) {
             val parts = srcHost.split(".").map { it.toInt() }
             byteArrayOf(0x01, parts[0].toByte(), parts[1].toByte(), parts[2].toByte(), parts[3].toByte())
         } else {
             val nameBytes = srcHost.toByteArray(Charsets.US_ASCII)
+            require(nameBytes.size <= 255) { "Nome de destino SOCKS5 excede 255 bytes" }
             val result = ByteArray(2 + nameBytes.size)
             result[0] = 0x03
             result[1] = nameBytes.size.toByte()
             System.arraycopy(nameBytes, 0, result, 2, nameBytes.size)
             result
         }
-        val header = ByteArray(4 + addressBytes.size + 2)
-        System.arraycopy(addressBytes, 0, header, 4, addressBytes.size)
-        header[4 + addressBytes.size] = ((srcPort shr 8) and 0xFF).toByte()
-        header[4 + addressBytes.size + 1] = (srcPort and 0xFF).toByte()
+        // RFC 1928: RSV(2) + FRAG(1) + ATYP/endereco + porta. O codigo anterior
+        // reservava quatro bytes antes do endereco, inserindo um zero extra; o HEV
+        // lia esse byte como ATYP=0 e descartava a resposta UDP (inclusive DNS).
+        val header = ByteArray(3 + addressBytes.size + 2)
+        System.arraycopy(addressBytes, 0, header, 3, addressBytes.size)
+        header[3 + addressBytes.size] = ((srcPort shr 8) and 0xFF).toByte()
+        header[3 + addressBytes.size + 1] = (srcPort and 0xFF).toByte()
         return header + payload
     }
 
