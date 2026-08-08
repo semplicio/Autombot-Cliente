@@ -13,17 +13,12 @@ import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Abre uma conexao VMess sobre WebSocket pro destino pedido: monta o cabeçalho AEAD
- * (VmessCrypto.buildRequest), manda pelo WebSocket, LÊ E VALIDA a resposta do servidor
- * (decodeResponseHeader — se o AuthV não bater ou a tag GCM for inválida, falha aqui
- * mesmo, antes de repassar qualquer dado), e só então devolve as streams já
- * criptografadas/descriptografadas prontas pro Socks5Server usar como um socket comum.
- *
- * Mesmo padrão de ponte WebSocket->stream do SSH/VLESS — mesma incerteza sobre esse
- * padrão em si, GANHA a incerteza adicional de todo o protocolo VMess (ver avisos em
- * VmessCrypto.kt).
+ * Abre uma conexao VMess sobre WebSocket pro destino pedido. Cada canal agora fecha
+ * explicitamente o WebSocket correspondente quando o SOCKS5 encerra o fluxo, evitando
+ * o acúmulo de conexões órfãs durante navegação longa.
  */
 object VmessTransport {
 
@@ -36,18 +31,19 @@ object VmessTransport {
     ): Pair<InputStream, OutputStream> {
         val pipedOut = PipedOutputStream()
         val pipedIn = PipedInputStream(pipedOut, 256 * 1024)
+        val closed = AtomicBoolean(false)
 
         val clientBuilder = OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(20, TimeUnit.SECONDS)
             .socketFactory(object : javax.net.SocketFactory() {
                 override fun createSocket(): java.net.Socket {
                     val socket = java.net.Socket()
-                    // Ver comentario equivalente em VlessTransport.kt: forca o fd nativo
-                    // existir antes do protect(), que precisa dele pra funcionar.
                     socket.bind(java.net.InetSocketAddress(0))
                     if (!protectSocket(socket)) {
-                        throw java.io.IOException(
+                        runCatching { socket.close() }
+                        throw IOException(
                             "Não consegui isentar esta conexão da VPN (protect() falhou) — verifique " +
                                 "se \"Bloquear conexões sem VPN\" está desligado pra este app."
                         )
@@ -71,16 +67,25 @@ object VmessTransport {
         var failure: Throwable? = null
 
         val listener = object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) { latch.countDown() }
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                runCatching { pipedOut.write(bytes.toByteArray()); pipedOut.flush() }
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                latch.countDown()
             }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (!closed.get()) {
+                    runCatching { pipedOut.write(bytes.toByteArray()); pipedOut.flush() }
+                }
+            }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 failure = t
+                closed.set(true)
                 latch.countDown()
                 runCatching { pipedOut.close() }
             }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                closed.set(true)
                 runCatching { pipedOut.close() }
             }
         }
@@ -88,34 +93,62 @@ object VmessTransport {
         val webSocket = clientBuilder.build().newWebSocket(requestBuilder.build(), listener)
 
         val opened = latch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
-        if (!opened) throw IOException("Timeout ao abrir conexão WebSocket com o servidor VMess")
-        failure?.let { throw IOException("Falha ao conectar WebSocket: ${it.message}") }
+        if (!opened) {
+            closed.set(true)
+            webSocket.cancel()
+            throw IOException("Timeout ao abrir conexão WebSocket com o servidor VMess")
+        }
+        failure?.let {
+            closed.set(true)
+            webSocket.cancel()
+            throw IOException("Falha ao conectar WebSocket: ${it.message}")
+        }
 
         val rawSendStream = object : OutputStream() {
             override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+
             override fun write(b: ByteArray, off: Int, len: Int) {
+                if (closed.get()) throw IOException("WebSocket VMess já está fechado")
                 val sent = webSocket.send(ByteString.of(*b.copyOfRange(off, off + len)))
-                if (!sent) throw IOException("Falha ao enviar dados pelo WebSocket VMess")
+                if (!sent) {
+                    closed.set(true)
+                    webSocket.cancel()
+                    throw IOException("Falha ao enviar dados pelo WebSocket VMess")
+                }
+            }
+
+            override fun close() {
+                if (closed.compareAndSet(false, true)) {
+                    runCatching { webSocket.close(1000, null) }
+                }
+                runCatching { pipedIn.close() }
+                runCatching { pipedOut.close() }
             }
         }
 
-        // Monta e manda o cabecalho de requisicao VMess (AuthID + comprimento cifrado
-        // + cabecalho cifrado) assim que a conexao WebSocket abre.
-        val request = VmessCrypto.buildRequest(config.uuid, destHost, destPort)
-        rawSendStream.write(request.authId)
-        rawSendStream.write(request.connectionNonce)
-        rawSendStream.write(request.encryptedLength)
-        rawSendStream.write(request.encryptedHeader)
+        val request = try {
+            VmessCrypto.buildRequest(config.uuid, destHost, destPort)
+        } catch (e: Exception) {
+            runCatching { rawSendStream.close() }
+            throw e
+        }
 
-        // Le e valida a resposta do servidor ANTES de considerar a conexao pronta —
-        // se o AuthV nao bater ou a tag GCM for invalida, falha aqui (rapido, com
-        // causa clara), em vez de silenciosamente na primeira leitura de dados.
-        VmessCrypto.decodeResponseHeader(
-            requestBodyKey = request.requestBodyKey,
-            requestBodyIv = request.requestBodyIv,
-            expectedResponseHeaderByte = request.responseHeaderByte,
-            input = pipedIn
-        )
+        try {
+            rawSendStream.write(request.authId)
+            rawSendStream.write(request.connectionNonce)
+            rawSendStream.write(request.encryptedLength)
+            rawSendStream.write(request.encryptedHeader)
+
+            VmessCrypto.decodeResponseHeader(
+                requestBodyKey = request.requestBodyKey,
+                requestBodyIv = request.requestBodyIv,
+                expectedResponseHeaderByte = request.responseHeaderByte,
+                input = pipedIn
+            )
+        } catch (e: Exception) {
+            runCatching { rawSendStream.close() }
+            throw e
+        }
 
         val responseBodyKey = VmessCrypto.responseKey(request.requestBodyKey)
         val responseBodyIv = VmessCrypto.responseIv(request.requestBodyIv)

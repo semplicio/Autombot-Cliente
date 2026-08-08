@@ -8,11 +8,9 @@ import java.io.OutputStream
 /**
  * Corpo (Data Section) do VMess, formato "Standard" (Opt S ligado, M/P/A desligados —
  * ver VmessCrypto.kt): cada pedaço e' [2 bytes tamanho][dados cifrados com
- * AES-128-GCM, tag de 16 bytes incluida]. Tamanho maximo por pedaco: 2^14 (16384),
- * conforme a especificacao — bem acima do buffer de 8192 usado pelo Socks5Server, que
- * e' quem de fato chama write()/read() aqui, entao nunca deve estourar.
+ * AES-128-GCM, tag de 16 bytes incluida].
  */
-private const val MAX_CHUNK_PLAINTEXT = 16384 - 16 // deixa espaco pra tag GCM de 16 bytes
+private const val MAX_CHUNK_PLAINTEXT = 16384 - 16
 
 class VmessOutputStream(
     private val rawOut: OutputStream,
@@ -43,6 +41,17 @@ class VmessOutputStream(
         rawOut.write(ciphertext.size and 0xFF)
         rawOut.write(ciphertext)
         rawOut.flush()
+    }
+
+    override fun flush() {
+        rawOut.flush()
+    }
+
+    // Importante: o relay SOCKS5 fecha esta stream quando uma navegação termina.
+    // Propagar o close para o transporte bruto libera também o WebSocket VMess;
+    // antes o close padrão de OutputStream era no-op e conexões ficavam órfãs.
+    override fun close() {
+        rawOut.close()
     }
 }
 
@@ -77,7 +86,6 @@ class VmessInputStream(
         val lengthBytes = readExact(2) ?: run { endOfStream = true; return false }
         val chunkLen = ((lengthBytes[0].toInt() and 0xFF) shl 8) or (lengthBytes[1].toInt() and 0xFF)
         if (chunkLen == 0) {
-            // Pedaco vazio = fim de transmissao (ver especificacao, "Standard Format").
             endOfStream = true
             return false
         }
@@ -102,5 +110,9 @@ class VmessInputStream(
             offset += n
         }
         return buf
+    }
+
+    override fun close() {
+        rawIn.close()
     }
 }
