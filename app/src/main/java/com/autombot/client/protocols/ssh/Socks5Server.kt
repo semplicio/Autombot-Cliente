@@ -246,6 +246,59 @@ class Socks5Server(
 
         val receiveJob = scope.launch(Dispatchers.IO) {
             val buffer = ByteArray(65535)
+
+            suspend fun sendViaBackend(
+                destHost: String,
+                destPort: Int,
+                payload: ByteArray
+            ): Boolean {
+                val key = "$destHost:$destPort"
+
+                fun incomingHandler(respPayload: ByteArray) {
+                    totalRx.addAndGet(respPayload.size.toLong())
+                    val wrapped = buildUdpResponse(destHost, destPort, respPayload)
+                    val peer = clientPeer
+                    if (peer != null) {
+                        runCatching {
+                            relaySocket.send(DatagramPacket(wrapped, wrapped.size, peer))
+                        }
+                    }
+                }
+
+                // Duas tentativas: a primeira usa a sessão existente; se o canal
+                // persistente do udpgw morreu, remove a sessão velha, o manager cria
+                // outro canal e o MESMO datagrama é reenviado uma vez. Antes o send()
+                // descartava silenciosamente todos os pacotes da rota antiga.
+                repeat(2) { attempt ->
+                    var session = sessions[key]
+                    if (session == null) {
+                        session = opener(destHost, destPort, ::incomingHandler) ?: return false
+                        val previous = sessions.putIfAbsent(key, session)
+                        if (previous != null) {
+                            session.close()
+                            session = previous
+                        }
+                    }
+
+                    try {
+                        session.send(payload)
+                        return true
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        sessions.remove(key, session)
+                        runCatching { session.close() }
+                        if (attempt == 0 && running) {
+                            AppLog.log(
+                                "$logPrefix: sessão UDP $key perdeu o gateway; reabrindo e reenviando o pacote",
+                                AppLog.Level.INFO
+                            )
+                        }
+                    }
+                }
+                return false
+            }
+
             try {
                 while (isActive) {
                     val packet = DatagramPacket(buffer, buffer.size)
@@ -256,7 +309,11 @@ class Socks5Server(
                     val (fragDestHost, fragDestPort, payload) = parsed
                     totalTx.addAndGet(payload.size.toLong())
 
-                    val key = "$fragDestHost:$fragDestPort"
+                    // Com o badvpn/udpgw habilitado, o DNS usa o próprio túnel UDP:
+                    // é mais rápido, não vaza consultas fora da VPN e evita a rota
+                    // direta para 8.8.8.8 que o log real mostrou oscilando. Se o
+                    // backend não existir (UDP desabilitado), cai no fallback abaixo.
+                    if (sendViaBackend(fragDestHost, fragDestPort, payload)) continue
 
                     if (fragDestPort == 53) {
                         scope.launch(Dispatchers.IO) {
@@ -303,24 +360,6 @@ class Socks5Server(
                         }
                         continue
                     }
-
-                    var session = sessions[key]
-                    if (session == null) {
-                        val opened = opener(fragDestHost, fragDestPort) { respPayload ->
-                            totalRx.addAndGet(respPayload.size.toLong())
-                            val wrapped = buildUdpResponse(fragDestHost, fragDestPort, respPayload)
-                            val peer = clientPeer
-                            if (peer != null) {
-                                runCatching {
-                                    relaySocket.send(DatagramPacket(wrapped, wrapped.size, peer))
-                                }
-                            }
-                        }
-                        if (opened == null) continue
-                        sessions[key] = opened
-                        session = opened
-                    }
-                    session.send(payload)
                 }
             } catch (e: Exception) {
             } finally {
@@ -349,23 +388,25 @@ class Socks5Server(
 
     private suspend fun resolveDnsDirectly(dnsServerHost: String, dnsQuery: ByteArray): ByteArray? = withContext(Dispatchers.IO) {
         val protect = protectDatagramSocket ?: return@withContext null
+        var socket: DatagramSocket? = null
         return@withContext try {
-            val socket = DatagramSocket()
-            if (!protect(socket)) {
-                socket.close()
+            socket = DatagramSocket()
+            val activeSocket = socket
+            if (!protect(activeSocket)) {
                 return@withContext null
             }
-            socket.soTimeout = 3000
+            activeSocket.soTimeout = 1400
             val dstAddr = InetAddress.getByName(dnsServerHost)
-            socket.send(DatagramPacket(dnsQuery, dnsQuery.size, dstAddr, 53))
+            activeSocket.send(DatagramPacket(dnsQuery, dnsQuery.size, dstAddr, 53))
 
             val respBuffer = ByteArray(1500)
             val respPacket = DatagramPacket(respBuffer, respBuffer.size)
-            socket.receive(respPacket)
-            socket.close()
+            activeSocket.receive(respPacket)
             respBuffer.copyOf(respPacket.length)
         } catch (e: Exception) {
             null
+        } finally {
+            runCatching { socket?.close() }
         }
     }
 
@@ -375,28 +416,32 @@ class Socks5Server(
             val opened = onConnectRequest(dnsServerHost, 53) ?: return null
             remote = opened
             val (remoteIn, remoteOut) = opened
-            val len = dnsQuery.size
-            remoteOut.write((len shr 8) and 0xFF)
-            remoteOut.write(len and 0xFF)
-            remoteOut.write(dnsQuery)
-            remoteOut.flush()
+            runInterruptible(Dispatchers.IO) {
+                val len = dnsQuery.size
+                remoteOut.write((len shr 8) and 0xFF)
+                remoteOut.write(len and 0xFF)
+                remoteOut.write(dnsQuery)
+                remoteOut.flush()
 
-            val respLen1 = remoteIn.read()
-            val respLen2 = remoteIn.read()
-            if (respLen1 < 0 || respLen2 < 0) return null
-            val respLen = (respLen1 shl 8) or respLen2
+                val respLen1 = remoteIn.read()
+                val respLen2 = remoteIn.read()
+                if (respLen1 < 0 || respLen2 < 0) return@runInterruptible null
+                val respLen = (respLen1 shl 8) or respLen2
 
-            if (respLen > 4096) return null
+                if (respLen !in 1..4096) return@runInterruptible null
 
-            val resp = ByteArray(respLen)
-            readFully(remoteIn, resp)
-            resp
+                val resp = ByteArray(respLen)
+                readFully(remoteIn, resp)
+                resp
+            }
         } catch (e: Exception) {
             null
         } finally {
             remote?.let { (remoteIn, remoteOut) ->
-                runCatching { remoteIn.close() }
-                runCatching { remoteOut.close() }
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching { remoteOut.close() }
+                    runCatching { remoteIn.close() }
+                }
             }
         }
     }
