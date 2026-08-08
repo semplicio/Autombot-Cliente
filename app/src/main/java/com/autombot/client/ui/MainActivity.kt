@@ -41,8 +41,14 @@ import com.autombot.client.ui.more.SupportScreen
 import com.autombot.client.ui.onboarding.AccountCreatedScreen
 import com.autombot.client.ui.onboarding.ChoiceScreen
 import com.autombot.client.ui.onboarding.DomainInputScreen
+import com.autombot.client.ui.onboarding.ProgressStep
 import com.autombot.client.ui.onboarding.ProgressStepsScreen
 import com.autombot.client.ui.onboarding.SplashScreen
+import com.autombot.client.panel.PanelException
+import com.autombot.client.panel.PanelWebhookClient
+import com.autombot.client.panel.TrialAccount
+import com.autombot.client.panel.importPanelConfigs
+import com.autombot.client.provisioning.DeviceProvisioning
 import com.autombot.client.ui.theme.AutomBotClientTheme
 import com.autombot.client.ui.theme.AutomBotColors as C
 import com.autombot.client.ui.wireguard.WireGuardScreen
@@ -373,18 +379,70 @@ private fun AppRoot(
         is Screen.Splash -> SplashScreen(onFinished = { screen = if (appPrefs.getBoolean("onboarded", false)) Screen.Shell else Screen.Choice })
         is Screen.Choice -> ChoiceScreen(onHasDomain = { screen = Screen.DomainInput }, onNoDomain = { screen = Screen.NoDomainIntro })
         is Screen.DomainInput -> DomainInputScreen(onBack = { screen = Screen.Choice }, onConnect = { domain -> screen = Screen.Connecting(domain) })
-        is Screen.Connecting -> ProgressStepsScreen(
-            title = "Conectando…",
-            subtitle = "Aguarde enquanto verificamos o servidor e importamos as configurações.",
-            steps = listOf("Verificando servidor", "Autenticando domínio", "Importando configurações", "Preparando sua conta"),
-            onComplete = { screen = Screen.CreatingAccount(current.domain) }
-        )
-        is Screen.CreatingAccount -> ProgressStepsScreen(
-            title = "Criando sua conta",
-            subtitle = "Seu acesso de teste está sendo configurado automaticamente.",
-            steps = listOf("Enviando dados", "Criando conta", "Configurando serviços", "Finalizando"),
-            onComplete = { trialSecondsRemaining = TRIAL_DURATION_SECONDS; markOnboarded(managed = true); screen = Screen.AccountCreated }
-        )
+        is Screen.Connecting -> {
+            val panelClient = remember(current.domain) { PanelWebhookClient(current.domain) }
+            ProgressStepsScreen(
+                title = "Conectando…",
+                subtitle = "Aguarde enquanto verificamos o servidor.",
+                steps = listOf(
+                    ProgressStep("Verificando servidor") {
+                        if (!panelClient.ping()) {
+                            throw PanelException("Não consegui alcançar esse domínio. Confira o endereço e tente de novo.")
+                        }
+                    },
+                    ProgressStep("Autenticando domínio") {
+                        // CORRECAO: não existe (ainda) um endpoint dedicado só pra checar a
+                        // API key — usamos validade.php com um usuário que não deve existir
+                        // de verdade; um 401 aqui significa key errada/ausente, qualquer
+                        // outra resposta (404 "não encontrado" incluso) já confirma que a
+                        // key foi aceita e o painel está respondendo de verdade.
+                        val ok = panelClient.checkApiKeyAccepted()
+                        if (!ok) {
+                            throw PanelException("Esse painel não reconheceu a chave de API do app. Confira a configuração em api_keys.")
+                        }
+                    }
+                ),
+                onComplete = { screen = Screen.CreatingAccount(current.domain) },
+                onCancel = { screen = Screen.DomainInput }
+            )
+        }
+        is Screen.CreatingAccount -> {
+            val panelClient = remember(current.domain) { PanelWebhookClient(current.domain) }
+            val deviceProvisioning = remember { DeviceProvisioning(context) }
+            var trialAccount by remember { mutableStateOf<TrialAccount?>(null) }
+            ProgressStepsScreen(
+                title = "Criando sua conta",
+                subtitle = "Seu acesso de teste está sendo configurado automaticamente.",
+                steps = listOf(
+                    ProgressStep("Criando conta") {
+                        val deviceId = deviceProvisioning.getOrCreateDeviceId()
+                        val usuario = deviceProvisioning.generateAccountUsername()
+                        val senha = deviceProvisioning.generateRandomPassword()
+                        trialAccount = panelClient.createTrial(deviceId, usuario, senha)
+                    },
+                    ProgressStep("Configurando serviços") {
+                        val conta = trialAccount ?: throw PanelException("Conta não foi criada corretamente")
+                        val respostaConfigs = panelClient.fetchConfigs(conta.usuario)
+                        val avisos = importPanelConfigs(
+                            context = context,
+                            response = respostaConfigs,
+                            wireGuardManager = wireGuardManager,
+                            sshManager = sshManager,
+                            vlessManager = vlessManager,
+                            vmessManager = vmessManager,
+                            shadowsocksManager = shadowsocksManager,
+                            trojanManager = trojanManager,
+                            openVpnManager = openVpnManager
+                        )
+                        avisos.forEach {
+                            com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
+                        }
+                    }
+                ),
+                onComplete = { trialSecondsRemaining = TRIAL_DURATION_SECONDS; markOnboarded(managed = true); screen = Screen.AccountCreated },
+                onCancel = { screen = Screen.DomainInput }
+            )
+        }
         is Screen.AccountCreated -> AccountCreatedScreen(countdownLabel = formatCountdown(trialSecondsRemaining ?: 0), onGoToDashboard = { screen = Screen.Shell })
         is Screen.NoDomainIntro -> NoDomainScreen(
             onBack = { screen = Screen.Choice },
