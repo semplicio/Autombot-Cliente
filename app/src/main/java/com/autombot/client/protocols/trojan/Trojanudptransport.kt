@@ -3,13 +3,13 @@ package com.autombot.client.protocols.trojan
 import com.autombot.client.protocols.ssh.UdpBackendSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SNIHostName
@@ -18,7 +18,6 @@ import javax.net.ssl.SSLParameters
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
-import java.security.cert.X509Certificate
 
 /**
  * UDP do Trojan em uma conexão TLS compartilhada. O transporte agora propaga falhas
@@ -105,7 +104,7 @@ class TrojanUdpTransport(
 
     private suspend fun receiveLoop(inp: InputStream) {
         try {
-            while (isActive && !closed.get()) {
+            while (!closed.get()) {
                 val parsed = readUdpPacket(inp) ?: break
                 val (srcHost, srcPort, payload) = parsed
                 callbacks["$srcHost:$srcPort"]?.invoke(payload)

@@ -3,7 +3,6 @@ package com.autombot.client.protocols.shadowsocks
 import com.autombot.client.protocols.ssh.UdpBackendSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.net.DatagramPacket
@@ -62,7 +61,7 @@ class ShadowsocksUdpTransport(
 
     private suspend fun receiveLoop() {
         val buffer = ByteArray(65535)
-        while (isActive && !closed.get()) {
+        while (!closed.get()) {
             try {
                 val packet = DatagramPacket(buffer, buffer.size)
                 socket.receive(packet)
