@@ -42,10 +42,6 @@ class ShadowsocksTunnelManager(context: Context) {
     val connections: StateFlow<List<ManagedShadowsocksConnection>> = _connections
 
     private val activeSocksServers = mutableMapOf<String, Socks5Server>()
-    // CORRECAO: UDP do Shadowsocks usa UM socket compartilhado por conexao (nao um
-    // por destino, ver ShadowsocksUdpTransport.kt) — criado sob demanda na primeira
-    // vez que algum UDP aparecer, guardado aqui pra ser reaproveitado e fechado
-    // junto com a conexao.
     private val activeUdpTransports = mutableMapOf<String, ShadowsocksUdpTransport>()
 
     init {
@@ -159,9 +155,10 @@ class ShadowsocksTunnelManager(context: Context) {
     private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
 
     /**
-     * Abre (ou reaproveita, se já tiver uma pra essa conexão) o transporte UDP
-     * compartilhado do Shadowsocks — ver ShadowsocksUdpTransport.kt pro porquê de
-     * ser compartilhado em vez de um socket por destino.
+     * Reaproveita o socket UDP enquanto estiver saudável. Se o receive/send detectou
+     * que ele morreu, remove a instância velha e cria outra imediatamente. Isso evita
+     * o estado em que a conexão aparece como ativa mas todo UDP/DNS fica sendo enviado
+     * para um socket já encerrado.
      */
     @Synchronized
     private fun openShadowsocksUdpSession(
@@ -172,11 +169,21 @@ class ShadowsocksTunnelManager(context: Context) {
         onIncoming: (ByteArray) -> Unit
     ): com.autombot.client.protocols.ssh.UdpBackendSession? {
         return try {
-            val transport = activeUdpTransports.getOrPut(connectionName) {
-                ShadowsocksUdpTransport(config) { socket -> AutomBotVpnService.protectDatagramSocket(socket) }
+            var transport = activeUdpTransports[connectionName]
+            if (transport == null || transport.isClosed()) {
+                if (transport != null) {
+                    activeUdpTransports.remove(connectionName)
+                    transport.close()
+                    AppLog.log("Shadowsocks \"$connectionName\": transporte UDP encerrou; recriando", AppLog.Level.INFO)
+                }
+                transport = ShadowsocksUdpTransport(config) { socket ->
+                    AutomBotVpnService.protectDatagramSocket(socket)
+                }
+                activeUdpTransports[connectionName] = transport
             }
             transport.openSession(destHost, destPort, onIncoming)
         } catch (e: Exception) {
+            activeUdpTransports.remove(connectionName)?.close()
             val detail = "${e.javaClass.simpleName}: ${e.message}"
             AppLog.log("Shadowsocks \"$connectionName\": falha ao abrir UDP para $destHost:$destPort — $detail", AppLog.Level.ERROR)
             null
