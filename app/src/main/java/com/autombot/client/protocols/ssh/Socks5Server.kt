@@ -32,9 +32,18 @@ class Socks5Server(
     // protocolo/conexao essas linhas novas vieram (ex: "SSH \"bispo\"").
     private val logPrefix: String = "SOCKS5"
 ) {
+    private companion object {
+        // Uma resposta grande pode continuar depois de o remetente fazer half-close.
+        // Um minuto evita cortar downloads e ainda recolhe peers que nunca encerram.
+        const val RELAY_DRAIN_TIMEOUT_MS = 60_000L
+        const val COPY_BUFFER_SIZE = 32 * 1024
+        const val DNS_SUCCESS_LOG_INTERVAL_MS = 30_000L
+    }
+
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var running = false
+    private val lastDnsSuccessLogAt = AtomicLong(0L)
 
     val totalRx = AtomicLong(0L)
     val totalTx = AtomicLong(0L)
@@ -174,8 +183,6 @@ class Socks5Server(
             client.close()
             return
         }
-        AppLog.log("$logPrefix: conectado em $destHost:$destPort", AppLog.Level.INFO)
-
         output.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
         output.flush()
 
@@ -247,40 +254,30 @@ class Socks5Server(
 
                     if (fragDestPort == 53) {
                         scope.launch(Dispatchers.IO) {
-                            // CORRECAO: este era o UNICO caminho do Socks5Server sem log
-                            // nenhum — exatamente a resolucao de DNS que o navegador usa
-                            // pra qualquer site (UDP porta 53). Log real mostrou zero
-                            // conexoes de navegacao de verdade, so DNS-over-TLS do sistema
-                            // (853) e uma checagem de conectividade — sinal forte de que a
-                            // resolucao aqui estava falhando/travando em silencio, sem
-                            // deixar rastro. Cada etapa agora loga tentativa e resultado.
                             val directTried = protectDatagramSocket != null && (dns1 == "8.8.8.8" || dns1 == "1.1.1.1")
                             var respPayload: ByteArray? = null
 
                             if (directTried) {
                                 respPayload = withTimeoutOrNull(1500.milliseconds) { resolveDnsDirectly(dns1, payload) }
-                                AppLog.log(
-                                    "$logPrefix: DNS direto (fora do túnel) pra $dns1 — " +
-                                        if (respPayload != null) "respondeu" else "falhou/timeout",
-                                    if (respPayload != null) AppLog.Level.INFO else AppLog.Level.ERROR
+                                logDnsResult(
+                                    "$logPrefix: DNS direto (fora do túnel) pra $dns1",
+                                    respPayload != null
                                 )
                             }
 
                             if (respPayload == null) {
                                 respPayload = withTimeoutOrNull(4000.milliseconds) { resolveDnsViaTcp(dns1, payload) }
-                                AppLog.log(
-                                    "$logPrefix: DNS via túnel (TCP) pra $dns1 — " +
-                                        if (respPayload != null) "respondeu" else "falhou/timeout",
-                                    if (respPayload != null) AppLog.Level.INFO else AppLog.Level.ERROR
+                                logDnsResult(
+                                    "$logPrefix: DNS via túnel (TCP) pra $dns1",
+                                    respPayload != null
                                 )
                             }
 
                             if (respPayload == null) {
                                 respPayload = withTimeoutOrNull(4000.milliseconds) { resolveDnsViaTcp(dns2, payload) }
-                                AppLog.log(
-                                    "$logPrefix: DNS via túnel (TCP) pra $dns2 (2º servidor) — " +
-                                        if (respPayload != null) "respondeu" else "falhou/timeout",
-                                    if (respPayload != null) AppLog.Level.INFO else AppLog.Level.ERROR
+                                logDnsResult(
+                                    "$logPrefix: DNS via túnel (TCP) pra $dns2 (2º servidor)",
+                                    respPayload != null
                                 )
                             }
 
@@ -465,32 +462,36 @@ class Socks5Server(
         clientOut: OutputStream, remoteIn: InputStream,
         client: Socket, destHost: String, destPort: Int
     ) = coroutineScope {
-        // CORRECAO: log real do usuario mostrou o padrao exato do bug ORIGINAL —
-        // "[enviando]" terminava cedo e o "[recebendo]" da MESMA conexao nunca
-        // aparecia no log, porque cada ponta cancelava o coroutineScope INTEIRO ao
-        // terminar. Meu conserto anterior trocou isso por "so fecha a metade que
-        // terminou" (remoteOut.close() / clientOut.close()) — MAS isso nao e um
-        // meio-fechamento de verdade: pra um java.net.Socket comum (e bem provavel
-        // pro canal SSH tambem), fechar so o OutputStream fecha o SOCKET INTEIRO,
-        // as duas direcoes junto — nao existe meio-fechamento real sem chamar
-        // shutdownOutput() no Socket de verdade, que a assinatura generica
-        // (InputStream/OutputStream) nem permite. Resultado pratico: a "correcao"
-        // anterior ainda derrubava a ligacao no meio do caminho — so que agora de
-        // um jeito mais brusco (fechar o socket com dado ainda por vir gera RST, nao
-        // FIN), e isso e exatamente o que vira ERR_CONNECTION_RESET no navegador em
-        // vez do ERR_TIMED_OUT de antes. Ou seja: bug parecido, sintoma novo.
-        // Agora nenhuma das duas pontas fecha nada sozinha — cada uma roda ate o
-        // proprio fim natural (fim de fluxo ou erro), e SO no final, com as DUAS
-        // ja terminadas (joinAll), fecha tudo de vez.
+        // Cada direcao recebe seu half-close real. No SSHJ, fechar apenas o
+        // ChannelOutputStream envia SSH_MSG_CHANNEL_EOF e continua recebendo a
+        // resposta. No socket local usamos shutdownOutput(), que envia FIN sem
+        // interromper a outra metade. A V4 fechava o canal inteiro nos dois casos,
+        // cortando respostas e acumulando relays presos.
         val tag = "$destHost:$destPort"
         var job1: Job? = null
         var job2: Job? = null
         try {
             val upstream = launch(Dispatchers.IO) {
-                pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
+                try {
+                    pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
+                } finally {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        runCatching { remoteOut.flush() }
+                        runCatching { remoteOut.close() }
+                    }
+                }
             }
             val downstream = launch(Dispatchers.IO) {
-                pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
+                try {
+                    pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
+                } finally {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        runCatching { clientOut.flush() }
+                        if (!client.isClosed && !client.isOutputShutdown) {
+                            runCatching { client.shutdownOutput() }
+                        }
+                    }
+                }
             }
             job1 = upstream
             job2 = downstream
@@ -500,50 +501,84 @@ class Socks5Server(
             downstream.invokeOnCompletion { firstFinished.complete(Unit) }
             firstFinished.await()
 
-            val endedGracefully = withTimeoutOrNull(5_000L) {
+            val endedGracefully = withTimeoutOrNull(RELAY_DRAIN_TIMEOUT_MS) {
                 joinAll(upstream, downstream)
                 true
             } ?: false
-            if (!endedGracefully) {
-                AppLog.log("$logPrefix: encerrando relay preso pra $tag após 5s de meia-conexão", AppLog.Level.INFO)
+            if (!endedGracefully && running) {
+                AppLog.log(
+                    "$logPrefix: relay $tag não drenou em ${RELAY_DRAIN_TIMEOUT_MS / 1000}s; fechando o canal",
+                    AppLog.Level.INFO
+                )
             }
-            AppLog.log(
-                "$logPrefix: relay encerrado pra $tag — total enviado ${totalTx.get()}B, recebido ${totalRx.get()}B (desde que o servidor ligou; nao so essa conexao)",
-                AppLog.Level.INFO
-            )
         } finally {
-            // V4: cancelamento de scope também passa obrigatoriamente por aqui. O
-            // fechamento dos wrappers devolve o permit do canal exatamente uma vez.
+            // Cancelamento, timeout e desligamento passam obrigatoriamente por aqui.
+            // remoteIn.close() fecha o canal/lease inteiro e devolve a vaga uma vez.
             withContext(NonCancellable + Dispatchers.IO) {
                 runCatching { client.close() }
-                runCatching { clientIn.close() }
-                runCatching { remoteOut.close() }
-                runCatching { clientOut.close() }
                 runCatching { remoteIn.close() }
+                runCatching { remoteOut.close() }
                 job1?.cancel()
                 job2?.cancel()
+                runCatching { clientIn.close() }
+                runCatching { clientOut.close() }
             }
         }
     }
 
     private fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong, tag: String) {
-        val buffer = ByteArray(16384)
+        val buffer = ByteArray(COPY_BUFFER_SIZE)
         var bytesThisPipe = 0L
         try {
             while (isActive) {
                 val n = from.read(buffer)
-                if (n <= 0) {
-                    AppLog.log("$tag: fim do fluxo (read retornou $n) após $bytesThisPipe bytes", AppLog.Level.INFO)
-                    break
-                }
+                if (n <= 0) break
                 to.write(buffer, 0, n)
-                to.flush()
+                // SSHJ ja agrupa ate o tamanho maximo de pacote do canal. So
+                // descarrega o residual quando nao ha mais bytes prontos, evitando
+                // transformar um download continuo em milhares de pacotes pequenos.
+                if (runCatching { from.available() }.getOrDefault(0) == 0) {
+                    to.flush()
+                }
                 counter.addAndGet(n.toLong())
                 bytesThisPipe += n
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            AppLog.log("$tag: interrompido por erro (${e.javaClass.simpleName}: ${e.message}) após $bytesThisPipe bytes", AppLog.Level.ERROR)
+            if (running && !isExpectedClose(e)) {
+                AppLog.log(
+                    "$tag: interrompido por erro (${e.javaClass.simpleName}: ${e.message}) após $bytesThisPipe bytes",
+                    AppLog.Level.ERROR
+                )
+            }
+        } finally {
+            runCatching { to.flush() }
         }
+    }
+
+    private fun logDnsResult(prefix: String, success: Boolean) {
+        if (!success) {
+            AppLog.log("$prefix — falhou/timeout", AppLog.Level.ERROR)
+            return
+        }
+        val now = android.os.SystemClock.elapsedRealtime()
+        while (true) {
+            val previous = lastDnsSuccessLogAt.get()
+            if (now - previous < DNS_SUCCESS_LOG_INTERVAL_MS) return
+            if (lastDnsSuccessLogAt.compareAndSet(previous, now)) {
+                AppLog.log("$prefix — respondeu", AppLog.Level.INFO)
+                return
+            }
+        }
+    }
+
+    private fun isExpectedClose(error: Exception): Boolean {
+        val message = error.message.orEmpty().lowercase()
+        return message.contains("socket closed") ||
+            message.contains("stream closed") ||
+            message.contains("disconnected") ||
+            message.contains("channel is not open")
     }
 
     private fun readFully(input: InputStream, buffer: ByteArray) {

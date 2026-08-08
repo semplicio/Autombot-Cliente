@@ -9,7 +9,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
@@ -30,11 +29,13 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.SocketFactory
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
@@ -100,44 +101,22 @@ class SshTunnelManager(context: Context) {
     private val udpGwCreationMutex = Mutex()
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    // V4: 64 canais no total. Sessenta e tres atendem navegacao/DNS e uma vaga e
+    // V5: 64 canais no total. Sessenta e tres atendem navegacao/DNS e uma vaga e
     // exclusiva do badvpn-udpgw, para que uma rajada TCP nunca impeça o gateway UDP
     // de subir. Cada canal aberto também fica registrado por SSHClient; assim a
     // desconexao consegue fecha-lo e devolver o permit mesmo se o relay foi cancelado.
     private val regularChannelSemaphore = Semaphore(REGULAR_CHANNEL_LIMIT)
     private val udpGatewayChannelSemaphore = Semaphore(UDP_GATEWAY_CHANNEL_LIMIT)
-
-    // CORRECAO: usuario apontou (com razao) que se fosse limitacao da VPS/Dropbear,
-    // outros apps (HTTP Injector, HTTP Custom) teriam o MESMO problema na MESMA
-    // porta — e nao tem. Log real mostrou o padrao: canais ja abertos continuam
-    // trocando dado normalmente, mas por ~53s NENHUM canal novo consegue abrir —
-    // e quando destrava, uma rajada de varios "conectado" aparece TODOS no mesmo
-    // segundo. Isso e a marca de excesso de pedidos de abertura SIMULTANEOS
-    // sobrecarregando algo interno (SSHJ e/ou o proprio Dropbear processando o
-    // handshake de abertura, que e sequencial por natureza do protocolo SSH — um
-    // unico fluxo TCP compartilhado por todos os canais). O limite de 64 canais
-    // JA ABERTOS nao protege disso, porque nao limita quantos pedidos de ABRIR
-    // estao em andamento ao mesmo tempo. Esse semaforo novo, bem mais estreito,
-    // so protege a etapa de negociacao (o proprio client.newDirectConnection) —
-    // deixa o handshake acontecer aos poucos, em vez de tudo de uma vez, sem
-    // reduzir quantos canais podem ficar abertos e ativos ao mesmo tempo.
-    private val channelHandshakeSemaphore = Semaphore(4)
-
     private val activeChannelLeases = ConcurrentHashMap<SSHClient, MutableSet<DirectChannelLease>>()
     private val waitingChannelRequests = AtomicInteger(0)
     @Volatile private var lastChannelStats = ""
     private val lastChannelStatsLogAt = AtomicLong(0L)
 
-    // CORRECAO CRITICA: client.newDirectConnection(...) (dentro do synchronized do
-    // openDirectChannel) nao tem timeout nenhum — se o servidor SSH nao responder ao
-    // pedido de abrir canal (rede instavel, servidor sobrecarregado), essa chamada
-    // pode travar PRA SEMPRE. Como esta dentro do synchronized(client), isso trava
-    // TODAS as conexoes seguintes daquele mesmo tunel junto — sem nunca lancar
-    // excecao, entao nunca aparece no log (bate exatamente com o relatado: "continua
-    // conectado, mas para de gerar dado, sem log nenhum"). Esse executor roda a
-    // chamada travável num thread separada com prazo maximo — se estourar, a gente
-    // solta o lock e loga o erro, em vez de travar tudo pra sempre.
-    private val channelOpenExecutor = java.util.concurrent.Executors.newCachedThreadPool()
+    // A abertura de direct-tcpip e bloqueante. Um pool limitado evita criar dezenas
+    // de threads quando Chrome/Android fazem uma rajada de conexoes ao mesmo tempo,
+    // mas ainda permite abrir canais em paralelo. Cada abertura continua com timeout
+    // individual e fecha o canal se ele terminar depois de o pedido ser abandonado.
+    private val channelOpenExecutor = java.util.concurrent.Executors.newFixedThreadPool(16)
 
     init {
         loadPersistedProfiles()
@@ -214,13 +193,18 @@ class SshTunnelManager(context: Context) {
         // connect()), o que disparava NetworkOnMainThreadException — o Android proibe
         // rede na thread de UI de proposito. withContext(Dispatchers.IO) resolve isso.
         withContext(Dispatchers.IO) {
-        var connectingClient: SSHClient? = null
-        try {
-            val client = SSHClient()
-            connectingClient = client
-            client.addHostKeyVerifier(PromiscuousVerifier()) // ver aviso (1) no cabecalho do arquivo
+            var connectingClient: SSHClient? = null
+            try {
+                val client = SSHClient()
+                connectingClient = client
+                client.addHostKeyVerifier(PromiscuousVerifier()) // ver aviso (1) no cabecalho do arquivo
 
             val port = config.port.toIntOrNull() ?: 22
+            val connectTimeoutMs = (config.connectionTimeoutSeconds.toIntOrNull() ?: 10)
+                .coerceIn(5, 60) * 1000
+            client.connectTimeout = connectTimeoutMs
+            client.timeout = 30_000
+            client.connection.timeoutMs = 15_000
 
             // Camada SlowDNS (se ligada): substitui COMPLETAMENTE a etapa de TCP
             // direto/proxy — em vez de conectar no servidor de verdade, conecta numa
@@ -310,14 +294,14 @@ class SshTunnelManager(context: Context) {
                 "SSH \"$connectionName\": [4/4] conectado — proxy SOCKS5 em 127.0.0.1:$socksPort",
                 AppLog.Level.SUCCESS
             )
-        } catch (e: Exception) {
-            cleanupConnection(connectionName)
-            connectingClient?.let { failedClient ->
-                closeChannelsForClient(failedClient)
-                runCatching { failedClient.disconnect() }
+            } catch (e: Exception) {
+                cleanupConnection(connectionName)
+                connectingClient?.let { failedClient ->
+                    closeChannelsForClient(failedClient)
+                    runCatching { failedClient.disconnect() }
+                }
+                markError(connectionName, e.message ?: e.javaClass.simpleName)
             }
-            markError(connectionName, e.message ?: e.javaClass.simpleName)
-        }
         }
     }
 
@@ -365,6 +349,9 @@ class SshTunnelManager(context: Context) {
         var permitAcquired = false
         var permitTransferred = false
         var openedChannel: DirectConnection? = null
+        var channelFuture: Future<DirectConnection>? = null
+        val abandoned = AtomicBoolean(false)
+        val openedByTask = AtomicReference<DirectConnection?>(null)
         return try {
             waitingChannelRequests.incrementAndGet()
             val gotPermit = try {
@@ -384,22 +371,38 @@ class SshTunnelManager(context: Context) {
                 throw IOException("Conexão SSH encerrada enquanto aguardava vaga para o canal")
             }
 
-            val channel = channelHandshakeSemaphore.withPermit {
-                val future = channelOpenExecutor.submit(Callable {
-                    client.newDirectConnection(destHost, destPort)
-                })
-                try {
-                    withContext(Dispatchers.IO) {
-                        future.get(10, TimeUnit.SECONDS)
-                    }
-                } catch (e: TimeoutException) {
-                    future.cancel(true)
-                    throw IOException("Timeout ao abrir canal SSH pra $destHost:$destPort")
-                } catch (e: Exception) {
-                    throw e.cause ?: e
+            val future = channelOpenExecutor.submit(Callable {
+                val channel = client.newDirectConnection(destHost, destPort)
+                openedByTask.set(channel)
+                if (abandoned.get()) {
+                    runCatching { channel.close() }
+                    throw IOException("Abertura do canal terminou depois do timeout")
                 }
+                channel
+            })
+            channelFuture = future
+            val channel = try {
+                runInterruptible(Dispatchers.IO) {
+                    future.get(10, TimeUnit.SECONDS)
+                }
+            } catch (e: TimeoutException) {
+                abandoned.set(true)
+                future.cancel(true)
+                runCatching { openedByTask.getAndSet(null)?.close() }
+                throw IOException("Timeout ao abrir canal SSH pra $destHost:$destPort")
+            } catch (e: Exception) {
+                throw e.cause ?: e
             }
+            openedByTask.compareAndSet(channel, null)
             openedChannel = channel
+
+            // A desconexao pode ter acontecido enquanto newDirectConnection estava
+            // bloqueado. Nesse caso nao se entrega um canal orfao ao relay.
+            if (!client.isConnected || !client.isAuthenticated ||
+                activeClients.values.none { it === client }
+            ) {
+                throw IOException("Conexao SSH encerrada durante a abertura do canal")
+            }
 
             lateinit var lease: DirectChannelLease
             lease = DirectChannelLease(channel) {
@@ -412,8 +415,20 @@ class SshTunnelManager(context: Context) {
             }
             activeChannelLeases.computeIfAbsent(client) { ConcurrentHashMap.newKeySet() }.add(lease)
             permitTransferred = true
+
+            // Fecha tambem a corrida em que cleanupConnection removeu o conjunto
+            // entre o teste acima e o registro da lease.
+            if (activeClients.values.none { it === client }) {
+                lease.close()
+                throw IOException("Conexao SSH removida durante o registro do canal")
+            }
             logChannelStatsIfChanged()
             lease.inputStream to lease.outputStream
+        } catch (e: CancellationException) {
+            abandoned.set(true)
+            channelFuture?.cancel(true)
+            runCatching { openedByTask.getAndSet(null)?.close() }
+            throw e
         } catch (e: Exception) {
             val detail = "${e.javaClass.simpleName}: ${e.message}"
             AppLog.log(
@@ -428,6 +443,9 @@ class SshTunnelManager(context: Context) {
             null
         } finally {
             if (permitAcquired && !permitTransferred) {
+                abandoned.set(true)
+                channelFuture?.cancel(true)
+                runCatching { openedByTask.getAndSet(null)?.close() }
                 runCatching { openedChannel?.close() }
                 semaphore.release()
             }
@@ -458,22 +476,37 @@ class SshTunnelManager(context: Context) {
         }
     }
 
-    /** Fecha o canal inteiro e devolve seu permit exatamente uma vez. */
+    /**
+     * Mantem separado o EOF de escrita do fechamento total do canal.
+     *
+     * No SSHJ, fechar ChannelOutputStream envia SSH_MSG_CHANNEL_EOF e preserva a
+     * direcao de entrada. A V4 interceptava esse close() e fechava o canal inteiro,
+     * cortando respostas ainda em transito e impedindo a drenagem TCP correta.
+     */
     private class DirectChannelLease(
         private val channel: DirectConnection,
         private val onClosed: () -> Unit
     ) {
         private val closed = AtomicBoolean(false)
+        private val outputClosed = AtomicBoolean(false)
 
         val inputStream: InputStream = object : FilterInputStream(channel.inputStream) {
             override fun close() = closeChannel()
         }
 
         val outputStream: OutputStream = object : FilterOutputStream(channel.outputStream) {
-            override fun close() = closeChannel()
+            override fun close() = closeOutput()
         }
 
         fun close() = closeChannel()
+
+        private fun closeOutput() {
+            if (!closed.get() && outputClosed.compareAndSet(false, true)) {
+                // ChannelOutputStream.close() faz o half-close correto no SSH:
+                // descarrega o buffer e envia CHANNEL_EOF sem matar a volta.
+                runCatching { channel.outputStream.close() }
+            }
+        }
 
         private fun closeChannel() {
             if (closed.compareAndSet(false, true)) {
@@ -677,6 +710,11 @@ class SshTunnelManager(context: Context) {
                 connectPreferringIPv4(host, port, effectiveTimeout)
             }
 
+            // O socket SSH transporta todos os canais multiplexados. Nagle e buffers
+            // pequenos aqui afetam a VPN inteira, por isso ajustamos antes de TLS/
+            // payload. Em Socket de proxy/SlowDNS a mesma configuracao e segura.
+            tuneTransportSocket(socket)
+
             // CORRECAO IMPORTANTE: TLS tem que vir ANTES do payload, nao depois.
             // Servidores/CDNs que recebem TLS na porta 443 (ex: CloudFront) esperam um
             // ClientHello TLS como os PRIMEIROS bytes da conexao — se a gente manda o
@@ -707,6 +745,13 @@ class SshTunnelManager(context: Context) {
             }
 
             delegate = socket
+        }
+
+        private fun tuneTransportSocket(socket: Socket) {
+            runCatching { socket.tcpNoDelay = true }
+            runCatching { socket.keepAlive = true }
+            runCatching { socket.sendBufferSize = 256 * 1024 }
+            runCatching { socket.receiveBufferSize = 256 * 1024 }
         }
 
         override fun getInputStream() = delegate?.getInputStream() ?: throw java.io.IOException("Socket não conectado")
