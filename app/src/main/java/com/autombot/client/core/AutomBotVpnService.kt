@@ -229,7 +229,11 @@ class AutomBotVpnService : VpnService() {
             .addDnsServer(dns1)
             .addDnsServer(dns2)
             .addRoute("0.0.0.0", 0)
-            .setMtu(1280)
+            // O tun2socks termina o TCP e recria o fluxo no SOCKS/SSH; ele nao
+            // encapsula o pacote IP inteiro no transporte externo. MTU 1280 apenas
+            // aumentava em cerca de 17% a quantidade de pacotes, JNI calls e trabalho
+            // de criptografia. Deve permanecer igual ao tunnel.mtu do HEV.
+            .setMtu(1500)
 
         // CORRECAO: alem do protect() por socket (que deveria bastar sozinho, mas por
         // algum motivo nao esta sendo suficiente — usuario confirmou que nao e
