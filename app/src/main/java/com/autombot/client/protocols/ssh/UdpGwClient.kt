@@ -2,6 +2,7 @@ package com.autombot.client.protocols.ssh
 
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -9,6 +10,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.io.EOFException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
@@ -54,40 +56,47 @@ class UdpGwClient(
         private const val FLAG_KEEPALIVE = 0x01
         private const val FLAG_REBIND = 0x02
         private const val FLAG_IPV6 = 0x08
-        private const val KEEPALIVE_INTERVAL_MS = 15_000L
+        // O servidor badvpn-udpgw oficial encerra o cliente depois de 20 s sem
+        // receber nenhum frame. Quinze segundos deixavam margem de apenas 5 s e o
+        // canal caía quando o celular/SSH atrasava uma escrita. Cinco segundos
+        // preservam uma margem segura com custo desprezível (frame de 5 bytes).
+        private const val KEEPALIVE_INTERVAL_MS = 5_000L
     }
 
     private val nextConid = AtomicInteger(0)
     private val onIncomingByConid = ConcurrentHashMap<Int, (ByteArray) -> Unit>()
     private val writeLock = Any()
-    @Volatile private var closed = false
+    private val closed = AtomicBoolean(false)
     private var readerJob: Job? = null
     private var keepaliveJob: Job? = null
 
     fun start() {
+        if (closed.get()) return
         readerJob = scope.launch(Dispatchers.IO) { readLoop() }
         keepaliveJob = scope.launch(Dispatchers.IO) {
-            while (isActive && !closed) {
+            while (isActive && !closed.get()) {
                 delay(KEEPALIVE_INTERVAL_MS)
-                runCatching { sendKeepalive() }
+                try {
+                    sendKeepalive()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    closeWithError("keepalive não chegou ao servidor", e)
+                    break
+                }
             }
         }
     }
 
     fun stop() {
-        closed = true
-        readerJob?.cancel()
-        keepaliveJob?.cancel()
-        onIncomingByConid.clear()
-        runCatching { channelIn.close() }
-        runCatching { channelOut.close() }
+        closeInternal()
     }
 
-    fun isClosed(): Boolean = closed
+    fun isClosed(): Boolean = closed.get()
 
     /** Abre um conid exclusivo para esta sessão SOCKS5 UDP. */
     fun openSession(destHost: String, destPort: Int, onIncoming: (ByteArray) -> Unit): UdpBackendSession? {
-        if (closed) return null
+        if (closed.get()) return null
         val encodedAddress = runCatching { encodeAddress(destHost, destPort) }
             .onFailure {
                 AppLog.log("Gateway UDP: endereço inválido $destHost:$destPort (${it.message})", AppLog.Level.ERROR)
@@ -101,12 +110,17 @@ class UdpGwClient(
 
         return object : UdpBackendSession {
             override suspend fun send(payload: ByteArray) {
-                if (sessionClosed.get() || closed) return
+                if (sessionClosed.get()) throw IOException("sessão UDP já foi encerrada")
+                if (closed.get()) throw IOException("canal do gateway UDP está fechado")
                 val flags = encodedAddress.flags or if (firstPacket.getAndSet(false)) FLAG_REBIND else 0
-                runCatching { sendPacket(conid, encodedAddress.bytes, flags, payload) }
-                    .onFailure {
-                        AppLog.log("Gateway UDP: falha ao enviar para $destHost:$destPort (${it.message})", AppLog.Level.ERROR)
-                    }
+                try {
+                    sendPacket(conid, encodedAddress.bytes, flags, payload)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    closeWithError("falha ao enviar para $destHost:$destPort", e)
+                    throw e
+                }
             }
 
             override fun close() {
@@ -160,22 +174,24 @@ class UdpGwClient(
     private suspend fun writeFramed(payload: ByteArray) = withContext(Dispatchers.IO) {
         require(payload.size <= 0xFFFF) { "datagrama excede o limite do PacketProto" }
         synchronized(writeLock) {
-            val header = byteArrayOf(
-                (payload.size and 0xFF).toByte(),
-                ((payload.size shr 8) and 0xFF).toByte()
-            )
-            channelOut.write(header)
-            channelOut.write(payload)
+            if (closed.get()) throw IOException("canal do gateway UDP está fechado")
+            val frame = ByteArray(2 + payload.size)
+            frame[0] = (payload.size and 0xFF).toByte()
+            frame[1] = ((payload.size shr 8) and 0xFF).toByte()
+            System.arraycopy(payload, 0, frame, 2, payload.size)
+            channelOut.write(frame)
             channelOut.flush()
         }
     }
 
     private suspend fun readLoop() {
         try {
-            while (!closed) {
-                val lenBytes = readExact(2) ?: break
+            while (!closed.get()) {
+                val lenBytes = readExact(2)
+                    ?: throw EOFException("servidor encerrou o stream do gateway")
                 val len = (lenBytes[0].toInt() and 0xFF) or ((lenBytes[1].toInt() and 0xFF) shl 8)
-                val payload = readExact(len) ?: break
+                val payload = readExact(len)
+                    ?: throw EOFException("servidor encerrou um frame UDP incompleto")
                 if (len < 3) continue // já consumiu o frame; pacote inválido é ignorado sem dessincronizar o stream
 
                 val flags = payload[0].toInt() and 0xFF
@@ -189,16 +205,27 @@ class UdpGwClient(
                     runCatching { onIncomingByConid[conid]?.invoke(data) }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            if (!closed) {
-                AppLog.log("Gateway UDP: canal encerrado (${e.javaClass.simpleName}: ${e.message})", AppLog.Level.ERROR)
-            }
+            closeWithError("canal encerrado", e)
         } finally {
-            closed = true
-            onIncomingByConid.clear()
-            runCatching { channelIn.close() }
-            runCatching { channelOut.close() }
+            closeInternal()
         }
+    }
+
+    private fun closeWithError(context: String, error: Exception) {
+        closeInternal("Gateway UDP: $context (${error.javaClass.simpleName}: ${error.message})")
+    }
+
+    private fun closeInternal(logMessage: String? = null) {
+        if (!closed.compareAndSet(false, true)) return
+        if (logMessage != null) AppLog.log(logMessage, AppLog.Level.ERROR)
+        readerJob?.cancel()
+        keepaliveJob?.cancel()
+        onIncomingByConid.clear()
+        runCatching { channelIn.close() }
+        runCatching { channelOut.close() }
     }
 
     private fun readExact(size: Int): ByteArray? {
