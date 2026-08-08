@@ -40,6 +40,12 @@ class Socks5Server(
         const val DNS_SUCCESS_LOG_INTERVAL_MS = 30_000L
     }
 
+    private enum class PipeEnd {
+        EOF,
+        PEER_GONE,
+        ERROR
+    }
+
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var running = false
@@ -471,9 +477,12 @@ class Socks5Server(
         var job1: Job? = null
         var job2: Job? = null
         try {
+            val firstFinished = CompletableDeferred<PipeEnd>()
             val upstream = launch(Dispatchers.IO) {
                 try {
-                    pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
+                    firstFinished.complete(
+                        pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
+                    )
                 } finally {
                     withContext(NonCancellable + Dispatchers.IO) {
                         runCatching { remoteOut.flush() }
@@ -483,7 +492,9 @@ class Socks5Server(
             }
             val downstream = launch(Dispatchers.IO) {
                 try {
-                    pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
+                    firstFinished.complete(
+                        pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
+                    )
                 } finally {
                     withContext(NonCancellable + Dispatchers.IO) {
                         runCatching { clientOut.flush() }
@@ -496,15 +507,22 @@ class Socks5Server(
             job1 = upstream
             job2 = downstream
 
-            val firstFinished = CompletableDeferred<Unit>()
-            upstream.invokeOnCompletion { firstFinished.complete(Unit) }
-            downstream.invokeOnCompletion { firstFinished.complete(Unit) }
-            firstFinished.await()
-
-            val endedGracefully = withTimeoutOrNull(RELAY_DRAIN_TIMEOUT_MS) {
+            val firstEnd = firstFinished.await()
+            // Broken pipe/reset significa que uma das pontas ja desapareceu. Nao
+            // existe resposta a drenar: interromper a outra direcao agora devolve
+            // imediatamente o canal SSH. Somente EOF/FIN normal recebe a janela de
+            // drenagem para terminar downloads e respostas ainda em transito.
+            val endedGracefully = if (firstEnd == PipeEnd.EOF) {
+                withTimeoutOrNull(RELAY_DRAIN_TIMEOUT_MS) {
+                    joinAll(upstream, downstream)
+                    true
+                } ?: false
+            } else {
+                upstream.cancel()
+                downstream.cancel()
                 joinAll(upstream, downstream)
                 true
-            } ?: false
+            }
             if (!endedGracefully && running) {
                 AppLog.log(
                     "$logPrefix: relay $tag não drenou em ${RELAY_DRAIN_TIMEOUT_MS / 1000}s; fechando o canal",
@@ -526,13 +544,18 @@ class Socks5Server(
         }
     }
 
-    private fun CoroutineScope.pipe(from: InputStream, to: OutputStream, counter: AtomicLong, tag: String) {
+    private fun CoroutineScope.pipe(
+        from: InputStream,
+        to: OutputStream,
+        counter: AtomicLong,
+        tag: String
+    ): PipeEnd {
         val buffer = ByteArray(COPY_BUFFER_SIZE)
         var bytesThisPipe = 0L
         try {
             while (isActive) {
                 val n = from.read(buffer)
-                if (n <= 0) break
+                if (n <= 0) return PipeEnd.EOF
                 to.write(buffer, 0, n)
                 // SSHJ ja agrupa ate o tamanho maximo de pacote do canal. So
                 // descarrega o residual quando nao ha mais bytes prontos, evitando
@@ -543,15 +566,18 @@ class Socks5Server(
                 counter.addAndGet(n.toLong())
                 bytesThisPipe += n
             }
+            return PipeEnd.PEER_GONE
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (running && !isExpectedClose(e)) {
+            val expectedClose = isExpectedClose(e)
+            if (running && !expectedClose) {
                 AppLog.log(
                     "$tag: interrompido por erro (${e.javaClass.simpleName}: ${e.message}) após $bytesThisPipe bytes",
                     AppLog.Level.ERROR
                 )
             }
+            return if (expectedClose) PipeEnd.PEER_GONE else PipeEnd.ERROR
         } finally {
             runCatching { to.flush() }
         }
@@ -577,6 +603,9 @@ class Socks5Server(
         val message = error.message.orEmpty().lowercase()
         return message.contains("socket closed") ||
             message.contains("stream closed") ||
+            message.contains("broken pipe") ||
+            message.contains("connection reset") ||
+            message.contains("reset by peer") ||
             message.contains("disconnected") ||
             message.contains("channel is not open")
     }
