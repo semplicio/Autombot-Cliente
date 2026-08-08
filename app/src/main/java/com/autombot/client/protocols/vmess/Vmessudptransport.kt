@@ -17,14 +17,12 @@ import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * UDP do VMess: mesma conexão WebSocket que o TCP usa, só que com comando 0x02 no
- * cabeçalho (ver VmessCrypto.kt) — o framing do corpo (VmessOutputStream/
- * VmessInputStream, chunks AES-128-GCM de [2 bytes tamanho][dados cifrados]) é
- * reaproveitado sem mudança nenhuma: como cada datagrama UDP real é bem menor que o
- * limite de um chunk (16KB), UM write() vira UM chunk vira UM pacote, naturalmente —
- * não precisa de nenhum framing extra por cima.
+ * UDP do VMess sobre WebSocket. Uma falha de escrita agora é propagada para o
+ * Socks5Server, que pode remover a sessão e reabri-la, em vez de descartar pacotes
+ * silenciosamente numa conexão já morta.
  */
 object VmessUdpTransport {
 
@@ -38,15 +36,18 @@ object VmessUdpTransport {
     ): UdpBackendSession? {
         val pipedOut = PipedOutputStream()
         val pipedIn = PipedInputStream(pipedOut, 256 * 1024)
+        val closed = AtomicBoolean(false)
 
         val clientBuilder = OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(20, TimeUnit.SECONDS)
             .socketFactory(object : javax.net.SocketFactory() {
                 override fun createSocket(): java.net.Socket {
                     val socket = java.net.Socket()
                     socket.bind(java.net.InetSocketAddress(0))
                     if (!protectSocket(socket)) {
+                        runCatching { socket.close() }
                         throw IOException("Não consegui isentar esta conexão UDP (VMess) da VPN (protect() falhou).")
                     }
                     return socket
@@ -69,15 +70,20 @@ object VmessUdpTransport {
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) { latch.countDown() }
+
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                runCatching { pipedOut.write(bytes.toByteArray()); pipedOut.flush() }
+                if (!closed.get()) runCatching { pipedOut.write(bytes.toByteArray()); pipedOut.flush() }
             }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 failure = t
+                closed.set(true)
                 latch.countDown()
                 runCatching { pipedOut.close() }
             }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                closed.set(true)
                 runCatching { pipedOut.close() }
             }
         }
@@ -86,24 +92,40 @@ object VmessUdpTransport {
 
         val opened = latch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
         if (!opened || failure != null) {
-            runCatching { webSocket.close(1000, null) }
+            closed.set(true)
+            webSocket.cancel()
             return null
         }
 
         val rawSendStream = object : OutputStream() {
             override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+
             override fun write(b: ByteArray, off: Int, len: Int) {
+                if (closed.get()) throw IOException("WebSocket VMess UDP está fechado")
                 val sent = webSocket.send(ByteString.of(*b.copyOfRange(off, off + len)))
-                if (!sent) throw IOException("Falha ao enviar dados pelo WebSocket VMess (UDP)")
+                if (!sent) {
+                    closed.set(true)
+                    webSocket.cancel()
+                    throw IOException("Falha ao enviar dados pelo WebSocket VMess (UDP)")
+                }
+            }
+
+            override fun close() {
+                if (closed.compareAndSet(false, true)) {
+                    runCatching { webSocket.close(1000, null) }
+                }
+                runCatching { pipedIn.close() }
+                runCatching { pipedOut.close() }
             }
         }
 
         val request = try {
             VmessCrypto.buildRequest(config.uuid, destHost, destPort, command = 0x02)
-        } catch (e: Exception) {
-            runCatching { webSocket.close(1000, null) }
+        } catch (_: Exception) {
+            runCatching { rawSendStream.close() }
             return null
         }
+
         try {
             rawSendStream.write(request.authId)
             rawSendStream.write(request.connectionNonce)
@@ -116,8 +138,8 @@ object VmessUdpTransport {
                 expectedResponseHeaderByte = request.responseHeaderByte,
                 input = pipedIn
             )
-        } catch (e: Exception) {
-            runCatching { webSocket.close(1000, null) }
+        } catch (_: Exception) {
+            runCatching { rawSendStream.close() }
             return null
         }
 
@@ -131,23 +153,38 @@ object VmessUdpTransport {
         val readerJob = scope.launch {
             val buffer = ByteArray(16384)
             try {
-                while (isActive) {
+                while (isActive && !closed.get()) {
                     val n = dataIn.read(buffer)
                     if (n == -1) break
                     if (n > 0) onIncoming(buffer.copyOf(n))
                 }
-            } catch (e: Exception) {
-                // conexao fechada — normal
+            } catch (_: Exception) {
+            } finally {
+                closed.set(true)
             }
         }
 
         return object : UdpBackendSession {
             override suspend fun send(payload: ByteArray) {
-                runCatching { dataOut.write(payload) }
+                if (closed.get()) throw IOException("Sessão UDP VMess está fechada")
+                try {
+                    dataOut.write(payload)
+                } catch (e: Exception) {
+                    closed.set(true)
+                    webSocket.cancel()
+                    throw IOException("Falha ao enviar UDP VMess: ${e.message}", e)
+                }
             }
+
             override fun close() {
+                if (closed.compareAndSet(false, true)) {
+                    runCatching { webSocket.close(1000, null) }
+                }
                 readerJob.cancel()
-                runCatching { webSocket.close(1000, null) }
+                runCatching { dataOut.close() }
+                runCatching { dataIn.close() }
+                runCatching { pipedIn.close() }
+                runCatching { pipedOut.close() }
             }
         }
     }
