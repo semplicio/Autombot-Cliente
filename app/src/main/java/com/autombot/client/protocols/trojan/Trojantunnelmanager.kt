@@ -31,9 +31,7 @@ data class ManagedTrojanConnection(
 )
 
 /**
- * Nucleo real da conexao Trojan (TCP+TLS direto + servidor SOCKS5 local) — mesma
- * estrutura do ShadowsocksTunnelManager.kt/VlessTunnelManager.kt. Protocolo mais
- * simples que VLESS/VMess (sem cifra propria, sem WebSocket), risco menor.
+ * Nucleo real da conexao Trojan (TCP+TLS direto + servidor SOCKS5 local).
  */
 class TrojanTunnelManager(context: Context) {
     private val prefs = context.getSharedPreferences("autombot_trojan", Context.MODE_PRIVATE)
@@ -43,9 +41,6 @@ class TrojanTunnelManager(context: Context) {
     val connections: StateFlow<List<ManagedTrojanConnection>> = _connections
 
     private val activeSocksServers = mutableMapOf<String, Socks5Server>()
-    // UDP do Trojan usa UMA conexao TLS compartilhada por conexao (nao uma por
-    // destino, ver TrojanUdpTransport.kt) — criada sob demanda na primeira vez que
-    // algum UDP aparecer.
     private val activeUdpTransports = mutableMapOf<String, TrojanUdpTransport>()
 
     init {
@@ -156,6 +151,7 @@ class TrojanTunnelManager(context: Context) {
         }
     }
 
+    /** Recria o transporte UDP compartilhado quando a conexão TLS anterior morreu. */
     @Synchronized
     private fun openTrojanUdpSession(
         config: TrojanConnectionConfig,
@@ -165,11 +161,19 @@ class TrojanTunnelManager(context: Context) {
         onIncoming: (ByteArray) -> Unit
     ): com.autombot.client.protocols.ssh.UdpBackendSession? {
         return try {
-            val transport = activeUdpTransports.getOrPut(connectionName) {
-                TrojanUdpTransport(config) { socket -> AutomBotVpnService.protectSocket(socket) }
+            var transport = activeUdpTransports[connectionName]
+            if (transport == null || transport.isClosed()) {
+                if (transport != null) {
+                    activeUdpTransports.remove(connectionName)
+                    transport.close()
+                    AppLog.log("Trojan \"$connectionName\": transporte UDP/TLS encerrou; recriando", AppLog.Level.INFO)
+                }
+                transport = TrojanUdpTransport(config) { socket -> AutomBotVpnService.protectSocket(socket) }
+                activeUdpTransports[connectionName] = transport
             }
             transport.openSession(destHost, destPort, onIncoming)
         } catch (e: Exception) {
+            activeUdpTransports.remove(connectionName)?.close()
             val detail = "${e.javaClass.simpleName}: ${e.message}"
             AppLog.log("Trojan \"$connectionName\": falha ao abrir UDP para $destHost:$destPort — $detail", AppLog.Level.ERROR)
             null
