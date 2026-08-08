@@ -164,12 +164,13 @@ object NativeTun2Socks {
     private fun buildConfig(socksHost: String, socksPort: Int, dns: String = "8.8.8.8", logFilePath: String? = null): String {
         val base = """
         tunnel:
-          mtu: 1280
+          mtu: 1500
           ipv4: 198.18.0.1
         socks5:
           port: $socksPort
           address: $socksHost
           udp: udp
+          pipeline: true
         dns:
           address: $dns
           port: 53
