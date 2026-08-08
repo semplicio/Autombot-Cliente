@@ -17,16 +17,12 @@ import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * UDP do VLESS: mesma conexão WebSocket que o TCP usa, só que com comando 0x02 no
- * cabeçalho (ver VlessProtocol.kt) e cada "pacote" enviado/recebido com um prefixo de
- * 2 bytes de comprimento (VlessProtocol.encodeUdpPacket) — diferente do Shadowsocks,
- * aqui é UMA conexão nova POR DESTINO (igual ao TCP), não uma compartilhada.
- *
- * ATENCAO: implementado a partir da especificação, ainda não testado contra um
- * servidor VLESS de verdade em modo UDP — se o servidor recusar ou os pacotes vierem
- * corrompidos, é o primeiro lugar a revisar (junto com VlessProtocol.kt).
+ * UDP do VLESS: uma conexão WebSocket por destino, com framing de 2 bytes de tamanho.
+ * Falhas agora são propagadas ao Socks5Server para que ele descarte a sessão morta e
+ * tente abrir outra em vez de continuar enviando pacotes para um WebSocket encerrado.
  */
 object VlessUdpTransport {
 
@@ -40,18 +36,19 @@ object VlessUdpTransport {
     ): UdpBackendSession? {
         val pipedOut = PipedOutputStream()
         val pipedIn = PipedInputStream(pipedOut, 256 * 1024)
+        val closed = AtomicBoolean(false)
 
         val clientBuilder = OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(20, TimeUnit.SECONDS)
             .socketFactory(object : javax.net.SocketFactory() {
                 override fun createSocket(): java.net.Socket {
                     val socket = java.net.Socket()
                     socket.bind(java.net.InetSocketAddress(0))
                     if (!protectSocket(socket)) {
-                        throw IOException(
-                            "Não consegui isentar esta conexão UDP (VLESS) da VPN (protect() falhou)."
-                        )
+                        runCatching { socket.close() }
+                        throw IOException("Não consegui isentar esta conexão UDP (VLESS) da VPN (protect() falhou).")
                     }
                     return socket
                 }
@@ -73,15 +70,20 @@ object VlessUdpTransport {
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) { latch.countDown() }
+
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                runCatching { pipedOut.write(bytes.toByteArray()); pipedOut.flush() }
+                if (!closed.get()) runCatching { pipedOut.write(bytes.toByteArray()); pipedOut.flush() }
             }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 failure = t
+                closed.set(true)
                 latch.countDown()
                 runCatching { pipedOut.close() }
             }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                closed.set(true)
                 runCatching { pipedOut.close() }
             }
         }
@@ -90,45 +92,54 @@ object VlessUdpTransport {
 
         val opened = latch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
         if (!opened || failure != null) {
-            runCatching { webSocket.close(1000, null) }
+            closed.set(true)
+            webSocket.cancel()
             return null
         }
 
-        // Cabecalho VLESS com comando UDP (0x02) — ver VlessProtocol.kt.
         val header = VlessProtocol.buildRequestHeader(config.uuid, destHost, destPort, command = 0x02)
-        val sent = webSocket.send(ByteString.of(*header))
-        if (!sent) {
-            runCatching { webSocket.close(1000, null) }
+        if (!webSocket.send(ByteString.of(*header))) {
+            closed.set(true)
+            webSocket.cancel()
             return null
         }
 
-        // Descarta o cabecalho de resposta (mesmo formato do TCP: versao + addons) —
-        // reaproveita o VlessResponseInputStream que ja faz exatamente isso.
         val strippedIn: InputStream = VlessResponseInputStream(pipedIn)
-
         val scope = CoroutineScope(Dispatchers.IO)
         val readerJob = scope.launch {
             try {
-                while (isActive) {
+                while (isActive && !closed.get()) {
                     val lengthBytes = readExact(strippedIn, 2) ?: break
                     val len = ((lengthBytes[0].toInt() and 0xFF) shl 8) or (lengthBytes[1].toInt() and 0xFF)
                     if (len == 0) continue
                     val payload = readExact(strippedIn, len) ?: break
                     onIncoming(payload)
                 }
-            } catch (e: Exception) {
-                // conexao fechada — normal
+            } catch (_: Exception) {
+                // encerramento é refletido em closed e a próxima escrita força reopen
+            } finally {
+                closed.set(true)
             }
         }
 
         return object : UdpBackendSession {
             override suspend fun send(payload: ByteArray) {
+                if (closed.get()) throw IOException("Sessão UDP VLESS está fechada")
                 val framed = VlessProtocol.encodeUdpPacket(payload)
-                runCatching { webSocket.send(ByteString.of(*framed)) }
+                if (!webSocket.send(ByteString.of(*framed))) {
+                    closed.set(true)
+                    webSocket.cancel()
+                    throw IOException("Falha ao enviar UDP pelo WebSocket VLESS")
+                }
             }
+
             override fun close() {
+                if (closed.compareAndSet(false, true)) {
+                    runCatching { webSocket.close(1000, null) }
+                }
                 readerJob.cancel()
-                runCatching { webSocket.close(1000, null) }
+                runCatching { pipedIn.close() }
+                runCatching { pipedOut.close() }
             }
         }
     }
@@ -138,7 +149,7 @@ object VlessUdpTransport {
         var offset = 0
         while (offset < size) {
             val n = input.read(buf, offset, size - offset)
-            if (n == -1) return if (offset == 0) null else null
+            if (n == -1) return null
             offset += n
         }
         return buf
