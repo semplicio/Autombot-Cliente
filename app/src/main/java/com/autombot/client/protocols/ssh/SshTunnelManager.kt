@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
@@ -105,6 +106,23 @@ class SshTunnelManager(context: Context) {
     // desconexao consegue fecha-lo e devolver o permit mesmo se o relay foi cancelado.
     private val regularChannelSemaphore = Semaphore(REGULAR_CHANNEL_LIMIT)
     private val udpGatewayChannelSemaphore = Semaphore(UDP_GATEWAY_CHANNEL_LIMIT)
+
+    // CORRECAO: usuario apontou (com razao) que se fosse limitacao da VPS/Dropbear,
+    // outros apps (HTTP Injector, HTTP Custom) teriam o MESMO problema na MESMA
+    // porta — e nao tem. Log real mostrou o padrao: canais ja abertos continuam
+    // trocando dado normalmente, mas por ~53s NENHUM canal novo consegue abrir —
+    // e quando destrava, uma rajada de varios "conectado" aparece TODOS no mesmo
+    // segundo. Isso e a marca de excesso de pedidos de abertura SIMULTANEOS
+    // sobrecarregando algo interno (SSHJ e/ou o proprio Dropbear processando o
+    // handshake de abertura, que e sequencial por natureza do protocolo SSH — um
+    // unico fluxo TCP compartilhado por todos os canais). O limite de 64 canais
+    // JA ABERTOS nao protege disso, porque nao limita quantos pedidos de ABRIR
+    // estao em andamento ao mesmo tempo. Esse semaforo novo, bem mais estreito,
+    // so protege a etapa de negociacao (o proprio client.newDirectConnection) —
+    // deixa o handshake acontecer aos poucos, em vez de tudo de uma vez, sem
+    // reduzir quantos canais podem ficar abertos e ativos ao mesmo tempo.
+    private val channelHandshakeSemaphore = Semaphore(4)
+
     private val activeChannelLeases = ConcurrentHashMap<SSHClient, MutableSet<DirectChannelLease>>()
     private val waitingChannelRequests = AtomicInteger(0)
     @Volatile private var lastChannelStats = ""
@@ -366,18 +384,20 @@ class SshTunnelManager(context: Context) {
                 throw IOException("Conexão SSH encerrada enquanto aguardava vaga para o canal")
             }
 
-            val future = channelOpenExecutor.submit(Callable {
-                client.newDirectConnection(destHost, destPort)
-            })
-            val channel = try {
-                withContext(Dispatchers.IO) {
-                    future.get(10, TimeUnit.SECONDS)
+            val channel = channelHandshakeSemaphore.withPermit {
+                val future = channelOpenExecutor.submit(Callable {
+                    client.newDirectConnection(destHost, destPort)
+                })
+                try {
+                    withContext(Dispatchers.IO) {
+                        future.get(10, TimeUnit.SECONDS)
+                    }
+                } catch (e: TimeoutException) {
+                    future.cancel(true)
+                    throw IOException("Timeout ao abrir canal SSH pra $destHost:$destPort")
+                } catch (e: Exception) {
+                    throw e.cause ?: e
                 }
-            } catch (e: TimeoutException) {
-                future.cancel(true)
-                throw IOException("Timeout ao abrir canal SSH pra $destHost:$destPort")
-            } catch (e: Exception) {
-                throw e.cause ?: e
             }
             openedChannel = channel
 
