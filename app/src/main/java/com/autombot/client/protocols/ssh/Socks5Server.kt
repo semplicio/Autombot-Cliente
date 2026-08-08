@@ -2,6 +2,8 @@ package com.autombot.client.protocols.ssh
 
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramPacket
@@ -25,19 +27,16 @@ class Socks5Server(
     private val protectDatagramSocket: ((DatagramSocket) -> Boolean)? = null,
     private val dns1: String = "8.8.8.8",
     private val dns2: String = "8.8.4.4",
-    // CORRECAO: handleConnect() nao registrava NADA — nem tentativa, nem sucesso,
-    // nem falha — de cada conexao TCP individual (exatamente o que o navegador usa
-    // pra abrir cada site). Por isso, quando a navegacao falhava, nao sobrava
-    // rastro nenhum no Logcat pra saber o motivo. logPrefix identifica de qual
-    // protocolo/conexao essas linhas novas vieram (ex: "SSH \"bispo\"").
     private val logPrefix: String = "SOCKS5"
 ) {
     private companion object {
-        // Uma resposta grande pode continuar depois de o remetente fazer half-close.
-        // Um minuto evita cortar downloads e ainda recolhe peers que nunca encerram.
-        const val RELAY_DRAIN_TIMEOUT_MS = 60_000L
+        // Um EOF normal ainda recebe uma janela curta para a resposta que já estava
+        // em trânsito. Sessenta segundos deixava canais SSH encerrados ocupando vaga
+        // tempo demais e, em navegação com muitas conexões, podia saturar o pool.
+        const val RELAY_DRAIN_TIMEOUT_MS = 12_000L
         const val COPY_BUFFER_SIZE = 32 * 1024
         const val DNS_SUCCESS_LOG_INTERVAL_MS = 30_000L
+        const val DNS_FALLBACK_CONCURRENCY = 8
     }
 
     private enum class PipeEnd {
@@ -50,6 +49,10 @@ class Socks5Server(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var running = false
     private val lastDnsSuccessLogAt = AtomicLong(0L)
+    // Se UDP/udpgw ficar indisponível, Android/Chrome pode disparar dezenas de DNS
+    // simultâneos. Cada fallback TCP usa um canal do transporte. Limitamos apenas o
+    // fallback para evitar que DNS sozinho consuma todas as vagas do SSH.
+    private val dnsFallbackSemaphore = Semaphore(DNS_FALLBACK_CONCURRENCY)
 
     val totalRx = AtomicLong(0L)
     val totalTx = AtomicLong(0L)
@@ -90,6 +93,7 @@ class Socks5Server(
             val ver = input.read()
             if (ver != 0x05) { client.close(); return }
             val nMethods = input.read()
+            if (nMethods <= 0) { client.close(); return }
             val methods = ByteArray(nMethods)
             readFully(input, methods)
             output.write(byteArrayOf(0x05, 0x00))
@@ -123,7 +127,10 @@ class Socks5Server(
                     client.close()
                 }
             }
-        } catch (e: Exception) {
+        } catch (_: CancellationException) {
+            runCatching { client.close() }
+            throw CancellationException()
+        } catch (_: Exception) {
             runCatching { client.close() }
         }
     }
@@ -158,24 +165,14 @@ class Socks5Server(
     private val ipv6UnsupportedLogged = ConcurrentHashMap.newKeySet<String>()
 
     private suspend fun handleConnect(client: Socket, input: InputStream, output: OutputStream, destHost: String, destPort: Int) {
-        // CORRECAO: log real do usuario mostrou o celular tentando IPv6 primeiro
-        // (padrao do Android/navegador quando o site oferece os dois — "Happy
-        // Eyeballs"), TODA tentativa falhando (nenhum protocolo aqui suporta IPv6
-        // ainda), e só DEPOIS o mesmo destino em IPv4 funcionando. Deixar essas
-        // tentativas IPv6 tentarem de verdade (e esperar o timeout de conexao
-        // inteiro) e lento — rejeita na hora, sem tentar, pra o navegador cair pro
-        // IPv4 (que funciona) o mais rapido possivel, em vez de esperar.
-        // Deteccao simples: literal IPv6 sempre tem ":" no meio (hostname e IPv4
-        // nunca tem).
         if (destHost.contains(":")) {
             if (ipv6UnsupportedLogged.add(destHost)) {
                 AppLog.log(
-                    "$logPrefix: IPv6 ainda não suportado — $destHost:$destPort recusado na hora " +
-                        "(o app/navegador deve cair pro IPv4 sozinho, sem demora)",
+                    "$logPrefix: IPv6 ainda não suportado — $destHost:$destPort recusado na hora (fallback IPv4)",
                     AppLog.Level.ERROR
                 )
             }
-            output.write(byteArrayOf(0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0)) // 0x08 = tipo de endereco nao suportado
+            output.write(byteArrayOf(0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
             client.close()
             return
@@ -183,7 +180,7 @@ class Socks5Server(
 
         val remote = onConnectRequest(destHost, destPort)
         if (remote == null) {
-            AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort (navegação/app não vai funcionar pra esse destino)", AppLog.Level.ERROR)
+            AppLog.log("$logPrefix: falha ao conectar em $destHost:$destPort", AppLog.Level.ERROR)
             output.write(byteArrayOf(0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
             client.close()
@@ -224,7 +221,7 @@ class Socks5Server(
 
         val relaySocket = try {
             DatagramSocket(InetSocketAddress("127.0.0.1", 0))
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             output.write(byteArrayOf(0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
             output.flush()
             client.close()
@@ -247,11 +244,7 @@ class Socks5Server(
         val receiveJob = scope.launch(Dispatchers.IO) {
             val buffer = ByteArray(65535)
 
-            suspend fun sendViaBackend(
-                destHost: String,
-                destPort: Int,
-                payload: ByteArray
-            ): Boolean {
+            suspend fun sendViaBackend(destHost: String, destPort: Int, payload: ByteArray): Boolean {
                 val key = "$destHost:$destPort"
 
                 fun incomingHandler(respPayload: ByteArray) {
@@ -259,16 +252,10 @@ class Socks5Server(
                     val wrapped = buildUdpResponse(destHost, destPort, respPayload)
                     val peer = clientPeer
                     if (peer != null) {
-                        runCatching {
-                            relaySocket.send(DatagramPacket(wrapped, wrapped.size, peer))
-                        }
+                        runCatching { relaySocket.send(DatagramPacket(wrapped, wrapped.size, peer)) }
                     }
                 }
 
-                // Duas tentativas: a primeira usa a sessão existente; se o canal
-                // persistente do udpgw morreu, remove a sessão velha, o manager cria
-                // outro canal e o MESMO datagrama é reenviado uma vez. Antes o send()
-                // descartava silenciosamente todos os pacotes da rota antiga.
                 repeat(2) { attempt ->
                     var session = sessions[key]
                     if (session == null) {
@@ -285,12 +272,12 @@ class Socks5Server(
                         return true
                     } catch (e: CancellationException) {
                         throw e
-                    } catch (e: Exception) {
+                    } catch (_: Exception) {
                         sessions.remove(key, session)
                         runCatching { session.close() }
                         if (attempt == 0 && running) {
                             AppLog.log(
-                                "$logPrefix: sessão UDP $key perdeu o gateway; reabrindo e reenviando o pacote",
+                                "$logPrefix: sessão UDP $key perdeu o transporte; reabrindo e reenviando o pacote",
                                 AppLog.Level.INFO
                             )
                         }
@@ -309,59 +296,56 @@ class Socks5Server(
                     val (fragDestHost, fragDestPort, payload) = parsed
                     totalTx.addAndGet(payload.size.toLong())
 
-                    // Com o badvpn/udpgw habilitado, o DNS usa o próprio túnel UDP:
-                    // é mais rápido, não vaza consultas fora da VPN e evita a rota
-                    // direta para 8.8.8.8 que o log real mostrou oscilando. Se o
-                    // backend não existir (UDP desabilitado), cai no fallback abaixo.
                     if (sendViaBackend(fragDestHost, fragDestPort, payload)) continue
 
                     if (fragDestPort == 53) {
                         scope.launch(Dispatchers.IO) {
-                            val directTried = protectDatagramSocket != null && (dns1 == "8.8.8.8" || dns1 == "1.1.1.1")
-                            var respPayload: ByteArray? = null
+                            dnsFallbackSemaphore.withPermit {
+                                val directTried = protectDatagramSocket != null &&
+                                    (dns1 == "8.8.8.8" || dns1 == "1.1.1.1")
+                                var respPayload: ByteArray? = null
 
-                            if (directTried) {
-                                respPayload = withTimeoutOrNull(1500.milliseconds) { resolveDnsDirectly(dns1, payload) }
-                                logDnsResult(
-                                    "$logPrefix: DNS direto (fora do túnel) pra $dns1",
-                                    respPayload != null
-                                )
-                            }
-
-                            if (respPayload == null) {
-                                respPayload = withTimeoutOrNull(4000.milliseconds) { resolveDnsViaTcp(dns1, payload) }
-                                logDnsResult(
-                                    "$logPrefix: DNS via túnel (TCP) pra $dns1",
-                                    respPayload != null
-                                )
-                            }
-
-                            if (respPayload == null) {
-                                respPayload = withTimeoutOrNull(4000.milliseconds) { resolveDnsViaTcp(dns2, payload) }
-                                logDnsResult(
-                                    "$logPrefix: DNS via túnel (TCP) pra $dns2 (2º servidor)",
-                                    respPayload != null
-                                )
-                            }
-
-                            if (respPayload != null) {
-                                totalRx.addAndGet(respPayload.size.toLong())
-                                val wrapped = buildUdpResponse(fragDestHost, fragDestPort, respPayload)
-                                val peer = clientPeer
-                                if (peer != null) {
-                                    runCatching { relaySocket.send(DatagramPacket(wrapped, wrapped.size, peer)) }
+                                if (directTried) {
+                                    respPayload = withTimeoutOrNull(1500.milliseconds) {
+                                        resolveDnsDirectly(dns1, payload)
+                                    }
+                                    logDnsResult("$logPrefix: DNS direto (fora do túnel) pra $dns1", respPayload != null)
                                 }
-                            } else {
-                                AppLog.log(
-                                    "$logPrefix: DNS ESGOTOU todas as opções (direto + túnel x2) — resolução falhou de vez, navegador não vai receber resposta nenhuma",
-                                    AppLog.Level.ERROR
-                                )
+
+                                if (respPayload == null) {
+                                    respPayload = withTimeoutOrNull(4000.milliseconds) {
+                                        resolveDnsViaTcp(dns1, payload)
+                                    }
+                                    logDnsResult("$logPrefix: DNS via túnel (TCP) pra $dns1", respPayload != null)
+                                }
+
+                                if (respPayload == null) {
+                                    respPayload = withTimeoutOrNull(4000.milliseconds) {
+                                        resolveDnsViaTcp(dns2, payload)
+                                    }
+                                    logDnsResult("$logPrefix: DNS via túnel (TCP) pra $dns2 (2º servidor)", respPayload != null)
+                                }
+
+                                if (respPayload != null) {
+                                    totalRx.addAndGet(respPayload.size.toLong())
+                                    val wrapped = buildUdpResponse(fragDestHost, fragDestPort, respPayload)
+                                    val peer = clientPeer
+                                    if (peer != null) {
+                                        runCatching { relaySocket.send(DatagramPacket(wrapped, wrapped.size, peer)) }
+                                    }
+                                } else {
+                                    AppLog.log(
+                                        "$logPrefix: DNS esgotou todas as opções (direto + túnel x2)",
+                                        AppLog.Level.ERROR
+                                    )
+                                }
                             }
                         }
-                        continue
                     }
                 }
-            } catch (e: Exception) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
             } finally {
                 sessions.values.forEach { runCatching { it.close() } }
                 sessions.clear()
@@ -378,7 +362,9 @@ class Socks5Server(
                     if (n == -1) break
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
         } finally {
             receiveJob.cancel()
             runCatching { relaySocket.close() }
@@ -392,9 +378,7 @@ class Socks5Server(
         return@withContext try {
             socket = DatagramSocket()
             val activeSocket = socket
-            if (!protect(activeSocket)) {
-                return@withContext null
-            }
+            if (!protect(activeSocket)) return@withContext null
             activeSocket.soTimeout = 1400
             val dstAddr = InetAddress.getByName(dnsServerHost)
             activeSocket.send(DatagramPacket(dnsQuery, dnsQuery.size, dstAddr, 53))
@@ -403,7 +387,7 @@ class Socks5Server(
             val respPacket = DatagramPacket(respBuffer, respBuffer.size)
             activeSocket.receive(respPacket)
             respBuffer.copyOf(respPacket.length)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         } finally {
             runCatching { socket?.close() }
@@ -427,14 +411,13 @@ class Socks5Server(
                 val respLen2 = remoteIn.read()
                 if (respLen1 < 0 || respLen2 < 0) return@runInterruptible null
                 val respLen = (respLen1 shl 8) or respLen2
-
                 if (respLen !in 1..4096) return@runInterruptible null
 
                 val resp = ByteArray(respLen)
                 readFully(remoteIn, resp)
                 resp
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         } finally {
             remote?.let { (remoteIn, remoteOut) ->
@@ -498,9 +481,6 @@ class Socks5Server(
             System.arraycopy(nameBytes, 0, result, 2, nameBytes.size)
             result
         }
-        // RFC 1928: RSV(2) + FRAG(1) + ATYP/endereco + porta. O codigo anterior
-        // reservava quatro bytes antes do endereco, inserindo um zero extra; o HEV
-        // lia esse byte como ATYP=0 e descartava a resposta UDP (inclusive DNS).
         val header = ByteArray(3 + addressBytes.size + 2)
         System.arraycopy(addressBytes, 0, header, 3, addressBytes.size)
         header[3 + addressBytes.size] = ((srcPort shr 8) and 0xFF).toByte()
@@ -513,11 +493,6 @@ class Socks5Server(
         clientOut: OutputStream, remoteIn: InputStream,
         client: Socket, destHost: String, destPort: Int
     ) = coroutineScope {
-        // Cada direcao recebe seu half-close real. No SSHJ, fechar apenas o
-        // ChannelOutputStream envia SSH_MSG_CHANNEL_EOF e continua recebendo a
-        // resposta. No socket local usamos shutdownOutput(), que envia FIN sem
-        // interromper a outra metade. A V4 fechava o canal inteiro nos dois casos,
-        // cortando respostas e acumulando relays presos.
         val tag = "$destHost:$destPort"
         var job1: Job? = null
         var job2: Job? = null
@@ -525,9 +500,7 @@ class Socks5Server(
             val firstFinished = CompletableDeferred<PipeEnd>()
             val upstream = launch(Dispatchers.IO) {
                 try {
-                    firstFinished.complete(
-                        pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]")
-                    )
+                    firstFinished.complete(pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]"))
                 } finally {
                     withContext(NonCancellable + Dispatchers.IO) {
                         runCatching { remoteOut.flush() }
@@ -537,9 +510,7 @@ class Socks5Server(
             }
             val downstream = launch(Dispatchers.IO) {
                 try {
-                    firstFinished.complete(
-                        pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]")
-                    )
+                    firstFinished.complete(pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]"))
                 } finally {
                     withContext(NonCancellable + Dispatchers.IO) {
                         runCatching { clientOut.flush() }
@@ -553,10 +524,6 @@ class Socks5Server(
             job2 = downstream
 
             val firstEnd = firstFinished.await()
-            // Broken pipe/reset significa que uma das pontas ja desapareceu. Nao
-            // existe resposta a drenar: interromper a outra direcao agora devolve
-            // imediatamente o canal SSH. Somente EOF/FIN normal recebe a janela de
-            // drenagem para terminar downloads e respostas ainda em transito.
             val endedGracefully = if (firstEnd == PipeEnd.EOF) {
                 withTimeoutOrNull(RELAY_DRAIN_TIMEOUT_MS) {
                     joinAll(upstream, downstream)
@@ -570,13 +537,11 @@ class Socks5Server(
             }
             if (!endedGracefully && running) {
                 AppLog.log(
-                    "$logPrefix: relay $tag não drenou em ${RELAY_DRAIN_TIMEOUT_MS / 1000}s; fechando o canal",
+                    "$logPrefix: relay $tag não drenou em ${RELAY_DRAIN_TIMEOUT_MS / 1000}s; fechando e liberando o canal",
                     AppLog.Level.INFO
                 )
             }
         } finally {
-            // Cancelamento, timeout e desligamento passam obrigatoriamente por aqui.
-            // remoteIn.close() fecha o canal/lease inteiro e devolve a vaga uma vez.
             withContext(NonCancellable + Dispatchers.IO) {
                 runCatching { client.close() }
                 runCatching { remoteIn.close() }
@@ -602,9 +567,6 @@ class Socks5Server(
                 val n = from.read(buffer)
                 if (n <= 0) return PipeEnd.EOF
                 to.write(buffer, 0, n)
-                // SSHJ ja agrupa ate o tamanho maximo de pacote do canal. So
-                // descarrega o residual quando nao ha mais bytes prontos, evitando
-                // transformar um download continuo em milhares de pacotes pequenos.
                 if (runCatching { from.available() }.getOrDefault(0) == 0) {
                     to.flush()
                 }
