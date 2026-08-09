@@ -60,7 +60,43 @@ android {
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
+
+    // O sing-box é executado via ProcessBuilder a partir de nativeLibraryDir.
+    // Portanto ele precisa ser extraído para o filesystem na instalação, e não
+    // permanecer apenas mapeado diretamente de dentro do APK.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     ndkVersion = "26.3.11579264"
+}
+
+// Hysteria2/TUIC não podem mais gerar um APK "aparentemente correto" sem o
+// núcleo sing-box. O preBuild prepara o binário automaticamente e valida a saída
+// antes de qualquer APK ser produzido. Assim o erro aparece na compilação, não
+// só depois de instalar no telefone.
+val singBoxCoreFile = layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libsingbox.so").asFile
+
+val prepareSingBoxCore by tasks.registering(Exec::class) {
+    group = "build setup"
+    description = "Baixa e prepara o núcleo sing-box Android arm64 usado por Hysteria2/TUIC"
+    commandLine("bash", rootProject.file("scripts/fetch_singbox_android_core.sh").absolutePath)
+
+    doLast {
+        if (!singBoxCoreFile.isFile || singBoxCoreFile.length() <= 0L) {
+            throw GradleException(
+                "Núcleo sing-box não foi preparado em ${singBoxCoreFile.absolutePath}. " +
+                    "O APK não será gerado sem Hysteria2/TUIC funcionais."
+            )
+        }
+        logger.lifecycle("[AutomBot] sing-box pronto: ${singBoxCoreFile.absolutePath} (${singBoxCoreFile.length()} bytes)")
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(prepareSingBoxCore)
 }
 
 dependencies {
