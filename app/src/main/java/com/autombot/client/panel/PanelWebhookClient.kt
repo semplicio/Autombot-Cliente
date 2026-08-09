@@ -206,10 +206,11 @@ class PanelWebhookClient(
     }
 
     companion object {
-        // CORRECAO: chave de exemplo — precisa ser trocada pela chave real gerada
-        // no painel (tabela `api_keys`, ver api/bootstrap.php::exigirApiKey())
-        // antes de publicar. Por ora já dá pra testar ponta a ponta com um
-        // painel de desenvolvimento configurado com essa mesma chave.
-        const val DEFAULT_API_KEY = "TROCAR_PELA_CHAVE_REAL_DO_PAINEL"
+        // CORRECAO: ficava só um placeholder de texto aqui — eu pedia pro
+        // usuário trocar manualmente, mas nunca coloquei o valor real,
+        // e cada entrega nova desse arquivo arriscava sobrescrever uma
+        // edição manual feita no Android Studio. Chave real do painel
+        // (vpn.infinitenet.net) direto aqui agora.
+        const val DEFAULT_API_KEY = "yXWpHdzagaa3LD4ZxlOxwjOyZUGv89a9"
     }
 }
