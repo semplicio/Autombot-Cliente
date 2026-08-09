@@ -75,14 +75,16 @@ import javax.net.ssl.SSLSocket
 class SshTunnelManager(context: Context) {
 
     companion object {
-        private const val REGULAR_CHANNEL_LIMIT = 63
+        // 192 canais por conexão/gerenciador é um teto de segurança, não um limitador
+        // de banda. Os logs reais mostraram rajadas acima de 100 solicitações, então
+        // 64 era baixo demais para navegadores e serviços Android modernos.
+        private const val REGULAR_CHANNEL_LIMIT = 191
         private const val UDP_GATEWAY_CHANNEL_LIMIT = 1
         private const val TOTAL_CHANNEL_LIMIT = REGULAR_CHANNEL_LIMIT + UDP_GATEWAY_CHANNEL_LIMIT
+        private const val REGULAR_CHANNEL_OPEN_LIMIT = 32
+        private const val CHANNEL_PERMIT_WAIT_TIMEOUT_MS = 20_000L
 
         init {
-            // Remove o "BC" capado do Android e registra o BouncyCastle completo no
-            // lugar — precisa ser feito uma vez, antes de qualquer SSHClient() ser
-            // criado. Ver aviso (7) no cabecalho do arquivo.
             java.security.Security.removeProvider("BC")
             java.security.Security.insertProviderAt(BouncyCastleProvider(), 1)
         }
@@ -101,29 +103,29 @@ class SshTunnelManager(context: Context) {
     private val udpGwCreationMutex = Mutex()
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    // V5: 64 canais no total. Sessenta e tres atendem navegacao/DNS e uma vaga e
-    // exclusiva do badvpn-udpgw, para que uma rajada TCP nunca impeça o gateway UDP
-    // de subir. Cada canal aberto também fica registrado por SSHClient; assim a
-    // desconexao consegue fecha-lo e devolver o permit mesmo se o relay foi cancelado.
+    // V6: mantém um teto de segurança alto para canais vivos, mas separa a pressão de
+    // abertura. Antes, um pedido adquiria o permit vitalício e só depois entrava num
+    // pool de 16 threads. Em rajadas, dezenas de pedidos ficavam parados na fila do
+    // executor segurando permits sem sequer terem começado a abrir o direct-tcpip.
+    // Isso fazia o app dizer "todos os canais ocupados" mesmo com bem menos leases
+    // realmente ativos. Agora no máximo 32 aberturas regulares entram nessa fase.
     private val regularChannelSemaphore = Semaphore(REGULAR_CHANNEL_LIMIT)
     private val udpGatewayChannelSemaphore = Semaphore(UDP_GATEWAY_CHANNEL_LIMIT)
+    private val regularChannelOpeningSemaphore = Semaphore(REGULAR_CHANNEL_OPEN_LIMIT)
     private val activeChannelLeases = ConcurrentHashMap<SSHClient, MutableSet<DirectChannelLease>>()
     private val waitingChannelRequests = AtomicInteger(0)
+    private val openingChannelRequests = AtomicInteger(0)
     @Volatile private var lastChannelStats = ""
     private val lastChannelStatsLogAt = AtomicLong(0L)
 
-    // A abertura de direct-tcpip e bloqueante. Um pool limitado evita criar dezenas
-    // de threads quando Chrome/Android fazem uma rajada de conexoes ao mesmo tempo,
-    // mas ainda permite abrir canais em paralelo. Cada abertura continua com timeout
-    // individual e fecha o canal se ele terminar depois de o pedido ser abandonado.
-    private val channelOpenExecutor = java.util.concurrent.Executors.newFixedThreadPool(16)
+    // O pool regular acompanha o limite de aberturas em voo. O gateway UDP usa um
+    // executor dedicado para continuar conseguindo reconectar mesmo durante uma
+    // rajada TCP grande.
+    private val channelOpenExecutor = java.util.concurrent.Executors.newFixedThreadPool(REGULAR_CHANNEL_OPEN_LIMIT)
+    private val udpGatewayOpenExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     init {
         loadPersistedProfiles()
-        // Mesmo padrao do WireGuardManager: atualiza o trafego real (lido do
-        // Socks5Server de cada conexao ativa) a cada poucos segundos, independente de
-        // qual tela o usuario esta olhando. Antes o SSH nao mostrava trafego nenhum
-        // porque essa contagem simplesmente nao existia.
         managerScope.launch {
             while (isActive) {
                 delay(2000)
@@ -158,10 +160,6 @@ class SshTunnelManager(context: Context) {
     private fun persistProfiles() {
         val array = JSONArray()
         _connections.value.forEach { array.put(it.config.toJson()) }
-        // commit() sincrono: garante que perfis SSH sobrevivem mesmo que o processo
-        // seja encerrado logo em seguida — mesma decisao que o AppLog.kt.
-        // Chamado sempre de um CoroutineScope de IO (nunca da thread de UI), entao
-        // nao ha risco de ANR.
         prefs.edit().putString("profiles", array.toString()).commit()
     }
 
@@ -182,118 +180,103 @@ class SshTunnelManager(context: Context) {
         val managed = _connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return
         val config = managed.config
 
-        // Uma reconexao deve começar limpa. Isso também recupera qualquer canal que
-        // tenha sobrevivido a um cancelamento inesperado da VPN anterior.
         cleanupConnection(connectionName)
         markStatus(connectionName, SshStatus.CONNECTING)
         AppLog.log("SSH \"$connectionName\": iniciando conexão (${config.describeLayers()})", AppLog.Level.INFO)
 
-        // TUDO daqui pra baixo e I/O de rede bloqueante (sockets, handshake SSH). Isso
-        // estava rodando na thread principal por padrao (herdada de quem chama
-        // connect()), o que disparava NetworkOnMainThreadException — o Android proibe
-        // rede na thread de UI de proposito. withContext(Dispatchers.IO) resolve isso.
         withContext(Dispatchers.IO) {
             var connectingClient: SSHClient? = null
             try {
                 val client = SSHClient()
                 connectingClient = client
-                client.addHostKeyVerifier(PromiscuousVerifier()) // ver aviso (1) no cabecalho do arquivo
+                client.addHostKeyVerifier(PromiscuousVerifier())
 
-            val port = config.port.toIntOrNull() ?: 22
-            val connectTimeoutMs = (config.connectionTimeoutSeconds.toIntOrNull() ?: 10)
-                .coerceIn(5, 60) * 1000
-            client.connectTimeout = connectTimeoutMs
-            client.timeout = 30_000
-            client.connection.timeoutMs = 15_000
+                val port = config.port.toIntOrNull() ?: 22
+                val connectTimeoutMs = (config.connectionTimeoutSeconds.toIntOrNull() ?: 10)
+                    .coerceIn(5, 60) * 1000
+                client.connectTimeout = connectTimeoutMs
+                client.timeout = 30_000
+                client.connection.timeoutMs = 15_000
 
-            // Camada SlowDNS (se ligada): substitui COMPLETAMENTE a etapa de TCP
-            // direto/proxy — em vez de conectar no servidor de verdade, conecta numa
-            // porta LOCAL que o dnstt-client abre, encaminhando tudo por um túnel
-            // disfarçado de tráfego DNS comum. Precisa terminar de subir (e a porta
-            // local começar a aceitar conexão) ANTES do handshake SSH começar — por
-            // isso roda aqui, fora do ComposedSocket, que só recebe a porta pronta.
-            var slowDnsLocalPort: Int? = null
-            if (config.useSlowDns) {
-                AppLog.log("SSH \"$connectionName\": subindo túnel SlowDNS antes de conectar…", AppLog.Level.INFO)
-                val slowDnsClient = com.autombot.client.protocols.slowdns.SlowDnsClient(
-                    context = appContext,
-                    domain = config.slowDnsDomain,
-                    pubkey = config.slowDnsPubkey,
-                    resolverMode = config.slowDnsResolverMode,
-                    resolver = config.slowDnsResolver
+                var slowDnsLocalPort: Int? = null
+                if (config.useSlowDns) {
+                    AppLog.log("SSH \"$connectionName\": subindo túnel SlowDNS antes de conectar…", AppLog.Level.INFO)
+                    val slowDnsClient = com.autombot.client.protocols.slowdns.SlowDnsClient(
+                        context = appContext,
+                        domain = config.slowDnsDomain,
+                        pubkey = config.slowDnsPubkey,
+                        resolverMode = config.slowDnsResolverMode,
+                        resolver = config.slowDnsResolver
+                    )
+                    val localPort = slowDnsClient.start()
+                    if (localPort == null) {
+                        markError(connectionName, "Falha ao subir o túnel SlowDNS — confira domínio/chave pública/resolvedor")
+                        return@withContext
+                    }
+                    activeSlowDnsClients[connectionName] = slowDnsClient
+                    slowDnsLocalPort = localPort
+                }
+
+                AppLog.log(
+                    "SSH \"$connectionName\": [1/4] conectando em ${config.server}:$port (${config.describeLayers()})",
+                    AppLog.Level.INFO
                 )
-                val localPort = slowDnsClient.start()
-                if (localPort == null) {
-                    markError(connectionName, "Falha ao subir o túnel SlowDNS — confira domínio/chave pública/resolvedor")
-                    return@withContext
-                }
-                activeSlowDnsClients[connectionName] = slowDnsClient
-                slowDnsLocalPort = localPort
-            }
+                client.socketFactory = composedSocketFactory(config, slowDnsLocalPort)
+                client.connect(config.server, port)
+                client.connection.keepAlive.keepAliveInterval = 20
 
-            AppLog.log(
-                "SSH \"$connectionName\": [1/4] conectando em ${config.server}:$port (${config.describeLayers()})",
-                AppLog.Level.INFO
-            )
-            client.socketFactory = composedSocketFactory(config, slowDnsLocalPort)
-            client.connect(config.server, port)
-            
-            // CORRECAO: keep-alive padrao (20s) para evitar ser banido pelo servidor
-            // por excesso de pacotes heartbeat.
-            client.connection.keepAlive.keepAliveInterval = 20
+                AppLog.log("SSH \"$connectionName\": [2/4] handshake SSH concluído, autenticando (${config.authMethod.label})", AppLog.Level.INFO)
 
-            AppLog.log("SSH \"$connectionName\": [2/4] handshake SSH concluído, autenticando (${config.authMethod.label})", AppLog.Level.INFO)
-
-            when (config.authMethod) {
-                SshAuthMethod.PASSWORD -> client.authPassword(config.username, config.password)
-                SshAuthMethod.PRIVATE_KEY -> {
-                    val keyFile = File.createTempFile("autombot_ssh_key", ".pem")
-                    keyFile.writeText(config.privateKeyPem)
-                    keyFile.setReadable(true, true)
-                    try {
-                        val keyProvider = client.loadKeys(keyFile.absolutePath)
-                        client.authPublickey(config.username, keyProvider)
-                    } finally {
-                        keyFile.delete()
+                when (config.authMethod) {
+                    SshAuthMethod.PASSWORD -> client.authPassword(config.username, config.password)
+                    SshAuthMethod.PRIVATE_KEY -> {
+                        val keyFile = File.createTempFile("autombot_ssh_key", ".pem")
+                        keyFile.writeText(config.privateKeyPem)
+                        keyFile.setReadable(true, true)
+                        try {
+                            val keyProvider = client.loadKeys(keyFile.absolutePath)
+                            client.authPublickey(config.username, keyProvider)
+                        } finally {
+                            keyFile.delete()
+                        }
                     }
                 }
-            }
-            AppLog.log("SSH \"$connectionName\": [3/4] autenticado, subindo proxy SOCKS5 local", AppLog.Level.INFO)
+                AppLog.log("SSH \"$connectionName\": [3/4] autenticado, subindo proxy SOCKS5 local", AppLog.Level.INFO)
 
-            activeClients[connectionName] = client
+                activeClients[connectionName] = client
 
-            val socksPort = findFreePort()
-            val socksServer = Socks5Server(
-                socksPort,
-                onConnectRequest = { destHost, destPort ->
-                    openDirectChannel(client, destHost, destPort)
-                },
-                onUdpAssociateRequest = { destHost, destPort, onIncoming ->
-                    if (config.udpForwardEnabled) {
-                        openUdpOverGateway(client, connectionName, config.udpGatewayHost, config.udpGatewayPort.toIntOrNull() ?: 7300, destHost, destPort, onIncoming)
-                    } else {
-                        openUdpOver443Internal(client, destHost, destPort, onIncoming)
+                val socksPort = findFreePort()
+                val socksServer = Socks5Server(
+                    socksPort,
+                    onConnectRequest = { destHost, destPort ->
+                        openDirectChannel(client, destHost, destPort)
+                    },
+                    onUdpAssociateRequest = { destHost, destPort, onIncoming ->
+                        if (config.udpForwardEnabled) {
+                            openUdpOverGateway(client, connectionName, config.udpGatewayHost, config.udpGatewayPort.toIntOrNull() ?: 7300, destHost, destPort, onIncoming)
+                        } else {
+                            openUdpOver443Internal(client, destHost, destPort, onIncoming)
+                        }
+                    },
+                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) },
+                    dns1 = if (config.dnsForwardingEnabled) config.dnsPrimary else "8.8.8.8",
+                    dns2 = if (config.dnsForwardingEnabled) config.dnsSecondary else "8.8.4.4",
+                    logPrefix = "SSH \"$connectionName\""
+                )
+                socksServer.start()
+                activeSocksServers[connectionName] = socksServer
+
+                _connections.update { current ->
+                    current.map {
+                        if (it.config.connectionName == connectionName)
+                            it.copy(status = SshStatus.CONNECTED, localSocksPort = socksPort, lastError = null)
+                        else it
                     }
-                },
-                protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) },
-                dns1 = if (config.dnsForwardingEnabled) config.dnsPrimary else "8.8.8.8",
-                dns2 = if (config.dnsForwardingEnabled) config.dnsSecondary else "8.8.4.4",
-                logPrefix = "SSH \"$connectionName\""
-            )
-            socksServer.start()
-            activeSocksServers[connectionName] = socksServer
-
-            _connections.update { current ->
-                current.map {
-                    if (it.config.connectionName == connectionName)
-                        it.copy(status = SshStatus.CONNECTED, localSocksPort = socksPort, lastError = null)
-                    else it
                 }
-            }
-            AppLog.log(
-                "SSH \"$connectionName\": [4/4] conectado — proxy SOCKS5 em 127.0.0.1:$socksPort",
-                AppLog.Level.SUCCESS
-            )
+                AppLog.log(
+                    "SSH \"$connectionName\": [4/4] conectado — proxy SOCKS5 em 127.0.0.1:$socksPort",
+                    AppLog.Level.SUCCESS
+                )
             } catch (e: Exception) {
                 cleanupConnection(connectionName)
                 connectingClient?.let { failedClient ->
@@ -324,11 +307,6 @@ class SshTunnelManager(context: Context) {
     }
 
     /**
-     * Abre um canal direct-tcpip pelo SSH ate (destHost, destPort) — e isso que faz o
-     * SOCKS5 local realmente atravessar o tunel SSH em vez de conectar direto.
-     * Ver aviso (2) no cabecalho do arquivo.
-     */
-    /**
      * Abre um canal direct-tcpip pelo SSH ate (destHost, destPort).
      * O permit do semaforo permanece adquirido durante toda a vida do canal e so e
      * devolvido quando os streams forem fechados.
@@ -346,32 +324,56 @@ class SshTunnelManager(context: Context) {
         }
 
         val semaphore = if (reservedForUdpGateway) udpGatewayChannelSemaphore else regularChannelSemaphore
+        val openingSemaphore = if (reservedForUdpGateway) null else regularChannelOpeningSemaphore
+        val executor = if (reservedForUdpGateway) udpGatewayOpenExecutor else channelOpenExecutor
+
+        var openingPermitAcquired = false
         var permitAcquired = false
         var permitTransferred = false
+        var openingCounted = false
         var openedChannel: DirectConnection? = null
         var channelFuture: Future<DirectConnection>? = null
         val abandoned = AtomicBoolean(false)
         val openedByTask = AtomicReference<DirectConnection?>(null)
+
         return try {
             waitingChannelRequests.incrementAndGet()
-            val gotPermit = try {
-                withTimeoutOrNull(10_000L) {
+            try {
+                if (openingSemaphore != null) {
+                    val gotOpeningSlot = withTimeoutOrNull(CHANNEL_PERMIT_WAIT_TIMEOUT_MS) {
+                        openingSemaphore.acquire()
+                        true
+                    } ?: false
+                    if (!gotOpeningSlot) {
+                        throw IOException(
+                            "Fila de abertura SSH ocupada há ${CHANNEL_PERMIT_WAIT_TIMEOUT_MS / 1000}s (${channelStatsText()})"
+                        )
+                    }
+                    openingPermitAcquired = true
+                }
+
+                val gotPermit = withTimeoutOrNull(CHANNEL_PERMIT_WAIT_TIMEOUT_MS) {
                     semaphore.acquire()
                     true
                 } ?: false
+                if (!gotPermit) {
+                    throw IOException(
+                        "Todos os canais SSH estão ocupados há ${CHANNEL_PERMIT_WAIT_TIMEOUT_MS / 1000}s (${channelStatsText()})"
+                    )
+                }
+                permitAcquired = true
             } finally {
                 waitingChannelRequests.decrementAndGet()
             }
-            if (!gotPermit) {
-                throw IOException("Todos os canais SSH estão ocupados há 10s (${channelStatsText()})")
-            }
-            permitAcquired = true
 
             if (!client.isConnected || !client.isAuthenticated) {
                 throw IOException("Conexão SSH encerrada enquanto aguardava vaga para o canal")
             }
 
-            val future = channelOpenExecutor.submit(Callable {
+            openingChannelRequests.incrementAndGet()
+            openingCounted = true
+
+            val future = executor.submit(Callable {
                 val channel = client.newDirectConnection(destHost, destPort)
                 openedByTask.set(channel)
                 if (abandoned.get()) {
@@ -396,8 +398,6 @@ class SshTunnelManager(context: Context) {
             openedByTask.compareAndSet(channel, null)
             openedChannel = channel
 
-            // A desconexao pode ter acontecido enquanto newDirectConnection estava
-            // bloqueado. Nesse caso nao se entrega um canal orfao ao relay.
             if (!client.isConnected || !client.isAuthenticated ||
                 activeClients.values.none { it === client }
             ) {
@@ -416,8 +416,6 @@ class SshTunnelManager(context: Context) {
             activeChannelLeases.computeIfAbsent(client) { ConcurrentHashMap.newKeySet() }.add(lease)
             permitTransferred = true
 
-            // Fecha tambem a corrida em que cleanupConnection removeu o conjunto
-            // entre o teste acima e o registro da lease.
             if (activeClients.values.none { it === client }) {
                 lease.close()
                 throw IOException("Conexao SSH removida durante o registro do canal")
@@ -442,6 +440,8 @@ class SshTunnelManager(context: Context) {
             }
             null
         } finally {
+            if (openingCounted) openingChannelRequests.decrementAndGet()
+            if (openingPermitAcquired) openingSemaphore?.release()
             if (permitAcquired && !permitTransferred) {
                 abandoned.set(true)
                 channelFuture?.cancel(true)
@@ -462,7 +462,7 @@ class SshTunnelManager(context: Context) {
 
     private fun channelStatsText(): String {
         val active = activeChannelLeases.values.sumOf { it.size }
-        return "ativos $active/$TOTAL_CHANNEL_LIMIT, aguardando ${waitingChannelRequests.get()}"
+        return "ativos $active/$TOTAL_CHANNEL_LIMIT, abrindo ${openingChannelRequests.get()}, aguardando ${waitingChannelRequests.get()}"
     }
 
     private fun logChannelStatsIfChanged(force: Boolean = false) {
@@ -478,10 +478,6 @@ class SshTunnelManager(context: Context) {
 
     /**
      * Mantem separado o EOF de escrita do fechamento total do canal.
-     *
-     * No SSHJ, fechar ChannelOutputStream envia SSH_MSG_CHANNEL_EOF e preserva a
-     * direcao de entrada. A V4 interceptava esse close() e fechava o canal inteiro,
-     * cortando respostas ainda em transito e impedindo a drenagem TCP correta.
      */
     private class DirectChannelLease(
         private val channel: DirectConnection,
@@ -502,16 +498,12 @@ class SshTunnelManager(context: Context) {
 
         private fun closeOutput() {
             if (!closed.get() && outputClosed.compareAndSet(false, true)) {
-                // ChannelOutputStream.close() faz o half-close correto no SSH:
-                // descarrega o buffer e envia CHANNEL_EOF sem matar a volta.
                 runCatching { channel.outputStream.close() }
             }
         }
 
         private fun closeChannel() {
             if (closed.compareAndSet(false, true)) {
-                // A vaga precisa voltar imediatamente. channel.close() pode esperar
-                // a confirmacao remota e nao deve bloquear novas navegacoes.
                 onClosed()
                 runCatching { channel.close() }
             }
@@ -519,33 +511,9 @@ class SshTunnelManager(context: Context) {
     }
 
     /**
-     * Tenta "traduzir" um pacote UDP destinado a porta 443 numa conexao TCP normal
-     * pro mesmo destino, atraves de um canal direct-tcpip do SSH. Funciona porque a
-     * imensa maioria dos servicos que oferecem QUIC/HTTP3 (que roda sobre UDP)
-     * TAMBEM aceitam a conexao tradicional TLS-sobre-TCP na mesma porta 443 como
-     * alternativa — entao o app do outro lado normalmente consegue continuar
-     * funcionando, so que sem os beneficios de performance do QUIC.
-     *
-     * IMPORTANTE: isso NAO e tunelamento de UDP de verdade. E um jeitinho que so
-     * cobre esse caso especifico (porta 443, servico com fallback TCP). UDP genuino
-     * (jogos, chamadas de voz especificas, qualquer coisa que so fale UDP) nao tem
-     * solucao possivel usando SSH puro — o protocolo em si nao suporta isso, e nao
-     * ha nada que o cliente consiga fazer a respeito. Pra qualquer porta diferente
-     * de 443, retorna null — o Socks5Server entende isso como "esse destino nao e
-     * suportado" e loga uma vez so (ver Socks5Server.kt/Tun2SocksEngine.kt antigo).
-     */
-    /**
      * Abre (ou reaproveita, se já tiver uma pra essa conexão) o UdpGwClient
-     * compartilhado — ver UdpGwClient.kt pro protocolo em si (conferido contra o
-     * código-fonte oficial do badvpn). Uma única conexão TCP com o servidor udpgw
-     * (alcançada por um canal direct-tcpip do SSH) atende TODOS os destinos UDP
-     * dessa conexão SSH, multiplexados por conid — não é "uma conexão nova por
-     * destino" como os outros protocolos.
-     *
-     * CORRECAO: essa função precisa ser suspend (chama openDirectChannel, que
-     * também é suspend) — por isso usa Mutex (de coroutines) pra proteger a
-     * criação do cliente compartilhado, não @Synchronized (que é da JVM/threads e
-     * não pode ser usado numa suspend fun — travava a compilação).
+     * compartilhado. Uma única conexão TCP com o servidor udpgw atende todos os
+     * destinos UDP dessa conexão SSH, multiplexados por conid.
      */
     private suspend fun openUdpOverGateway(
         client: SSHClient,
@@ -586,25 +554,6 @@ class SshTunnelManager(context: Context) {
         return gwClient.openSession(destHost, destPort, onIncoming)
     }
 
-    /**
-     * CORRECAO: log real do usuario mostrou ERR_QUIC_PROTOCOL_ERROR no navegador —
-     * QUIC (usado por padrao pelo Chrome em varios sites, inclusive Google) e UDP de
-     * verdade, com cada pacote sendo uma unidade propria e delimitada. Essa funcao
-     * pegava os bytes de cada "datagrama" e so escrevia direto num canal SSH
-     * direct-tcpip (TCP, um FLUXO continuo sem limite nenhum entre pedacos) — dois
-     * pacotes QUIC podiam ser fundidos num so, ou um pacote cortado ao meio, e o
-     * lado que recebe (o navegador, aqui) tenta interpretar isso como QUIC valido e
-     * da erro de protocolo. Funcionava por acidente pra coisas que sao TCP/TLS
-     * disfarcado de UDP (por isso o comentario antigo dizia "funciona na pratica"),
-     * mas quebra qualquer protocolo que seja UDP de verdade — QUIC sendo o mais
-     * comum. Sem um jeito real de fazer UDP sem o Gateway UDP dedicado (badvpn-udpgw,
-     * so ligado quando o usuario ativa udpForwardEnabled), a opcao mais segura e
-     * RECUSAR aqui: a sessao UDP simplesmente nao abre, o pacote e descartado sem
-     * resposta, e o Chrome (que ja tenta TCP em paralelo/como fallback pra todo
-     * QUIC) cai pro HTTPS normal por conta propria — que ja confirmamos funcionando.
-     * Preferimos um "sem resposta" limpo a um "resposta corrompida" que gera erro
-     * na tela.
-     */
     private suspend fun openUdpOver443Internal(
         client: SSHClient,
         destHost: String,
@@ -613,25 +562,31 @@ class SshTunnelManager(context: Context) {
     ): UdpBackendSession? = null
 
     /**
-     * ComposedSocket: um Socket "decorador" que so faz a conexao de verdade dentro do
-     * proprio connect() — em vez de depender de qual overload de SocketFactory.createSocket
-     * o sshj chama. CORRECAO: descobrimos (pelo erro real "precisa de host/porta") que o
-     * sshj chama o createSocket() SEM ARGUMENTOS primeiro, e só depois chama socket.connect(
-     * endereco, timeout) nele — diferente do que eu tinha assumido antes (que ele chamava
-     * createSocket(host, port) direto). Com esse Socket decorador, nao importa qual dos
-     * dois jeitos o sshj usa: o connect() sempre recebe host/porta reais e faz a
-     * composicao completa das camadas (proxy -> payload -> TLS) nesse momento.
+     * SocketFactory composto usado pelo SSH para conexão direta, proxy, payload,
+     * TLS, SlowDNS e WebSocket.
      */
+    private fun composedSocketFactory(config: SshConnectionConfig, slowDnsLocalPort: Int? = null): SocketFactory {
+        fun newSocket(): Socket = if (config.useWebSocket) WebSocketBridgeSocket(config) else ComposedSocket(config, slowDnsLocalPort)
+
+        return object : SocketFactory() {
+            override fun createSocket(): Socket = newSocket()
+            override fun createSocket(host: String?, p: Int): Socket =
+                newSocket().apply { connect(InetSocketAddress(host ?: config.server, p)) }
+            override fun createSocket(host: String?, p: Int, localHost: InetAddress?, localPort: Int): Socket =
+                createSocket(host, p)
+            override fun createSocket(host: InetAddress?, p: Int): Socket =
+                newSocket().apply { connect(InetSocketAddress(host, p)) }
+            override fun createSocket(address: InetAddress?, p: Int, localAddress: InetAddress?, localPort: Int): Socket =
+                createSocket(address, p)
+        }
+    }
+
     private class ComposedSocket(
         private val config: SshConnectionConfig,
         private val slowDnsLocalPort: Int? = null
     ) : Socket() {
 
         companion object {
-            /**
-             * Resolve [host] e tenta conectar nos enderecos IPv4 primeiro, so caindo
-             * pra IPv6 se nenhum IPv4 funcionar. Ver correcao explicada em connect().
-             */
             fun connectPreferringIPv4(host: String, port: Int, timeoutMs: Int): Socket {
                 val addresses = try {
                     java.net.InetAddress.getAllByName(host)
@@ -641,21 +596,11 @@ class SshTunnelManager(context: Context) {
                 }
                 if (addresses.isEmpty()) throw java.io.IOException("Não foi possível resolver $host")
 
-                // Divide o timeout total entre os enderecos tentados (com um piso de 3s)
-                // — assim, numa rede so-IPv6, nao ficamos esperando o timeout INTEIRO no
-                // IPv4 (que nem tem rota) antes de tentar o IPv6 que de fato funciona.
                 val perAddressTimeout = (timeoutMs / addresses.size).coerceAtLeast(3000)
-
                 var lastError: Exception? = null
                 for (address in addresses) {
                     try {
                         val socket = Socket()
-                        // Ver comentario equivalente em VlessTransport.kt: forca o fd
-                        // nativo existir antes do protect(), que precisa dele pra
-                        // funcionar (mesmo que aqui, hoje, o protect() costume ser
-                        // pulado por nao haver VPN ativa ainda nesse momento — deixamos
-                        // consistente pra quando essa conexao acontecer com VPN ja ativa,
-                        // ex: reconexao apos queda).
                         socket.bind(InetSocketAddress(0))
                         if (!com.autombot.client.core.AutomBotVpnService.protectSocket(socket)) {
                             throw java.io.IOException("Não consegui isentar a conexão SSH da VPN (protect() falhou)")
@@ -664,12 +609,12 @@ class SshTunnelManager(context: Context) {
                         return socket
                     } catch (e: Exception) {
                         lastError = e
-                        // tenta o proximo endereco (ex: IPv4 falhou, tenta IPv6, ou vice-versa)
                     }
                 }
                 throw lastError ?: java.io.IOException("Não foi possível conectar a $host:$port")
             }
         }
+
         private var delegate: Socket? = null
 
         override fun connect(endpoint: java.net.SocketAddress) = connect(endpoint, 0)
@@ -681,11 +626,6 @@ class SshTunnelManager(context: Context) {
             val effectiveTimeout = if (timeout > 0) timeout else (config.connectionTimeoutSeconds.toIntOrNull() ?: 10) * 1000
 
             var socket: Socket = if (slowDnsLocalPort != null) {
-                // SlowDNS ligado: ignora completamente proxy/conexao direta pro
-                // servidor de verdade — conecta na porta LOCAL que o dnstt-client ja
-                // deixou pronta (ver SshTunnelManager.connect()). O proprio
-                // dnstt-server, do lado do VPS, ja sabe pra onde encaminhar de
-                // verdade; o app nao precisa (nem pode) saber disso daqui.
                 val localSocket = Socket()
                 localSocket.connect(InetSocketAddress("127.0.0.1", slowDnsLocalPort), effectiveTimeout)
                 localSocket
@@ -696,33 +636,14 @@ class SshTunnelManager(context: Context) {
                 if (!com.autombot.client.core.AutomBotVpnService.protectSocket(proxySocket)) {
                     throw java.io.IOException("Não consegui isentar a conexão de proxy SSH da VPN (protect() falhou)")
                 }
-                // Com proxy, quem resolve o host de destino e o proprio proxy — so
-                // conectamos no endereco do proxy aqui mesmo, sem fallback de IP.
                 proxySocket.connect(InetSocketAddress(host, port), effectiveTimeout)
                 proxySocket
             } else {
-                // CORRECAO: sem proxy, resolviamos o host e conectavamos direto no
-                // primeiro endereco que o DNS devolvesse — em redes onde o IPv6 esta
-                // quebrado/incompleto (comum em rede movel), isso gerava um timeout de
-                // 10s tentando um endereco IPv6 que nunca respondia, mesmo o IPv4
-                // funcionando normalmente. Agora tenta os enderecos IPv4 primeiro, e so
-                // cai pra IPv6 se nenhum IPv4 funcionar.
                 connectPreferringIPv4(host, port, effectiveTimeout)
             }
 
-            // O socket SSH transporta todos os canais multiplexados. Nagle e buffers
-            // pequenos aqui afetam a VPN inteira, por isso ajustamos antes de TLS/
-            // payload. Em Socket de proxy/SlowDNS a mesma configuracao e segura.
             tuneTransportSocket(socket)
 
-            // CORRECAO IMPORTANTE: TLS tem que vir ANTES do payload, nao depois.
-            // Servidores/CDNs que recebem TLS na porta 443 (ex: CloudFront) esperam um
-            // ClientHello TLS como os PRIMEIROS bytes da conexao — se a gente manda o
-            // payload cru (texto tipo "GET / HTTP/1.1...") antes do handshake TLS
-            // comecar, o servidor recebe lixo no lugar do ClientHello e derruba a
-            // conexao na hora (exatamente o "Connection reset" reportado). A ordem
-            // certa e: TCP -> TLS (se ligado) -> payload (se ligado, agora ja dentro
-            // do tunel TLS, criptografado) -> handshake SSH.
             if (config.useSslTls) {
                 val sslContext = SSLContext.getInstance("TLS")
                 sslContext.init(null, null, null)
@@ -766,29 +687,6 @@ class SshTunnelManager(context: Context) {
         override fun setTcpNoDelay(on: Boolean) { delegate?.tcpNoDelay = on }
         override fun shutdownInput() { delegate?.shutdownInput() }
         override fun shutdownOutput() { delegate?.shutdownOutput() }
-    }
-
-    /**
-     * SocketFactory que devolve sempre um ComposedSocket — funciona tanto se o sshj
-     * chamar createSocket() e conectar depois, quanto se chamar createSocket(host, port)
-     * direto (ver ComposedSocket acima pra entender por que essa mudanca foi necessaria).
-     */
-    private fun composedSocketFactory(config: SshConnectionConfig, slowDnsLocalPort: Int? = null): SocketFactory {
-        // Se WebSocket estiver ligado, o transporte inteiro passa a ser a ponte
-        // WebSocket (que trata TLS via "wss://" internamente) — ver WebSocketBridgeSocket.kt.
-        fun newSocket(): Socket = if (config.useWebSocket) WebSocketBridgeSocket(config) else ComposedSocket(config, slowDnsLocalPort)
-
-        return object : SocketFactory() {
-            override fun createSocket(): Socket = newSocket()
-            override fun createSocket(host: String?, p: Int): Socket =
-                newSocket().apply { connect(InetSocketAddress(host ?: config.server, p)) }
-            override fun createSocket(host: String?, p: Int, localHost: InetAddress?, localPort: Int): Socket =
-                createSocket(host, p)
-            override fun createSocket(host: InetAddress?, p: Int): Socket =
-                newSocket().apply { connect(InetSocketAddress(host, p)) }
-            override fun createSocket(address: InetAddress?, p: Int, localAddress: InetAddress?, localPort: Int): Socket =
-                createSocket(address, p)
-        }
     }
 
     private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
