@@ -48,7 +48,10 @@ fun DashboardScreen(
     activeConnections: Int,
     trafficLabel: String,
     onRenew: () -> Unit,
-    onOpenConnections: () -> Unit
+    onOpenConnections: () -> Unit,
+    updateAvailable: Boolean = false,
+    applyingUpdate: Boolean = false,
+    onApplyUpdate: () -> Unit = {}
 ) {
     val pingResult = remember { mutableStateOf("Desconectado") }
 
@@ -83,6 +86,32 @@ fun DashboardScreen(
         Spacer(Modifier.height(4.dp))
         Text("Dashboard", color = C.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Text("Acompanhe seu plano e suas conexões", color = C.TextDim, fontSize = 12.sp)
+
+        if (updateAvailable) {
+            Spacer(Modifier.height(14.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(C.Accent.copy(alpha = 0.14f))
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.SwapVert, contentDescription = null, tint = C.AccentLight, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Novas atualizações", color = C.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Sua conexão tem uma config nova pra buscar", color = C.TextDim, fontSize = 10.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                AutomBotGradientButton(
+                    text = if (applyingUpdate) "Buscando…" else "Buscar",
+                    onClick = onApplyUpdate,
+                    enabled = !applyingUpdate,
+                    accent = C.AccentLight
+                )
+            }
+        }
 
         Spacer(Modifier.height(18.dp))
 
