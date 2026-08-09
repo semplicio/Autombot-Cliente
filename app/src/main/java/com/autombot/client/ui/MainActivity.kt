@@ -437,6 +437,16 @@ private fun AppRoot(
                         avisos.forEach {
                             com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
                         }
+                        // CORRECAO: usuario/dominio gerenciados nunca eram guardados em
+                        // lugar nenhum depois da criacao — sem isso, nao tem como checar
+                        // atualizacao de config depois (nao sabe nem em quem perguntar).
+                        // Guarda tambem a versao atual como base de comparacao.
+                        val versaoInicial = runCatching { panelClient.fetchConfigVersion(conta.usuario) }.getOrDefault("")
+                        appPrefs.edit()
+                            .putString("managed_usuario", conta.usuario)
+                            .putString("managed_base_url", current.domain)
+                            .putString("managed_config_versao", versaoInicial)
+                            .apply()
                     }
                 ),
                 onComplete = { trialSecondsRemaining = TRIAL_DURATION_SECONDS; markOnboarded(managed = true); screen = Screen.AccountCreated },
@@ -602,6 +612,62 @@ private fun MainShell(
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val appPrefs = remember { context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE) }
+
+    // CORRECAO: pedido do usuário — botão "Novas atualizações" no Dashboard quando
+    // a config de conexão mudar no painel (ex: admin editou a config SSH em "SSH pro
+    // App"). Checagem TODA VEZ que o Dashboard aparece na tela (não é um serviço de
+    // fundo de verdade rodando com o app fechado — isso exigiria WorkManager, uma
+    // dependência nova, mais arriscado de introduzir bem na hora de compilar tudo
+    // de uma vez; dá pra evoluir pra isso depois se precisar rodar mesmo com o app
+    // fechado). Só CHECA sozinho (é leve, um hash só); a importação de verdade só
+    // acontece quando a pessoa toca no botão — trocar a config de conexão sozinha,
+    // sem avisar, poderia derrubar uma VPN ativa na hora sem a pessoa esperar.
+    var updateAvailable by remember { mutableStateOf(false) }
+    var applyingUpdate by remember { mutableStateOf(false) }
+
+    suspend fun checkForConfigUpdate() {
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
+        val versaoConhecida = appPrefs.getString("managed_config_versao", "")
+        runCatching {
+            val versaoAtual = PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
+            if (versaoAtual.isNotBlank() && versaoAtual != versaoConhecida) {
+                updateAvailable = true
+            }
+        }
+        // Falha de rede na checagem não é erro visível pro usuário — só tenta de
+        // novo na próxima vez que o Dashboard aparecer.
+    }
+
+    suspend fun applyConfigUpdate() {
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
+        applyingUpdate = true
+        try {
+            val cliente = PanelWebhookClient(baseUrlGerenciada)
+            val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
+            importPanelConfigs(
+                context = context,
+                response = respostaConfigs,
+                wireGuardManager = wireGuardManager,
+                sshManager = sshManager,
+                vlessManager = vlessManager,
+                vmessManager = vmessManager,
+                shadowsocksManager = shadowsocksManager,
+                trojanManager = trojanManager,
+                openVpnManager = openVpnManager
+            )
+            val versaoNova = runCatching { cliente.fetchConfigVersion(usuarioGerenciado) }.getOrDefault("")
+            appPrefs.edit().putString("managed_config_versao", versaoNova).apply()
+            updateAvailable = false
+        } catch (e: Exception) {
+            com.autombot.client.util.AppLog.log("Falha ao aplicar atualização de config: ${e.message}", com.autombot.client.util.AppLog.Level.ERROR)
+        } finally {
+            applyingUpdate = false
+        }
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -675,13 +741,18 @@ private fun MainShell(
                 ovpnConnections.sumOf { it.txBytes }
             val dashTrafficLabel = if (dashRx + dashTx > 0) formatBytes(dashRx + dashTx) else "0 B"
 
+            LaunchedEffect(Unit) { checkForConfigUpdate() }
+
             Box(modifier = Modifier.padding(padding)) {
                 DashboardScreen(
                     trialCountdown = trialSecondsRemaining?.let { formatCountdown(it) },
                     activeConnections = activeCount,
                     trafficLabel = dashTrafficLabel,
                     onRenew = onOpenPlan,
-                    onOpenConnections = onOpenConnections
+                    onOpenConnections = onOpenConnections,
+                    updateAvailable = updateAvailable,
+                    applyingUpdate = applyingUpdate,
+                    onApplyUpdate = { scope.launch { applyConfigUpdate() } }
                 )
             }
         }
