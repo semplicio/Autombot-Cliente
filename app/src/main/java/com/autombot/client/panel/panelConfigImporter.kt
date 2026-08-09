@@ -25,16 +25,19 @@ import com.autombot.client.util.AppLog
  * parsers que a importação manual já usa (parseVmessUri, parseVlessUri, etc), então
  * qualquer melhoria feita ali vale pra cá também sem duplicar código.
  *
+ * CORRECAO: essa função também é chamada de novo toda vez que o usuário toca em
+ * "Buscar" no banner de atualização do Dashboard (ver MainShell.applyConfigUpdate())
+ * — não só na criação da conta. Antes, um protocolo que sumia da resposta do painel
+ * (ex: admin excluiu a config SSH em "SSH pro App") ficava esquecido no app pra
+ * sempre, porque a função só sabia ADICIONAR/ATUALIZAR, nunca remover. Agora, pra
+ * cada protocolo: se veio com sucesso, importa/atualiza; se não veio ou veio sem
+ * sucesso, REMOVE qualquer perfil existente com esse nome — o app fica sempre
+ * batendo com o que o painel diz que existe agora, pra mais ou pra menos.
+ *
  * Não lança exceção por causa de UM protocolo que falhar — cada falha vira um aviso
  * (devolvido na lista + logado no AppLog) e os outros continuam sendo importados
  * normalmente. Só lança [PanelException] se NENHUM protocolo foi importado com
  * sucesso (aí sim é um problema real que o usuário precisa saber).
- *
- * Ressalva importante (ver também o comentário no topo de api/v1/configs.php do
- * painel): o formato exato de "ssh" e "openvpn" ainda não foi confirmado contra uma
- * resposta real do automcore — o parsing aqui é uma melhor tentativa (várias
- * variações de nome de campo), não uma certeza. Se vier errado, vai aparecer como
- * aviso em vez de importar campo errado silenciosamente.
  */
 suspend fun importPanelConfigs(
     context: Context,
@@ -57,66 +60,76 @@ suspend fun importPanelConfigs(
         AppLog.log(msg, AppLog.Level.ERROR)
     }
 
-    response.protocols["vmess"]?.let { item ->
-        if (!item.success) { avisar("vmess", item.error ?: "sem sucesso"); return@let }
-        val uri = item.uri
-        if (uri == null) { avisar("vmess", "resposta sem campo \"uri\""); return@let }
-        runCatching { vmessManager.addProfile(parseVmessUri(uri)) }
+    // vmess / vless / trojan / shadowsocks — mesmo padrão (URI única), cada um
+    // explícito abaixo (import/atualiza se success+uri, remove caso contrário).
+
+    val itemVmess = response.protocols["vmess"]
+    if (itemVmess != null && itemVmess.success && itemVmess.uri != null) {
+        runCatching { vmessManager.addProfile(parseVmessUri(itemVmess.uri)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("vmess", it.message ?: "erro ao interpretar a URI") }
+    } else {
+        if (itemVmess != null && !itemVmess.success) avisar("vmess", itemVmess.error ?: "sem sucesso")
+        runCatching { vmessManager.removeProfile(nomeBase) }
     }
 
-    response.protocols["vless"]?.let { item ->
-        if (!item.success) { avisar("vless", item.error ?: "sem sucesso"); return@let }
-        val uri = item.uri
-        if (uri == null) { avisar("vless", "resposta sem campo \"uri\""); return@let }
-        runCatching { vlessManager.addProfile(parseVlessUri(uri)) }
+    val itemVless = response.protocols["vless"]
+    if (itemVless != null && itemVless.success && itemVless.uri != null) {
+        runCatching { vlessManager.addProfile(parseVlessUri(itemVless.uri)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("vless", it.message ?: "erro ao interpretar a URI") }
+    } else {
+        if (itemVless != null && !itemVless.success) avisar("vless", itemVless.error ?: "sem sucesso")
+        runCatching { vlessManager.removeProfile(nomeBase) }
     }
 
-    response.protocols["trojan"]?.let { item ->
-        if (!item.success) { avisar("trojan", item.error ?: "sem sucesso"); return@let }
-        val uri = item.uri
-        if (uri == null) { avisar("trojan", "resposta sem campo \"uri\""); return@let }
-        runCatching { trojanManager.addProfile(parseTrojanUri(uri)) }
+    val itemTrojan = response.protocols["trojan"]
+    if (itemTrojan != null && itemTrojan.success && itemTrojan.uri != null) {
+        runCatching { trojanManager.addProfile(parseTrojanUri(itemTrojan.uri)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("trojan", it.message ?: "erro ao interpretar a URI") }
+    } else {
+        if (itemTrojan != null && !itemTrojan.success) avisar("trojan", itemTrojan.error ?: "sem sucesso")
+        runCatching { trojanManager.removeProfile(nomeBase) }
     }
 
-    response.protocols["shadowsocks"]?.let { item ->
-        if (!item.success) { avisar("shadowsocks", item.error ?: "sem sucesso"); return@let }
-        val uri = item.uri
-        if (uri == null) { avisar("shadowsocks", "resposta sem campo \"uri\""); return@let }
-        runCatching { shadowsocksManager.addProfile(parseShadowsocksUri(uri)) }
+    val itemSs = response.protocols["shadowsocks"]
+    if (itemSs != null && itemSs.success && itemSs.uri != null) {
+        runCatching { shadowsocksManager.addProfile(parseShadowsocksUri(itemSs.uri)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("shadowsocks", it.message ?: "erro ao interpretar a URI") }
+    } else {
+        if (itemSs != null && !itemSs.success) avisar("shadowsocks", itemSs.error ?: "sem sucesso")
+        runCatching { shadowsocksManager.removeProfile(nomeBase) }
     }
 
-    response.protocols["wireguard"]?.let { item ->
-        if (!item.success) { avisar("wireguard", item.error ?: "sem sucesso"); return@let }
-        val conf = item.wireGuardConf ?: item.raw?.optString("config")?.takeIf { it.isNotBlank() }
-        if (conf == null) { avisar("wireguard", "resposta sem campo \"conf\""); return@let }
-        wireGuardManager.importConfig(nomeBase, conf)
+    val itemWg = response.protocols["wireguard"]
+    val confWg = itemWg?.wireGuardConf ?: itemWg?.raw?.optString("config")?.takeIf { it.isNotBlank() }
+    if (itemWg != null && itemWg.success && confWg != null) {
+        wireGuardManager.importConfig(nomeBase, confWg)
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("wireguard", it.message ?: "erro ao interpretar o .conf") }
+    } else {
+        if (itemWg != null && !itemWg.success) avisar("wireguard", itemWg.error ?: "sem sucesso")
+        runCatching { wireGuardManager.removeTunnel(nomeBase) }
     }
 
-    response.protocols["openvpn"]?.let { item ->
-        if (!item.success) { avisar("openvpn", item.error ?: "sem sucesso"); return@let }
-        val conf = item.raw?.optString("config")?.takeIf { it.isNotBlank() }
-        if (conf == null) { avisar("openvpn", "resposta sem campo \"conf\""); return@let }
+    val itemOvpn = response.protocols["openvpn"]
+    val confOvpn = itemOvpn?.raw?.optString("config")?.takeIf { it.isNotBlank() }
+    if (itemOvpn != null && itemOvpn.success && confOvpn != null) {
         runCatching {
-            val config = saveOpenVpnConfig(context, nomeBase, conf)
+            val config = saveOpenVpnConfig(context, nomeBase, confOvpn)
             openVpnManager.addProfile(config)
         }.onSuccess { algumaImportacao = true }
             .onFailure { avisar("openvpn", it.message ?: "erro ao salvar o .ovpn") }
+    } else {
+        if (itemOvpn != null && !itemOvpn.success) avisar("openvpn", itemOvpn.error ?: "sem sucesso")
+        runCatching { openVpnManager.removeProfile(nomeBase) }
     }
 
-    response.protocols["ssh"]?.let { item ->
-        if (!item.success) { avisar("ssh", item.error ?: "sem sucesso"); return@let }
-        val raw = item.raw
-        if (raw == null) { avisar("ssh", "resposta vazia"); return@let }
+    val itemSsh = response.protocols["ssh"]
+    if (itemSsh != null && itemSsh.success && itemSsh.raw != null) {
+        val raw = itemSsh.raw
         // CORRECAO: formato confirmado contra resposta real do painel — não é
         // mais chute. host/porta/usuario/senha continuam os mesmos nomes de
         // antes (já bateram certo); adicionado o resto das camadas
@@ -128,49 +141,53 @@ suspend fun importPanelConfigs(
         val senhaSsh = raw.optString("senha").ifBlank { raw.optString("password") }
         if (host.isBlank() || usuarioSsh.isBlank()) {
             avisar("ssh", "não achei host/usuário na resposta do painel")
-            return@let
-        }
-        runCatching {
-            sshManager.saveProfile(
-                SshConnectionConfig(
-                    connectionName = nomeBase,
-                    server = host,
-                    port = porta,
-                    username = usuarioSsh,
-                    authMethod = SshAuthMethod.PASSWORD,
-                    password = senhaSsh,
-                    useProxy = raw.optBoolean("use_proxy", false),
-                    proxyType = if (raw.optString("proxy_type") == "HTTP") ProxyType.HTTP else ProxyType.SOCKS5,
-                    proxyHost = raw.optString("proxy_host"),
-                    proxyPort = if (raw.isNull("proxy_port")) "" else raw.optString("proxy_port"),
-                    proxyUsername = raw.optString("proxy_username"),
-                    proxyPassword = raw.optString("proxy_password"),
-                    usePayload = raw.optBoolean("use_payload", false),
-                    payload = raw.optString("payload"),
-                    useSslTls = raw.optBoolean("use_ssl_tls", false),
-                    sni = raw.optString("sni"),
-                    useWebSocket = raw.optBoolean("use_websocket", false),
-                    wsHost = raw.optString("ws_host"),
-                    wsPath = raw.optString("ws_path").ifBlank { "/" },
-                    useSlowDns = raw.optBoolean("use_slow_dns", false),
-                    slowDnsDomain = raw.optString("slow_dns_domain"),
-                    slowDnsPubkey = raw.optString("slow_dns_pubkey"),
-                    slowDnsResolverMode = when (raw.optString("slow_dns_resolver_mode")) {
-                        "DOH" -> SlowDnsResolverMode.DOH
-                        "DOT" -> SlowDnsResolverMode.DOT
-                        else -> SlowDnsResolverMode.UDP
-                    },
-                    slowDnsResolver = raw.optString("slow_dns_resolver"),
-                    dnsForwardingEnabled = raw.optBoolean("dns_forwarding_enabled", false),
-                    dnsPrimary = raw.optString("dns_primary").ifBlank { "8.8.8.8" },
-                    dnsSecondary = raw.optString("dns_secondary").ifBlank { "8.8.4.4" },
-                    udpForwardEnabled = raw.optBoolean("udp_forward_enabled", false),
-                    udpGatewayHost = raw.optString("udp_gateway_host").ifBlank { "127.0.0.1" },
-                    udpGatewayPort = if (raw.isNull("udp_gateway_port")) "7300" else raw.optString("udp_gateway_port")
+            runCatching { sshManager.removeProfile(nomeBase) }
+        } else {
+            runCatching {
+                sshManager.saveProfile(
+                    SshConnectionConfig(
+                        connectionName = nomeBase,
+                        server = host,
+                        port = porta,
+                        username = usuarioSsh,
+                        authMethod = SshAuthMethod.PASSWORD,
+                        password = senhaSsh,
+                        useProxy = raw.optBoolean("use_proxy", false),
+                        proxyType = if (raw.optString("proxy_type") == "HTTP") ProxyType.HTTP else ProxyType.SOCKS5,
+                        proxyHost = raw.optString("proxy_host"),
+                        proxyPort = if (raw.isNull("proxy_port")) "" else raw.optString("proxy_port"),
+                        proxyUsername = raw.optString("proxy_username"),
+                        proxyPassword = raw.optString("proxy_password"),
+                        usePayload = raw.optBoolean("use_payload", false),
+                        payload = raw.optString("payload"),
+                        useSslTls = raw.optBoolean("use_ssl_tls", false),
+                        sni = raw.optString("sni"),
+                        useWebSocket = raw.optBoolean("use_websocket", false),
+                        wsHost = raw.optString("ws_host"),
+                        wsPath = raw.optString("ws_path").ifBlank { "/" },
+                        useSlowDns = raw.optBoolean("use_slow_dns", false),
+                        slowDnsDomain = raw.optString("slow_dns_domain"),
+                        slowDnsPubkey = raw.optString("slow_dns_pubkey"),
+                        slowDnsResolverMode = when (raw.optString("slow_dns_resolver_mode")) {
+                            "DOH" -> SlowDnsResolverMode.DOH
+                            "DOT" -> SlowDnsResolverMode.DOT
+                            else -> SlowDnsResolverMode.UDP
+                        },
+                        slowDnsResolver = raw.optString("slow_dns_resolver"),
+                        dnsForwardingEnabled = raw.optBoolean("dns_forwarding_enabled", false),
+                        dnsPrimary = raw.optString("dns_primary").ifBlank { "8.8.8.8" },
+                        dnsSecondary = raw.optString("dns_secondary").ifBlank { "8.8.4.4" },
+                        udpForwardEnabled = raw.optBoolean("udp_forward_enabled", false),
+                        udpGatewayHost = raw.optString("udp_gateway_host").ifBlank { "127.0.0.1" },
+                        udpGatewayPort = if (raw.isNull("udp_gateway_port")) "7300" else raw.optString("udp_gateway_port")
+                    )
                 )
-            )
-        }.onSuccess { algumaImportacao = true }
-            .onFailure { avisar("ssh", it.message ?: "erro ao salvar o perfil") }
+            }.onSuccess { algumaImportacao = true }
+                .onFailure { avisar("ssh", it.message ?: "erro ao salvar o perfil") }
+        }
+    } else {
+        if (itemSsh != null && !itemSsh.success) avisar("ssh", itemSsh.error ?: "sem sucesso")
+        runCatching { sshManager.removeProfile(nomeBase) }
     }
 
     if (!algumaImportacao) {
