@@ -147,7 +147,9 @@ class PanelWebhookClient(
                 error = item.optString("erro").takeIf { it.isNotBlank() },
                 raw = item,
                 uri = item.optString("uri").takeIf { it.isNotBlank() },
-                wireGuardConf = item.optString("conf").takeIf { it.isNotBlank() }
+                // CORRECAO: assumi "conf" antes de ter uma resposta real do
+                // automcore pra conferir — o formato de verdade usa "config".
+                wireGuardConf = item.optString("config").takeIf { it.isNotBlank() }
             )
         }
 
