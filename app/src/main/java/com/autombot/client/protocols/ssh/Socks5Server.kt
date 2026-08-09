@@ -571,6 +571,7 @@ class Socks5Server(
                         AppLog.Level.INFO
                     )
                 }
+                Unit
             } else {
                 // Cancellation não interrompe necessariamente InputStream.read().
                 // Fechamos primeiro os endpoints para acordar o outro pipe e só então
