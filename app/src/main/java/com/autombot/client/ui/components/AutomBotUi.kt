@@ -221,6 +221,8 @@ fun protocolVisual(id: String): Pair<ImageVector, Color> = when (id.lowercase())
     "shadowsocks" -> Icons.Default.Send to Color(0xFF55D38A)
     "trojan" -> Icons.Default.Lock to Color(0xFFFF637D)
     "openvpn" -> Icons.Default.Key to Color(0xFFFFB547)
+    "hysteria2", "hy2" -> Icons.Default.Public to Color(0xFF21D4FD)
+    "tuic" -> Icons.Default.Cloud to Color(0xFFB45CFF)
     "socks5" -> Icons.Default.Public to Color(0xFFE355FF)
     "domain" -> Icons.Default.Language to C.Primary
     else -> Icons.Default.Cloud to C.Accent

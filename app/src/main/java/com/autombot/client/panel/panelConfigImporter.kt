@@ -1,6 +1,8 @@
 package com.autombot.client.panel
 
 import android.content.Context
+import com.autombot.client.protocols.modern.ModernProtocolManagerProvider
+import com.autombot.client.protocols.modern.ModernProtocolType
 import com.autombot.client.protocols.openvpn.OpenVpnTunnelManager
 import com.autombot.client.protocols.openvpn.saveOpenVpnConfig
 import com.autombot.client.protocols.shadowsocks.ShadowsocksTunnelManager
@@ -20,24 +22,9 @@ import com.autombot.client.protocols.wireguard.WireGuardManager
 import com.autombot.client.util.AppLog
 
 /**
- * Pega a resposta de GET /api/v1/configs.php (já parseada em [PanelConfigsResponse])
- * e importa cada protocolo disponível no manager certo — reaproveitando os MESMOS
- * parsers que a importação manual já usa (parseVmessUri, parseVlessUri, etc), então
- * qualquer melhoria feita ali vale pra cá também sem duplicar código.
- *
- * CORRECAO: essa função também é chamada de novo toda vez que o usuário toca em
- * "Buscar" no banner de atualização do Dashboard (ver MainShell.applyConfigUpdate())
- * — não só na criação da conta. Antes, um protocolo que sumia da resposta do painel
- * (ex: admin excluiu a config SSH em "SSH pro App") ficava esquecido no app pra
- * sempre, porque a função só sabia ADICIONAR/ATUALIZAR, nunca remover. Agora, pra
- * cada protocolo: se veio com sucesso, importa/atualiza; se não veio ou veio sem
- * sucesso, REMOVE qualquer perfil existente com esse nome — o app fica sempre
- * batendo com o que o painel diz que existe agora, pra mais ou pra menos.
- *
- * Não lança exceção por causa de UM protocolo que falhar — cada falha vira um aviso
- * (devolvido na lista + logado no AppLog) e os outros continuam sendo importados
- * normalmente. Só lança [PanelException] se NENHUM protocolo foi importado com
- * sucesso (aí sim é um problema real que o usuário precisa saber).
+ * Pega a resposta de GET /api/v1/configs.php e importa cada protocolo disponível
+ * no manager certo. A mesma rotina também é usada quando o usuário aplica uma
+ * atualização de configuração pelo Dashboard.
  */
 suspend fun importPanelConfigs(
     context: Context,
@@ -53,15 +40,13 @@ suspend fun importPanelConfigs(
     val avisos = mutableListOf<String>()
     var algumaImportacao = false
     val nomeBase = response.servidor.ifBlank { response.usuario }
+    val modernManager = ModernProtocolManagerProvider.get(context)
 
     fun avisar(protocolo: String, motivo: String) {
         val msg = "Painel: não importei \"$protocolo\" ($motivo)"
         avisos.add(msg)
         AppLog.log(msg, AppLog.Level.ERROR)
     }
-
-    // vmess / vless / trojan / shadowsocks — mesmo padrão (URI única), cada um
-    // explícito abaixo (import/atualiza se success+uri, remove caso contrário).
 
     val itemVmess = response.protocols["vmess"]
     if (itemVmess != null && itemVmess.success && itemVmess.uri != null) {
@@ -103,6 +88,37 @@ suspend fun importPanelConfigs(
         runCatching { shadowsocksManager.removeProfile(nomeBase) }
     }
 
+    // Hysteria2 e TUIC já chegam do AutomBot Core como links completos. O parser
+    // compartilhado do manager preserva TLS/SNI, Salamander, UUID, ALPN e controle
+    // de congestionamento. Como os dois podem usar o mesmo nome de usuário, a
+    // identidade interna é tipo+nome e um nunca sobrescreve o outro.
+    fun importModern(protocolKey: String, expectedType: ModernProtocolType) {
+        val item = response.protocols[protocolKey]
+        val managedNames = setOf(response.usuario, nomeBase).filter { it.isNotBlank() }.toSet()
+        if (item != null && item.success && !item.uri.isNullOrBlank()) {
+            runCatching { modernManager.importUri(item.uri) }
+                .onSuccess { parsed ->
+                    if (parsed.type != expectedType) {
+                        modernManager.removeProfile(parsed.type, parsed.connectionName)
+                        avisar(protocolKey, "o link recebido é ${parsed.type.displayName}")
+                    } else {
+                        algumaImportacao = true
+                    }
+                }
+                .onFailure { avisar(protocolKey, it.message ?: "erro ao interpretar a URI") }
+        } else {
+            if (item != null && !item.success) {
+                avisar(protocolKey, item.error ?: "sem sucesso")
+            } else if (item != null && item.success && item.uri.isNullOrBlank()) {
+                avisar(protocolKey, "o painel não devolveu a URI")
+            }
+            modernManager.removeManagedProfiles(expectedType, managedNames)
+        }
+    }
+
+    importModern("hysteria2", ModernProtocolType.HYSTERIA2)
+    importModern("tuic", ModernProtocolType.TUIC)
+
     val itemWg = response.protocols["wireguard"]
     val confWg = itemWg?.wireGuardConf ?: itemWg?.raw?.optString("config")?.takeIf { it.isNotBlank() }
     if (itemWg != null && itemWg.success && confWg != null) {
@@ -130,12 +146,6 @@ suspend fun importPanelConfigs(
     val itemSsh = response.protocols["ssh"]
     val perfisSsh = itemSsh?.raw?.optJSONArray("perfis")
     if (itemSsh != null && itemSsh.success && perfisSsh != null && perfisSsh.length() > 0) {
-        // CORRECAO: usuário precisa de VÁRIAS conexões SSH por servidor
-        // (WebSocket, Direto, Payload...) — o painel agora devolve uma LISTA
-        // ("perfis"), não mais um objeto único. Cada perfil vira sua própria
-        // conexão no app, nomeada "$nomeBase - $nomeDoPerfil"; qualquer
-        // conexão gerenciada (mesmo prefixo) que não estiver mais na lista
-        // atual é removida — cobre o caso de excluir um perfil no painel.
         val nomesValidos = mutableSetOf<String>()
         for (i in 0 until perfisSsh.length()) {
             val raw = perfisSsh.optJSONObject(i) ?: continue
@@ -192,8 +202,6 @@ suspend fun importPanelConfigs(
             }.onSuccess { algumaImportacao = true }
                 .onFailure { avisar("ssh ($nomePerfil)", it.message ?: "erro ao salvar o perfil") }
         }
-        // Remove conexões SSH gerenciadas (mesmo prefixo "$nomeBase - ") que
-        // não vieram mais na lista atual — ex: perfil excluído no painel.
         val prefixoGerenciado = "$nomeBase - "
         sshManager.connections.value
             .map { it.config.connectionName }
@@ -201,9 +209,6 @@ suspend fun importPanelConfigs(
             .forEach { runCatching { sshManager.removeProfile(it) } }
     } else {
         if (itemSsh != null && !itemSsh.success) avisar("ssh", itemSsh.error ?: "sem sucesso")
-        // Sem perfil nenhum vindo do painel — remove tudo que era gerenciado
-        // desse servidor (mesmo prefixo), incluindo o nome antigo sem sufixo
-        // (versões anteriores desse fluxo usavam só "$nomeBase").
         runCatching { sshManager.removeProfile(nomeBase) }
         val prefixoGerenciado = "$nomeBase - "
         sshManager.connections.value

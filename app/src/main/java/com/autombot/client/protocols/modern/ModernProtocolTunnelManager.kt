@@ -1,6 +1,7 @@
 package com.autombot.client.protocols.modern
 
 import android.content.Context
+import com.autombot.client.core.tun2socks.NativeTun2Socks
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,11 +30,11 @@ data class ManagedModernConnection(
 )
 
 /**
- * Gerencia Hysteria2 e TUIC através de um único núcleo sing-box.
+ * Gerencia Hysteria2 e TUIC por um único núcleo sing-box.
  *
- * O sing-box expõe um inbound Mixed/SOCKS local. O AutomBotVpnService/HEV já
- * sabe encaminhar o TUN para uma porta SOCKS5 local, portanto os protocolos
- * modernos entram no pipeline existente sem um segundo VpnService.
+ * A identidade interna do perfil é (tipo + nome). Isso é obrigatório porque o
+ * AutomBot Core pode gerar Hysteria2 e TUIC para o mesmo usuário, portanto os dois
+ * links normalmente carregam o mesmo fragmento/nome sem serem o mesmo perfil.
  */
 class ModernProtocolTunnelManager(context: Context) {
     private val appContext = context.applicationContext
@@ -44,6 +45,7 @@ class ModernProtocolTunnelManager(context: Context) {
     private val _connections = MutableStateFlow<List<ManagedModernConnection>>(emptyList())
     val connections: StateFlow<List<ManagedModernConnection>> = _connections
 
+    /** Processos são indexados por tipo+nome, nunca somente pelo nome visível. */
     private val activeProcesses = ConcurrentHashMap<String, SingBoxProcess>()
 
     init {
@@ -51,12 +53,16 @@ class ModernProtocolTunnelManager(context: Context) {
         managerScope.launch {
             while (isActive) {
                 delay(2000)
-                val dead = activeProcesses.entries.filter { !it.value.isAlive() }.map { it.key }
-                dead.forEach { name ->
-                    activeProcesses.remove(name)?.stop()
+
+                val deadKeys = activeProcesses.entries
+                    .filter { !it.value.isAlive() }
+                    .map { it.key }
+
+                deadKeys.forEach { key ->
+                    activeProcesses.remove(key)?.stop()
                     _connections.update { current ->
                         current.map { conn ->
-                            if (conn.config.connectionName == name && conn.status == ModernProtocolStatus.CONNECTED) {
+                            if (profileKey(conn.config) == key && conn.status == ModernProtocolStatus.CONNECTED) {
                                 conn.copy(
                                     status = ModernProtocolStatus.ERROR,
                                     localSocksPort = null,
@@ -65,7 +71,27 @@ class ModernProtocolTunnelManager(context: Context) {
                             } else conn
                         }
                     }
-                    AppLog.log("Protocolo moderno \"$name\": núcleo sing-box encerrou inesperadamente", AppLog.Level.ERROR)
+                    AppLog.log("Protocolo moderno: núcleo sing-box encerrou inesperadamente ($key)", AppLog.Level.ERROR)
+                }
+
+                // O HEV é o ponto TUN comum do app. Enquanto Hysteria2/TUIC estiver
+                // conectado, os bytes desse TUN pertencem à sessão moderna ativa.
+                // A ponte JNI usada pelo log retorna:
+                // [tx_packets, tx_bytes, rx_packets, rx_bytes].
+                if (_connections.value.any { it.status == ModernProtocolStatus.CONNECTED }) {
+                    runCatching { NativeTun2Socks.stats() }.getOrNull()?.let { stats ->
+                        if (stats.size >= 4) {
+                            val tx = stats[1].coerceAtLeast(0L)
+                            val rx = stats[3].coerceAtLeast(0L)
+                            _connections.update { current ->
+                                current.map { conn ->
+                                    if (conn.status == ModernProtocolStatus.CONNECTED) {
+                                        conn.copy(rxBytes = rx, txBytes = tx)
+                                    } else conn
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -73,7 +99,9 @@ class ModernProtocolTunnelManager(context: Context) {
 
     fun addProfile(config: ModernProtocolConfig) {
         _connections.update { current ->
-            val existing = current.indexOfFirst { it.config.connectionName == config.connectionName }
+            val existing = current.indexOfFirst {
+                it.config.type == config.type && it.config.connectionName == config.connectionName
+            }
             if (existing >= 0) {
                 current.mapIndexed { index, old ->
                     if (index == existing) old.copy(config = config, lastError = null) else old
@@ -92,29 +120,45 @@ class ModernProtocolTunnelManager(context: Context) {
         return parsed
     }
 
-    fun removeProfile(connectionName: String) {
-        activeProcesses.remove(connectionName)?.stop()
-        runtimeConfigFile(connectionName).delete()
-        _connections.update { current -> current.filterNot { it.config.connectionName == connectionName } }
+    fun removeProfile(type: ModernProtocolType, connectionName: String) {
+        val key = profileKey(type, connectionName)
+        activeProcesses.remove(key)?.stop()
+        runtimeConfigFile(key).delete()
+        _connections.update { current ->
+            current.filterNot { it.config.type == type && it.config.connectionName == connectionName }
+        }
         persist()
     }
 
-    suspend fun connect(connectionName: String) {
-        val managed = _connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return
+    /** Remove somente perfis gerenciados conhecidos, sem apagar perfis manuais. */
+    fun removeManagedProfiles(type: ModernProtocolType, candidateNames: Set<String>) {
+        _connections.value
+            .filter { it.config.type == type && it.config.connectionName in candidateNames }
+            .map { it.config.connectionName }
+            .distinct()
+            .forEach { removeProfile(type, it) }
+    }
+
+    suspend fun connect(type: ModernProtocolType, connectionName: String) {
+        val managed = _connections.value.firstOrNull {
+            it.config.type == type && it.config.connectionName == connectionName
+        } ?: return
         val config = managed.config
-        markStatus(connectionName, ModernProtocolStatus.CONNECTING, null)
+        val key = profileKey(config)
+
+        markStatus(type, connectionName, ModernProtocolStatus.CONNECTING, null)
         AppLog.log("${config.type.displayName} \"$connectionName\": iniciando núcleo moderno", AppLog.Level.INFO)
 
         withContext(Dispatchers.IO) {
             try {
-                // O roteador do app trabalha com uma única porta SOCKS ativa. Evita
-                // deixar dois processos modernos vivos competindo pela seleção.
-                activeProcesses.keys.filter { it != connectionName }.toList().forEach { other ->
-                    stopProcessOnly(other)
-                    markStatus(other, ModernProtocolStatus.DISCONNECTED, null, clearPort = true)
+                // O roteador do app usa uma única porta SOCKS ativa. Só um processo
+                // moderno pode ficar vivo de cada vez, independentemente do protocolo.
+                activeProcesses.keys.filter { it != key }.toList().forEach { otherKey ->
+                    stopProcessOnly(otherKey)
+                    markStatusByKey(otherKey, ModernProtocolStatus.DISCONNECTED, null, clearPort = true)
                 }
 
-                activeProcesses.remove(connectionName)?.stop()
+                activeProcesses.remove(key)?.stop()
                 val runner = SingBoxProcess(appContext, "${config.type.displayName} \"$connectionName\"")
                 if (!runner.isCoreAvailable()) {
                     throw IllegalStateException(
@@ -123,7 +167,7 @@ class ModernProtocolTunnelManager(context: Context) {
                 }
 
                 val localPort = findFreePort()
-                val runtimeFile = runtimeConfigFile(connectionName)
+                val runtimeFile = runtimeConfigFile(key)
                 runtimeFile.parentFile?.mkdirs()
                 runtimeFile.writeText(SingBoxConfigFactory.build(config, localPort).toString(2))
 
@@ -143,16 +187,16 @@ class ModernProtocolTunnelManager(context: Context) {
                     throw IllegalStateException("sing-box não abriu o proxy local em 12s")
                 }
 
-                // O core já leu o JSON; remove o arquivo temporário para não manter
-                // credenciais duplicadas no armazenamento além do perfil persistido.
                 runtimeFile.delete()
-                activeProcesses[connectionName] = runner
+                activeProcesses[key] = runner
                 _connections.update { current ->
                     current.map { conn ->
-                        if (conn.config.connectionName == connectionName) {
+                        if (conn.config.type == type && conn.config.connectionName == connectionName) {
                             conn.copy(
                                 status = ModernProtocolStatus.CONNECTED,
                                 localSocksPort = localPort,
+                                rxBytes = 0L,
+                                txBytes = 0L,
                                 lastError = null
                             )
                         } else conn
@@ -165,39 +209,69 @@ class ModernProtocolTunnelManager(context: Context) {
                     AppLog.Level.SUCCESS
                 )
             } catch (e: Exception) {
-                runtimeConfigFile(connectionName).delete()
-                activeProcesses.remove(connectionName)?.stop()
+                runtimeConfigFile(key).delete()
+                activeProcesses.remove(key)?.stop()
                 val detail = e.message ?: e.javaClass.simpleName
-                markStatus(connectionName, ModernProtocolStatus.ERROR, detail, clearPort = true)
+                markStatus(type, connectionName, ModernProtocolStatus.ERROR, detail, clearPort = true)
                 AppLog.log("Erro na conexão ${config.type.displayName} \"$connectionName\": $detail", AppLog.Level.ERROR)
             }
         }
     }
 
-    suspend fun disconnect(connectionName: String) = withContext(Dispatchers.IO) {
-        stopProcessOnly(connectionName)
-        markStatus(connectionName, ModernProtocolStatus.DISCONNECTED, null, clearPort = true)
-        AppLog.log("Protocolo moderno \"$connectionName\" desconectado", AppLog.Level.INFO)
+    suspend fun disconnect(type: ModernProtocolType, connectionName: String) = withContext(Dispatchers.IO) {
+        val key = profileKey(type, connectionName)
+        stopProcessOnly(key)
+        markStatus(type, connectionName, ModernProtocolStatus.DISCONNECTED, null, clearPort = true, clearStats = true)
+        AppLog.log("${type.displayName} \"$connectionName\" desconectado", AppLog.Level.INFO)
     }
 
     fun coreAvailable(): Boolean = SingBoxProcess(appContext, "sing-box").isCoreAvailable()
 
     suspend fun coreVersion(): String? = SingBoxProcess(appContext, "sing-box").version()
 
-    private fun stopProcessOnly(name: String) {
-        activeProcesses.remove(name)?.stop()
-        runtimeConfigFile(name).delete()
+    fun hasActiveConnection(): Boolean =
+        _connections.value.any { it.status == ModernProtocolStatus.CONNECTED && it.localSocksPort != null }
+
+    fun activeConnection(): ManagedModernConnection? =
+        _connections.value.firstOrNull { it.status == ModernProtocolStatus.CONNECTED && it.localSocksPort != null }
+
+    private fun stopProcessOnly(key: String) {
+        activeProcesses.remove(key)?.stop()
+        runtimeConfigFile(key).delete()
     }
 
     private fun markStatus(
+        type: ModernProtocolType,
         name: String,
+        status: ModernProtocolStatus,
+        error: String?,
+        clearPort: Boolean = false,
+        clearStats: Boolean = false
+    ) {
+        _connections.update { current ->
+            current.map { conn ->
+                if (conn.config.type == type && conn.config.connectionName == name) {
+                    conn.copy(
+                        status = status,
+                        localSocksPort = if (clearPort) null else conn.localSocksPort,
+                        rxBytes = if (clearStats) 0L else conn.rxBytes,
+                        txBytes = if (clearStats) 0L else conn.txBytes,
+                        lastError = error
+                    )
+                } else conn
+            }
+        }
+    }
+
+    private fun markStatusByKey(
+        key: String,
         status: ModernProtocolStatus,
         error: String?,
         clearPort: Boolean = false
     ) {
         _connections.update { current ->
             current.map { conn ->
-                if (conn.config.connectionName == name) {
+                if (profileKey(conn.config) == key) {
                     conn.copy(
                         status = status,
                         localSocksPort = if (clearPort) null else conn.localSocksPort,
@@ -210,8 +284,14 @@ class ModernProtocolTunnelManager(context: Context) {
 
     private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
 
-    private fun runtimeConfigFile(name: String): File =
-        File(configDir, "profile-${name.hashCode().toUInt().toString(16)}.json")
+    private fun profileKey(config: ModernProtocolConfig): String =
+        profileKey(config.type, config.connectionName)
+
+    private fun profileKey(type: ModernProtocolType, name: String): String =
+        "${type.id}:${name}"
+
+    private fun runtimeConfigFile(key: String): File =
+        File(configDir, "profile-${key.hashCode().toUInt().toString(16)}.json")
 
     private fun persist() {
         val array = JSONArray()
