@@ -93,7 +93,7 @@ suspend fun importPanelConfigs(
 
     response.protocols["wireguard"]?.let { item ->
         if (!item.success) { avisar("wireguard", item.error ?: "sem sucesso"); return@let }
-        val conf = item.wireGuardConf ?: item.raw?.optString("conf")?.takeIf { it.isNotBlank() }
+        val conf = item.wireGuardConf ?: item.raw?.optString("config")?.takeIf { it.isNotBlank() }
         if (conf == null) { avisar("wireguard", "resposta sem campo \"conf\""); return@let }
         wireGuardManager.importConfig(nomeBase, conf)
             .onSuccess { algumaImportacao = true }
@@ -102,7 +102,7 @@ suspend fun importPanelConfigs(
 
     response.protocols["openvpn"]?.let { item ->
         if (!item.success) { avisar("openvpn", item.error ?: "sem sucesso"); return@let }
-        val conf = item.raw?.optString("conf")?.takeIf { it.isNotBlank() }
+        val conf = item.raw?.optString("config")?.takeIf { it.isNotBlank() }
         if (conf == null) { avisar("openvpn", "resposta sem campo \"conf\""); return@let }
         runCatching {
             val config = saveOpenVpnConfig(context, nomeBase, conf)
