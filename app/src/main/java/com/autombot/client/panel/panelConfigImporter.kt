@@ -5,6 +5,8 @@ import com.autombot.client.protocols.openvpn.OpenVpnTunnelManager
 import com.autombot.client.protocols.openvpn.saveOpenVpnConfig
 import com.autombot.client.protocols.shadowsocks.ShadowsocksTunnelManager
 import com.autombot.client.protocols.shadowsocks.parseShadowsocksUri
+import com.autombot.client.protocols.ssh.ProxyType
+import com.autombot.client.protocols.ssh.SlowDnsResolverMode
 import com.autombot.client.protocols.ssh.SshAuthMethod
 import com.autombot.client.protocols.ssh.SshConnectionConfig
 import com.autombot.client.protocols.ssh.SshTunnelManager
@@ -115,14 +117,17 @@ suspend fun importPanelConfigs(
         if (!item.success) { avisar("ssh", item.error ?: "sem sucesso"); return@let }
         val raw = item.raw
         if (raw == null) { avisar("ssh", "resposta vazia"); return@let }
-        // Tenta reconhecer variações de nome de campo — formato exato ainda não
-        // confirmado contra uma resposta real do automcore (ver ressalva no topo).
-        val host = raw.optString("host").ifBlank { raw.optString("server") }.ifBlank { raw.optString("ip") }
-        val porta = raw.optString("port").ifBlank { raw.optString("porta") }.ifBlank { "22" }
-        val usuarioSsh = raw.optString("username").ifBlank { raw.optString("usuario") }.ifBlank { raw.optString("login") }
-        val senhaSsh = raw.optString("password").ifBlank { raw.optString("senha") }
+        // CORRECAO: formato confirmado contra resposta real do painel — não é
+        // mais chute. host/porta/usuario/senha continuam os mesmos nomes de
+        // antes (já bateram certo); adicionado o resto das camadas
+        // (Proxy/Payload/SSL-TLS/WebSocket/SlowDNS/Gateway UDP), que o painel
+        // agora também devolve quando configuradas em "SSH pro App".
+        val host = raw.optString("host").ifBlank { raw.optString("server") }
+        val porta = if (raw.has("porta")) raw.optString("porta") else "22"
+        val usuarioSsh = raw.optString("usuario").ifBlank { raw.optString("username") }.ifBlank { raw.optString("login") }
+        val senhaSsh = raw.optString("senha").ifBlank { raw.optString("password") }
         if (host.isBlank() || usuarioSsh.isBlank()) {
-            avisar("ssh", "não achei host/usuário nos campos esperados — confirmar formato real com o painel")
+            avisar("ssh", "não achei host/usuário na resposta do painel")
             return@let
         }
         runCatching {
@@ -133,7 +138,35 @@ suspend fun importPanelConfigs(
                     port = porta,
                     username = usuarioSsh,
                     authMethod = SshAuthMethod.PASSWORD,
-                    password = senhaSsh
+                    password = senhaSsh,
+                    useProxy = raw.optBoolean("use_proxy", false),
+                    proxyType = if (raw.optString("proxy_type") == "HTTP") ProxyType.HTTP else ProxyType.SOCKS5,
+                    proxyHost = raw.optString("proxy_host"),
+                    proxyPort = if (raw.isNull("proxy_port")) "" else raw.optString("proxy_port"),
+                    proxyUsername = raw.optString("proxy_username"),
+                    proxyPassword = raw.optString("proxy_password"),
+                    usePayload = raw.optBoolean("use_payload", false),
+                    payload = raw.optString("payload"),
+                    useSslTls = raw.optBoolean("use_ssl_tls", false),
+                    sni = raw.optString("sni"),
+                    useWebSocket = raw.optBoolean("use_websocket", false),
+                    wsHost = raw.optString("ws_host"),
+                    wsPath = raw.optString("ws_path").ifBlank { "/" },
+                    useSlowDns = raw.optBoolean("use_slow_dns", false),
+                    slowDnsDomain = raw.optString("slow_dns_domain"),
+                    slowDnsPubkey = raw.optString("slow_dns_pubkey"),
+                    slowDnsResolverMode = when (raw.optString("slow_dns_resolver_mode")) {
+                        "DOH" -> SlowDnsResolverMode.DOH
+                        "DOT" -> SlowDnsResolverMode.DOT
+                        else -> SlowDnsResolverMode.UDP
+                    },
+                    slowDnsResolver = raw.optString("slow_dns_resolver"),
+                    dnsForwardingEnabled = raw.optBoolean("dns_forwarding_enabled", false),
+                    dnsPrimary = raw.optString("dns_primary").ifBlank { "8.8.8.8" },
+                    dnsSecondary = raw.optString("dns_secondary").ifBlank { "8.8.4.4" },
+                    udpForwardEnabled = raw.optBoolean("udp_forward_enabled", false),
+                    udpGatewayHost = raw.optString("udp_gateway_host").ifBlank { "127.0.0.1" },
+                    udpGatewayPort = if (raw.isNull("udp_gateway_port")) "7300" else raw.optString("udp_gateway_port")
                 )
             )
         }.onSuccess { algumaImportacao = true }
