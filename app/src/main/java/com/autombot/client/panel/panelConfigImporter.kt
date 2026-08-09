@@ -128,25 +128,32 @@ suspend fun importPanelConfigs(
     }
 
     val itemSsh = response.protocols["ssh"]
-    if (itemSsh != null && itemSsh.success && itemSsh.raw != null) {
-        val raw = itemSsh.raw
-        // CORRECAO: formato confirmado contra resposta real do painel — não é
-        // mais chute. host/porta/usuario/senha continuam os mesmos nomes de
-        // antes (já bateram certo); adicionado o resto das camadas
-        // (Proxy/Payload/SSL-TLS/WebSocket/SlowDNS/Gateway UDP), que o painel
-        // agora também devolve quando configuradas em "SSH pro App".
-        val host = raw.optString("host").ifBlank { raw.optString("server") }
-        val porta = if (raw.has("porta")) raw.optString("porta") else "22"
-        val usuarioSsh = raw.optString("usuario").ifBlank { raw.optString("username") }.ifBlank { raw.optString("login") }
-        val senhaSsh = raw.optString("senha").ifBlank { raw.optString("password") }
-        if (host.isBlank() || usuarioSsh.isBlank()) {
-            avisar("ssh", "não achei host/usuário na resposta do painel")
-            runCatching { sshManager.removeProfile(nomeBase) }
-        } else {
+    val perfisSsh = itemSsh?.raw?.optJSONArray("perfis")
+    if (itemSsh != null && itemSsh.success && perfisSsh != null && perfisSsh.length() > 0) {
+        // CORRECAO: usuário precisa de VÁRIAS conexões SSH por servidor
+        // (WebSocket, Direto, Payload...) — o painel agora devolve uma LISTA
+        // ("perfis"), não mais um objeto único. Cada perfil vira sua própria
+        // conexão no app, nomeada "$nomeBase - $nomeDoPerfil"; qualquer
+        // conexão gerenciada (mesmo prefixo) que não estiver mais na lista
+        // atual é removida — cobre o caso de excluir um perfil no painel.
+        val nomesValidos = mutableSetOf<String>()
+        for (i in 0 until perfisSsh.length()) {
+            val raw = perfisSsh.optJSONObject(i) ?: continue
+            val nomePerfil = raw.optString("nome").ifBlank { "Padrão" }
+            val nomeConexao = "$nomeBase - $nomePerfil"
+            val host = raw.optString("host").ifBlank { raw.optString("server") }
+            val porta = if (raw.has("porta")) raw.optString("porta") else "22"
+            val usuarioSsh = raw.optString("usuario").ifBlank { raw.optString("username") }.ifBlank { raw.optString("login") }
+            val senhaSsh = raw.optString("senha").ifBlank { raw.optString("password") }
+            if (host.isBlank() || usuarioSsh.isBlank()) {
+                avisar("ssh ($nomePerfil)", "não achei host/usuário nesse perfil")
+                continue
+            }
+            nomesValidos.add(nomeConexao)
             runCatching {
                 sshManager.saveProfile(
                     SshConnectionConfig(
-                        connectionName = nomeBase,
+                        connectionName = nomeConexao,
                         server = host,
                         port = porta,
                         username = usuarioSsh,
@@ -183,11 +190,26 @@ suspend fun importPanelConfigs(
                     )
                 )
             }.onSuccess { algumaImportacao = true }
-                .onFailure { avisar("ssh", it.message ?: "erro ao salvar o perfil") }
+                .onFailure { avisar("ssh ($nomePerfil)", it.message ?: "erro ao salvar o perfil") }
         }
+        // Remove conexões SSH gerenciadas (mesmo prefixo "$nomeBase - ") que
+        // não vieram mais na lista atual — ex: perfil excluído no painel.
+        val prefixoGerenciado = "$nomeBase - "
+        sshManager.connections.value
+            .map { it.config.connectionName }
+            .filter { it.startsWith(prefixoGerenciado) && it !in nomesValidos }
+            .forEach { runCatching { sshManager.removeProfile(it) } }
     } else {
         if (itemSsh != null && !itemSsh.success) avisar("ssh", itemSsh.error ?: "sem sucesso")
+        // Sem perfil nenhum vindo do painel — remove tudo que era gerenciado
+        // desse servidor (mesmo prefixo), incluindo o nome antigo sem sufixo
+        // (versões anteriores desse fluxo usavam só "$nomeBase").
         runCatching { sshManager.removeProfile(nomeBase) }
+        val prefixoGerenciado = "$nomeBase - "
+        sshManager.connections.value
+            .map { it.config.connectionName }
+            .filter { it.startsWith(prefixoGerenciado) }
+            .forEach { runCatching { sshManager.removeProfile(it) } }
     }
 
     if (!algumaImportacao) {
