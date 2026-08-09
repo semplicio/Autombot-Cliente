@@ -17,8 +17,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Abre uma conexao VLESS sobre WebSocket (com ou sem TLS) pro destino pedido.
- * A ponte possui encerramento explícito: quando o SOCKS5 termina o canal, o
- * WebSocket correspondente também é fechado, evitando conexões órfãs acumuladas.
+ *
+ * O SOCKS5 trata o fechamento do OutputStream remoto como half-close da direcao
+ * cliente -> servidor. WebSocket nao possui half-close equivalente ao TCP, entao
+ * fechar o WebSocket nesse momento tambem mataria a resposta servidor -> cliente.
+ * O OutputStream abaixo, portanto, encerra apenas a escrita logica; o transporte
+ * fisico e os pipes de recepcao so sao fechados quando o InputStream/relay inteiro
+ * termina ou quando o WebSocket remoto falha.
  */
 object VlessTransport {
 
@@ -31,13 +36,14 @@ object VlessTransport {
     ): Pair<InputStream, OutputStream> {
         val pipedOut = PipedOutputStream()
         val pipedIn = PipedInputStream(pipedOut, 256 * 1024)
-        val closed = AtomicBoolean(false)
+        val transportClosed = AtomicBoolean(false)
+        val writeClosed = AtomicBoolean(false)
 
         val clientBuilder = OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
-            // Mantém NAT/proxy/CDN cientes de que a conexão continua viva. Sem ping,
-            // conexões WebSocket ociosas podem ser descartadas silenciosamente.
+            // Mantem NAT/proxy/CDN cientes de que a conexao continua viva. Sem ping,
+            // conexoes WebSocket ociosas podem ser descartadas silenciosamente.
             .pingInterval(20, TimeUnit.SECONDS)
             .socketFactory(object : javax.net.SocketFactory() {
                 override fun createSocket(): java.net.Socket {
@@ -46,16 +52,32 @@ object VlessTransport {
                     if (!protectSocket(socket)) {
                         runCatching { socket.close() }
                         throw IOException(
-                            "Não consegui isentar esta conexão da VPN (protect() falhou) — verifique " +
-                                "se \"Bloquear conexões sem VPN\" está desligado pra este app."
+                            "Nao consegui isentar esta conexao da VPN (protect() falhou) — verifique " +
+                                "se \"Bloquear conexoes sem VPN\" esta desligado pra este app."
                         )
                     }
                     return socket
                 }
-                override fun createSocket(host: String?, p: Int): java.net.Socket = createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
-                override fun createSocket(host: String?, p: Int, localHost: java.net.InetAddress?, localPort: Int) = createSocket(host, p)
-                override fun createSocket(host: java.net.InetAddress?, p: Int): java.net.Socket = createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
-                override fun createSocket(address: java.net.InetAddress?, p: Int, localAddress: java.net.InetAddress?, localPort: Int) = createSocket(address, p)
+
+                override fun createSocket(host: String?, p: Int): java.net.Socket =
+                    createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
+
+                override fun createSocket(
+                    host: String?,
+                    p: Int,
+                    localHost: java.net.InetAddress?,
+                    localPort: Int
+                ) = createSocket(host, p)
+
+                override fun createSocket(host: java.net.InetAddress?, p: Int): java.net.Socket =
+                    createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
+
+                override fun createSocket(
+                    address: java.net.InetAddress?,
+                    p: Int,
+                    localAddress: java.net.InetAddress?,
+                    localPort: Int
+                ) = createSocket(address, p)
             })
 
         val scheme = if (config.useTls) "wss" else "ws"
@@ -74,35 +96,62 @@ object VlessTransport {
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                if (!closed.get()) {
-                    runCatching { pipedOut.write(bytes.toByteArray()); pipedOut.flush() }
+                if (!transportClosed.get()) {
+                    runCatching {
+                        pipedOut.write(bytes.toByteArray())
+                        pipedOut.flush()
+                    }
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 failure = t
-                closed.set(true)
+                transportClosed.set(true)
                 latch.countDown()
+                // Fechar somente o produtor faz o PipedInputStream devolver EOF depois
+                // dos bytes pendentes. Nao fechamos pipedIn aqui: isso produziria
+                // IOException("Pipe closed") artificial na direcao de recebimento.
                 runCatching { pipedOut.close() }
             }
 
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                transportClosed.set(true)
+                runCatching { pipedOut.close() }
+                runCatching { webSocket.close(code, reason) }
+            }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                closed.set(true)
+                transportClosed.set(true)
                 runCatching { pipedOut.close() }
             }
         }
 
         val webSocket = clientBuilder.build().newWebSocket(requestBuilder.build(), listener)
 
+        fun closeTransport() {
+            // Mesmo se o peer ja marcou transportClosed em onClosed/onFailure,
+            // sempre fechamos os pipes locais. O CAS controla apenas o cancelamento
+            // fisico do WebSocket para evitar chamadas repetidas.
+            if (transportClosed.compareAndSet(false, true)) {
+                runCatching { webSocket.cancel() }
+            }
+            runCatching { pipedOut.close() }
+            runCatching { pipedIn.close() }
+        }
+
         val opened = latch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
         if (!opened) {
-            closed.set(true)
+            transportClosed.set(true)
             webSocket.cancel()
-            throw IOException("Timeout ao abrir conexão WebSocket com o servidor VLESS")
+            runCatching { pipedOut.close() }
+            runCatching { pipedIn.close() }
+            throw IOException("Timeout ao abrir conexao WebSocket com o servidor VLESS")
         }
         failure?.let {
-            closed.set(true)
+            transportClosed.set(true)
             webSocket.cancel()
+            runCatching { pipedOut.close() }
+            runCatching { pipedIn.close() }
             throw IOException("Falha ao conectar WebSocket: ${it.message}")
         }
 
@@ -110,21 +159,26 @@ object VlessTransport {
             override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
 
             override fun write(b: ByteArray, off: Int, len: Int) {
-                if (closed.get()) throw IOException("WebSocket VLESS já está fechado")
+                if (writeClosed.get()) throw IOException("Escrita VLESS ja foi encerrada")
+                if (transportClosed.get()) throw IOException("WebSocket VLESS ja esta fechado")
+
                 val sent = webSocket.send(ByteString.of(*b.copyOfRange(off, off + len)))
                 if (!sent) {
-                    closed.set(true)
+                    transportClosed.set(true)
                     webSocket.cancel()
+                    runCatching { pipedOut.close() }
                     throw IOException("Falha ao enviar dados pelo WebSocket VLESS")
                 }
             }
 
             override fun close() {
-                if (closed.compareAndSet(false, true)) {
-                    runCatching { webSocket.close(1000, null) }
-                }
-                runCatching { pipedIn.close() }
-                runCatching { pipedOut.close() }
+                // IMPORTANTE: este close e chamado pelo relay assim que a direcao
+                // cliente -> servidor chega em EOF. Fechar o WebSocket/pipedIn aqui
+                // interrompia a resposta ainda em andamento e gerava exatamente
+                // "IOException: Pipe closed" no pipe [recebendo]. WebSocket nao tem
+                // half-close; apenas impedimos novas escritas e deixamos a leitura
+                // sobreviver ate EOF remoto ou ate o cleanup final do relay.
+                writeClosed.set(true)
             }
         }
 
@@ -132,10 +186,28 @@ object VlessTransport {
         try {
             sendStream.write(header)
         } catch (e: Exception) {
-            runCatching { sendStream.close() }
+            closeTransport()
             throw e
         }
 
-        return VlessResponseInputStream(pipedIn) to sendStream
+        val vlessResponse = VlessResponseInputStream(pipedIn)
+        val receiveStream = object : InputStream() {
+            override fun read(): Int = vlessResponse.read()
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int =
+                vlessResponse.read(b, off, len)
+
+            override fun available(): Int = vlessResponse.available()
+
+            override fun close() {
+                // O InputStream representa o ciclo de vida completo do transporte.
+                // O Socks5Server o fecha no cleanup final, depois de permitir que a
+                // direcao de download drene enquanto houver progresso.
+                runCatching { vlessResponse.close() }
+                closeTransport()
+            }
+        }
+
+        return receiveStream to sendStream
     }
 }
