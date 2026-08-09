@@ -37,6 +37,12 @@ class Socks5Server(
         const val COPY_BUFFER_SIZE = 32 * 1024
         const val DNS_SUCCESS_LOG_INTERVAL_MS = 30_000L
         const val DNS_FALLBACK_CONCURRENCY = 8
+        // Cada canal TCP mantém dois pipes bloqueantes (upload/download). O
+        // Dispatchers.IO global permite 64 operações bloqueantes em paralelo por
+        // padrão; com dezenas de canais ele ficava saturado e alguns relays abertos
+        // deixavam de ler/escrever. Um view elástico dedicado comporta as duas
+        // direções dos 63 canais SSH regulares sem bloquear o restante do app.
+        const val RELAY_IO_PARALLELISM = 128
     }
 
     private enum class PipeEnd {
@@ -47,6 +53,8 @@ class Socks5Server(
 
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val relayDispatcher = Dispatchers.IO.limitedParallelism(RELAY_IO_PARALLELISM)
     @Volatile private var running = false
     private val lastDnsSuccessLogAt = AtomicLong(0L)
     // Se UDP/udpgw ficar indisponível, Android/Chrome pode disparar dezenas de DNS
@@ -498,21 +506,21 @@ class Socks5Server(
         var job2: Job? = null
         try {
             val firstFinished = CompletableDeferred<PipeEnd>()
-            val upstream = launch(Dispatchers.IO) {
+            val upstream = launch(relayDispatcher) {
                 try {
                     firstFinished.complete(pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]"))
                 } finally {
-                    withContext(NonCancellable + Dispatchers.IO) {
+                    withContext(NonCancellable + relayDispatcher) {
                         runCatching { remoteOut.flush() }
                         runCatching { remoteOut.close() }
                     }
                 }
             }
-            val downstream = launch(Dispatchers.IO) {
+            val downstream = launch(relayDispatcher) {
                 try {
                     firstFinished.complete(pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]"))
                 } finally {
-                    withContext(NonCancellable + Dispatchers.IO) {
+                    withContext(NonCancellable + relayDispatcher) {
                         runCatching { clientOut.flush() }
                         if (!client.isClosed && !client.isOutputShutdown) {
                             runCatching { client.shutdownOutput() }
@@ -542,7 +550,7 @@ class Socks5Server(
                 )
             }
         } finally {
-            withContext(NonCancellable + Dispatchers.IO) {
+            withContext(NonCancellable + relayDispatcher) {
                 runCatching { client.close() }
                 runCatching { remoteIn.close() }
                 runCatching { remoteOut.close() }
