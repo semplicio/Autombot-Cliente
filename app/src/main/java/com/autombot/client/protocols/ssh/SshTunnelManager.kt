@@ -83,6 +83,14 @@ class SshTunnelManager(context: Context) {
         private const val UDP_GATEWAY_CHANNEL_LIMIT = 1
         private const val TOTAL_CHANNEL_LIMIT = REGULAR_CHANNEL_LIMIT + UDP_GATEWAY_CHANNEL_LIMIT
 
+        // O SSHJ usa Connection.timeoutMs também como prazo máximo para esperar um
+        // SSH_MSG_CHANNEL_WINDOW_ADJUST quando a janela remota de um direct-tcpip
+        // chega a zero. Quinze segundos se mostrou agressivo em carga real: canais
+        // individuais atingiam flow-control enquanto o transporte principal seguia
+        // saudável. Mantemos um limite finito, mas alinhado ao timeout de I/O do SSH.
+        private const val SSH_CHANNEL_FLOW_CONTROL_TIMEOUT_MS = 30_000
+        private const val CHANNEL_CLOSE_WORKERS = 4
+
         init {
             // Remove o "BC" capado do Android e registra o BouncyCastle completo no
             // lugar — precisa ser feito uma vez, antes de qualquer SSHClient() ser
@@ -112,6 +120,7 @@ class SshTunnelManager(context: Context) {
     private val udpGatewayChannelSemaphore = Semaphore(UDP_GATEWAY_CHANNEL_LIMIT)
     private val activeChannelLeases = ConcurrentHashMap<SSHClient, MutableSet<DirectChannelLease>>()
     private val waitingChannelRequests = AtomicInteger(0)
+    private val flowControlLoggedClients = ConcurrentHashMap.newKeySet<SSHClient>()
     @Volatile private var lastChannelStats = ""
     private val lastChannelStatsLogAt = AtomicLong(0L)
 
@@ -120,6 +129,12 @@ class SshTunnelManager(context: Context) {
     // mas ainda permite abrir canais em paralelo. Cada abertura continua com timeout
     // individual e fecha o canal se ele terminar depois de o pedido ser abandonado.
     private val channelOpenExecutor = java.util.concurrent.Executors.newFixedThreadPool(16)
+
+    // channel.close() espera a confirmação SSH até Connection.timeoutMs. Como agora
+    // esse timeout também precisa tolerar backpressure de janela por até 30 s, não
+    // deixamos o fechamento físico ocupar as threads que copiam tráfego dos relays.
+    // O permit do canal é devolvido imediatamente; o fechamento acontece aqui.
+    private val channelCloseExecutor = java.util.concurrent.Executors.newFixedThreadPool(CHANNEL_CLOSE_WORKERS)
 
     init {
         loadPersistedProfiles()
@@ -207,7 +222,7 @@ class SshTunnelManager(context: Context) {
                 .coerceIn(5, 60) * 1000
             client.connectTimeout = connectTimeoutMs
             client.timeout = 30_000
-            client.connection.timeoutMs = 15_000
+            client.connection.timeoutMs = SSH_CHANNEL_FLOW_CONTROL_TIMEOUT_MS
 
             // Camada SlowDNS (se ligada): substitui COMPLETAMENTE a etapa de TCP
             // direto/proxy — em vez de conectar no servidor de verdade, conecta numa
@@ -320,6 +335,7 @@ class SshTunnelManager(context: Context) {
         activeUdpGwClients.remove(connectionName)?.stop()
         val client = activeClients.remove(connectionName)
         if (client != null) {
+            flowControlLoggedClients.remove(client)
             closeChannelsForClient(client)
             withContext(Dispatchers.IO) { runCatching { client.disconnect() } }
         }
@@ -378,7 +394,7 @@ class SshTunnelManager(context: Context) {
                 val channel = client.newDirectConnection(destHost, destPort)
                 openedByTask.set(channel)
                 if (abandoned.get()) {
-                    runCatching { channel.close() }
+                    closeDirectChannelAsync(channel)
                     throw IOException("Abertura do canal terminou depois do timeout")
                 }
                 channel
@@ -391,7 +407,7 @@ class SshTunnelManager(context: Context) {
             } catch (e: TimeoutException) {
                 abandoned.set(true)
                 future.cancel(true)
-                runCatching { openedByTask.getAndSet(null)?.close() }
+                openedByTask.getAndSet(null)?.let(::closeDirectChannelAsync)
                 throw IOException("Timeout ao abrir canal SSH pra $destHost:$destPort")
             } catch (e: Exception) {
                 throw e.cause ?: e
@@ -406,6 +422,8 @@ class SshTunnelManager(context: Context) {
             ) {
                 throw IOException("Conexao SSH encerrada durante a abertura do canal")
             }
+
+            logFlowControlOnce(client, channel)
 
             lateinit var lease: DirectChannelLease
             lease = DirectChannelLease(channel) {
@@ -430,7 +448,7 @@ class SshTunnelManager(context: Context) {
         } catch (e: CancellationException) {
             abandoned.set(true)
             channelFuture?.cancel(true)
-            runCatching { openedByTask.getAndSet(null)?.close() }
+            openedByTask.getAndSet(null)?.let(::closeDirectChannelAsync)
             throw e
         } catch (e: Exception) {
             val detail = "${e.javaClass.simpleName}: ${e.message}"
@@ -448,10 +466,26 @@ class SshTunnelManager(context: Context) {
             if (permitAcquired && !permitTransferred) {
                 abandoned.set(true)
                 channelFuture?.cancel(true)
-                runCatching { openedByTask.getAndSet(null)?.close() }
-                runCatching { openedChannel?.close() }
+                openedByTask.getAndSet(null)?.let(::closeDirectChannelAsync)
+                openedChannel?.let(::closeDirectChannelAsync)
                 semaphore.release()
             }
+        }
+    }
+
+    private fun logFlowControlOnce(client: SSHClient, channel: DirectConnection) {
+        if (!flowControlLoggedClients.add(client)) return
+        AppLog.log(
+            "SSH flow-control: janela local ${channel.getLocalWinSize()}B / pacote ${channel.getLocalMaxPacketSize()}B; " +
+                "janela remota ${channel.getRemoteWinSize()}B / pacote ${channel.getRemoteMaxPacketSize()}B; " +
+                "timeout WINDOW_ADJUST ${SSH_CHANNEL_FLOW_CONTROL_TIMEOUT_MS / 1000}s",
+            AppLog.Level.INFO
+        )
+    }
+
+    private fun closeDirectChannelAsync(channel: DirectConnection) {
+        channelCloseExecutor.execute {
+            runCatching { channel.close() }
         }
     }
 
@@ -486,7 +520,7 @@ class SshTunnelManager(context: Context) {
      * direcao de entrada. A V4 interceptava esse close() e fechava o canal inteiro,
      * cortando respostas ainda em transito e impedindo a drenagem TCP correta.
      */
-    private class DirectChannelLease(
+    private inner class DirectChannelLease(
         private val channel: DirectConnection,
         private val onClosed: () -> Unit
     ) {
@@ -513,10 +547,11 @@ class SshTunnelManager(context: Context) {
 
         private fun closeChannel() {
             if (closed.compareAndSet(false, true)) {
-                // A vaga precisa voltar imediatamente. channel.close() pode esperar
-                // a confirmacao remota e nao deve bloquear novas navegacoes.
+                // A vaga volta imediatamente. O CHANNEL_CLOSE físico pode esperar
+                // confirmação remota por até o timeout de flow-control e por isso é
+                // processado fora das threads de relay.
                 onClosed()
-                runCatching { channel.close() }
+                closeDirectChannelAsync(channel)
             }
         }
     }
