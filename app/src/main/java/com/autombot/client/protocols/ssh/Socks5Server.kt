@@ -30,18 +30,19 @@ class Socks5Server(
     private val logPrefix: String = "SOCKS5"
 ) {
     private companion object {
-        // Um EOF normal ainda recebe uma janela curta para a resposta que já estava
-        // em trânsito. Sessenta segundos deixava canais SSH encerrados ocupando vaga
-        // tempo demais e, em navegação com muitas conexões, podia saturar o pool.
-        const val RELAY_DRAIN_TIMEOUT_MS = 12_000L
+        // Depois que uma direção recebe EOF, a outra pode continuar transferindo por
+        // muito tempo (ex.: request curto seguido por download grande). O relay agora
+        // só é reciclado se essa direção sobrevivente ficar sem progresso real por
+        // 30 s; não existe mais um teto absoluto de 12 s para uma drenagem saudável.
+        const val RELAY_DRAIN_IDLE_TIMEOUT_MS = 30_000L
+        const val RELAY_DRAIN_POLL_INTERVAL_MS = 500L
+        const val RELAY_ERROR_JOIN_TIMEOUT_MS = 5_000L
         const val COPY_BUFFER_SIZE = 32 * 1024
         const val DNS_SUCCESS_LOG_INTERVAL_MS = 30_000L
         const val DNS_FALLBACK_CONCURRENCY = 8
-        // Cada canal TCP mantém dois pipes bloqueantes (upload/download). O
-        // Dispatchers.IO global permite 64 operações bloqueantes em paralelo por
-        // padrão; com dezenas de canais ele ficava saturado e alguns relays abertos
-        // deixavam de ler/escrever. Um view elástico dedicado comporta as duas
-        // direções dos 63 canais SSH regulares sem bloquear o restante do app.
+        // Cada canal TCP mantém dois pipes bloqueantes (upload/download). O dispatcher
+        // dedicado evita que dezenas de relays disputem o Dispatchers.IO global com
+        // DNS, abertura de canais e demais tarefas do aplicativo.
         const val RELAY_IO_PARALLELISM = 128
     }
 
@@ -50,6 +51,16 @@ class Socks5Server(
         PEER_GONE,
         ERROR
     }
+
+    private enum class PipeDirection {
+        UPSTREAM,
+        DOWNSTREAM
+    }
+
+    private data class PipeResult(
+        val direction: PipeDirection,
+        val end: PipeEnd
+    )
 
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -504,24 +515,42 @@ class Socks5Server(
         val tag = "$destHost:$destPort"
         var job1: Job? = null
         var job2: Job? = null
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val upstreamProgressAt = AtomicLong(startedAt)
+        val downstreamProgressAt = AtomicLong(startedAt)
         try {
-            val firstFinished = CompletableDeferred<PipeEnd>()
+            val firstFinished = CompletableDeferred<PipeResult>()
             val upstream = launch(relayDispatcher) {
                 try {
-                    firstFinished.complete(pipe(clientIn, remoteOut, totalTx, "$logPrefix ($tag) [enviando]"))
+                    val end = pipe(
+                        clientIn,
+                        remoteOut,
+                        totalTx,
+                        "$logPrefix ($tag) [enviando]",
+                        upstreamProgressAt
+                    )
+                    firstFinished.complete(PipeResult(PipeDirection.UPSTREAM, end))
                 } finally {
+                    // ChannelOutputStream.close() usa flush(false): envia tudo que
+                    // couber na janela atual e o CHANNEL_EOF sem iniciar uma nova
+                    // espera de WINDOW_ADJUST durante o cleanup.
                     withContext(NonCancellable + relayDispatcher) {
-                        runCatching { remoteOut.flush() }
                         runCatching { remoteOut.close() }
                     }
                 }
             }
             val downstream = launch(relayDispatcher) {
                 try {
-                    firstFinished.complete(pipe(remoteIn, clientOut, totalRx, "$logPrefix ($tag) [recebendo]"))
+                    val end = pipe(
+                        remoteIn,
+                        clientOut,
+                        totalRx,
+                        "$logPrefix ($tag) [recebendo]",
+                        downstreamProgressAt
+                    )
+                    firstFinished.complete(PipeResult(PipeDirection.DOWNSTREAM, end))
                 } finally {
                     withContext(NonCancellable + relayDispatcher) {
-                        runCatching { clientOut.flush() }
                         if (!client.isClosed && !client.isOutputShutdown) {
                             runCatching { client.shutdownOutput() }
                         }
@@ -531,26 +560,35 @@ class Socks5Server(
             job1 = upstream
             job2 = downstream
 
-            val firstEnd = firstFinished.await()
-            val endedGracefully = if (firstEnd == PipeEnd.EOF) {
-                withTimeoutOrNull(RELAY_DRAIN_TIMEOUT_MS) {
-                    joinAll(upstream, downstream)
-                    true
-                } ?: false
+            val first = firstFinished.await()
+            if (first.end == PipeEnd.EOF) {
+                val survivor = if (first.direction == PipeDirection.UPSTREAM) downstream else upstream
+                val survivorProgress = if (first.direction == PipeDirection.UPSTREAM) downstreamProgressAt else upstreamProgressAt
+                val drained = awaitDrainWhileProgressing(survivor, survivorProgress)
+                if (!drained && running) {
+                    AppLog.log(
+                        "$logPrefix: relay $tag ficou ${RELAY_DRAIN_IDLE_TIMEOUT_MS / 1000}s sem progresso após EOF; fechando e liberando o canal",
+                        AppLog.Level.INFO
+                    )
+                }
             } else {
+                // Cancellation não interrompe necessariamente InputStream.read().
+                // Fechamos primeiro os endpoints para acordar o outro pipe e só então
+                // esperamos um curto prazo pelo encerramento dos jobs.
+                runCatching { client.close() }
+                runCatching { remoteIn.close() }
+                runCatching { remoteOut.close() }
                 upstream.cancel()
                 downstream.cancel()
-                joinAll(upstream, downstream)
-                true
-            }
-            if (!endedGracefully && running) {
-                AppLog.log(
-                    "$logPrefix: relay $tag não drenou em ${RELAY_DRAIN_TIMEOUT_MS / 1000}s; fechando e liberando o canal",
-                    AppLog.Level.INFO
-                )
+                withTimeoutOrNull(RELAY_ERROR_JOIN_TIMEOUT_MS) {
+                    joinAll(upstream, downstream)
+                }
             }
         } finally {
             withContext(NonCancellable + relayDispatcher) {
+                // A ordem de fechamento desbloqueia reads bloqueantes antes de
+                // cancelar os jobs. O DirectChannelLease devolve o permit na hora e
+                // fecha o CHANNEL_CLOSE físico fora das threads de relay.
                 runCatching { client.close() }
                 runCatching { remoteIn.close() }
                 runCatching { remoteOut.close() }
@@ -562,24 +600,44 @@ class Socks5Server(
         }
     }
 
+    private suspend fun awaitDrainWhileProgressing(job: Job, lastProgressAt: AtomicLong): Boolean {
+        while (!job.isCompleted) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            val idleFor = now - lastProgressAt.get()
+            if (idleFor >= RELAY_DRAIN_IDLE_TIMEOUT_MS) return false
+            val remaining = (RELAY_DRAIN_IDLE_TIMEOUT_MS - idleFor).coerceAtLeast(1L)
+            delay(minOf(RELAY_DRAIN_POLL_INTERVAL_MS, remaining))
+        }
+        job.join()
+        return true
+    }
+
     private fun CoroutineScope.pipe(
         from: InputStream,
         to: OutputStream,
         counter: AtomicLong,
-        tag: String
+        tag: String,
+        lastProgressAt: AtomicLong
     ): PipeEnd {
         val buffer = ByteArray(COPY_BUFFER_SIZE)
         var bytesThisPipe = 0L
         try {
             while (isActive) {
                 val n = from.read(buffer)
-                if (n <= 0) return PipeEnd.EOF
+                if (n <= 0) {
+                    // No caminho normal, garante que o último pacote buffered seja
+                    // enviado antes do EOF. Em caminho de erro não fazemos flush de
+                    // novo, evitando repetir uma espera de WINDOW_ADJUST já expirada.
+                    to.flush()
+                    return PipeEnd.EOF
+                }
                 to.write(buffer, 0, n)
                 if (runCatching { from.available() }.getOrDefault(0) == 0) {
                     to.flush()
                 }
                 counter.addAndGet(n.toLong())
                 bytesThisPipe += n
+                lastProgressAt.set(android.os.SystemClock.elapsedRealtime())
             }
             return PipeEnd.PEER_GONE
         } catch (e: CancellationException) {
@@ -587,14 +645,20 @@ class Socks5Server(
         } catch (e: Exception) {
             val expectedClose = isExpectedClose(e)
             if (running && !expectedClose) {
-                AppLog.log(
-                    "$tag: interrompido por erro (${e.javaClass.simpleName}: ${e.message}) após $bytesThisPipe bytes",
-                    AppLog.Level.ERROR
-                )
+                val isWindowTimeout = e.message?.contains("Timeout when trying to expand the window size") == true
+                if (isWindowTimeout) {
+                    AppLog.log(
+                        "$tag: flow-control SSH remoto não expandiu a janela em 30s; reciclando apenas este canal após $bytesThisPipe bytes",
+                        AppLog.Level.ERROR
+                    )
+                } else {
+                    AppLog.log(
+                        "$tag: interrompido por erro (${e.javaClass.simpleName}: ${e.message}) após $bytesThisPipe bytes",
+                        AppLog.Level.ERROR
+                    )
+                }
             }
             return if (expectedClose) PipeEnd.PEER_GONE else PipeEnd.ERROR
-        } finally {
-            runCatching { to.flush() }
         }
     }
 
