@@ -75,7 +75,11 @@ import javax.net.ssl.SSLSocket
 class SshTunnelManager(context: Context) {
 
     companion object {
-        private const val REGULAR_CHANNEL_LIMIT = 63
+        // Aumentado de 63 para 95 canais regulares após teste real mostrar saturação
+        // em 64/64 durante navegação pesada/Speedtest. Mantém apenas 1 canal reservado
+        // ao gateway UDP e preserva o executor de abertura em 16 threads para evitar
+        // a regressão observada quando 32 canais eram abertos simultaneamente.
+        private const val REGULAR_CHANNEL_LIMIT = 95
         private const val UDP_GATEWAY_CHANNEL_LIMIT = 1
         private const val TOTAL_CHANNEL_LIMIT = REGULAR_CHANNEL_LIMIT + UDP_GATEWAY_CHANNEL_LIMIT
 
@@ -101,10 +105,9 @@ class SshTunnelManager(context: Context) {
     private val udpGwCreationMutex = Mutex()
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    // V5: 64 canais no total. Sessenta e tres atendem navegacao/DNS e uma vaga e
-    // exclusiva do badvpn-udpgw, para que uma rajada TCP nunca impeça o gateway UDP
-    // de subir. Cada canal aberto também fica registrado por SSHClient; assim a
-    // desconexao consegue fecha-lo e devolver o permit mesmo se o relay foi cancelado.
+    // 96 canais no total: 95 para navegação/DNS e 1 exclusivo do badvpn-udpgw.
+    // O aumento é apenas de capacidade; a concorrência de abertura continua limitada
+    // pelo mesmo executor de 16 threads que já se mostrou estável nos testes anteriores.
     private val regularChannelSemaphore = Semaphore(REGULAR_CHANNEL_LIMIT)
     private val udpGatewayChannelSemaphore = Semaphore(UDP_GATEWAY_CHANNEL_LIMIT)
     private val activeChannelLeases = ConcurrentHashMap<SSHClient, MutableSet<DirectChannelLease>>()
