@@ -131,6 +131,13 @@ class PanelWebhookClient(
         )
     }
 
+    /** GET /api/v1/configs_versao.php?usuario=X — checagem leve (só o hash, sem montar o pacote inteiro). */
+    suspend fun fetchConfigVersion(usuario: String): String {
+        val url = "$base/api/v1/configs_versao.php?usuario=" + URLEncoder.encode(usuario, "UTF-8")
+        val json = requestJson("GET", url, null)
+        return json.optString("versao")
+    }
+
     /** GET /api/v1/configs.php?usuario=X — busca as configs prontas de cada protocolo. */
     suspend fun fetchConfigs(usuario: String): PanelConfigsResponse {
         val url = "$base/api/v1/configs.php?usuario=" + URLEncoder.encode(usuario, "UTF-8")
