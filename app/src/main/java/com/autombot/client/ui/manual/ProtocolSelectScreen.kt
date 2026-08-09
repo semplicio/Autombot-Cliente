@@ -1,30 +1,28 @@
 package com.autombot.client.ui.manual
 
+import android.content.Intent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.autombot.client.ui.theme.AutomBotColors as C
 import com.autombot.client.ui.components.AutomBotCard
 import com.autombot.client.ui.components.AutomBotTopBar
 import com.autombot.client.ui.components.protocolVisual
+import com.autombot.client.ui.modern.ModernProtocolActivity
+import com.autombot.client.ui.theme.AutomBotColors as C
 
 data class ProtocolOption(val id: String, val displayName: String, val implemented: Boolean)
 
@@ -36,16 +34,26 @@ val ManualProtocolOptions = listOf(
     ProtocolOption("vless", "VLESS", implemented = true),
     ProtocolOption("trojan", "Trojan", implemented = true),
     ProtocolOption("openvpn", "OpenVPN", implemented = true),
+    ProtocolOption("hysteria2", "Hysteria2", implemented = true),
+    ProtocolOption("tuic", "TUIC", implemented = true),
     ProtocolOption("socks5", "SOCKS5", implemented = false)
 )
 
-/**
- * Tela 17 do mockup: selecao de protocolo. So o WireGuard tem driver de verdade
- * (ver pasta protocols/wireguard) — os demais abrem a mesma tela de config manual (18),
- * mas o "teste de conexao" (19) deixa claro que ainda nao ha suporte real.
- */
+/** Tela de seleção de protocolo no modo manual/profissional. */
 @Composable
 fun ProtocolSelectScreen(onBack: () -> Unit, onSelect: (ProtocolOption) -> Unit) {
+    val context = LocalContext.current
+
+    fun openOption(option: ProtocolOption) {
+        if (option.id == "hysteria2" || option.id == "tuic") {
+            context.startActivity(Intent(context, ModernProtocolActivity::class.java).apply {
+                putExtra(ModernProtocolActivity.EXTRA_PROTOCOL_ID, option.id)
+            })
+        } else {
+            onSelect(option)
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
         AutomBotTopBar("Selecionar protocolo", onBack, "Configuração manual")
 
@@ -55,19 +63,29 @@ fun ProtocolSelectScreen(onBack: () -> Unit, onSelect: (ProtocolOption) -> Unit)
         ) {
             items(ManualProtocolOptions, key = { it.id }) { option ->
                 val (protocolIcon, protocolColor) = protocolVisual(option.id)
-                AutomBotCard(modifier = Modifier.fillMaxWidth(), padding = 12.dp, onClick = { onSelect(option) }) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(protocolColor.copy(alpha = 0.14f)),
-                        contentAlignment = Alignment.Center
-                    ) { Icon(protocolIcon, contentDescription = null, tint = protocolColor, modifier = Modifier.size(21.dp)) }
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(option.displayName, color = C.Text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text(if (option.implemented) "Disponível" else "Configuração manual", color = if (option.implemented) C.Green else C.TextDim, fontSize = 10.sp)
+                AutomBotCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    padding = 12.dp,
+                    onClick = { openOption(option) }
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(protocolColor.copy(alpha = 0.14f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(protocolIcon, contentDescription = null, tint = protocolColor, modifier = Modifier.size(21.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(option.displayName, color = C.Text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text(
+                                if (option.implemented) "Disponível" else "Configuração manual",
+                                color = if (option.implemented) C.Green else C.TextDim,
+                                fontSize = 10.sp
+                            )
+                        }
+                        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = C.TextDim)
                     }
-                    Icon(Icons.Default.ChevronRight, contentDescription = null, tint = C.TextDim)
-                }
                 }
             }
         }

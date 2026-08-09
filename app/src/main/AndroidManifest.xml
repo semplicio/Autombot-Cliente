@@ -51,6 +51,14 @@
             </intent-filter>
         </activity>
 
+        <!-- Primeira fase do núcleo moderno: Hysteria2/TUIC ficam isolados do
+             MainActivity para validar QUIC/sing-box sem tocar nos fluxos SSH/WG. -->
+        <activity
+            android:name=".ui.modern.ModernProtocolActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.AutomBotClient" />
+
         <service
             android:name=".core.AutomBotVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
