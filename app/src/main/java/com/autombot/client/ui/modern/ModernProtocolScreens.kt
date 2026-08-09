@@ -78,20 +78,20 @@ fun ModernProtocolScreen(
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                items(connections, key = { it.config.connectionName }) { conn ->
+                items(connections, key = { "${it.config.type.id}:${it.config.connectionName}" }) { conn ->
                     ModernConnectionCard(
                         conn = conn,
                         onToggle = {
                             scope.launch {
                                 if (conn.status == ModernProtocolStatus.CONNECTED) {
-                                    manager.disconnect(conn.config.connectionName)
+                                    manager.disconnect(conn.config.type, conn.config.connectionName)
                                 } else {
-                                    manager.connect(conn.config.connectionName)
+                                    manager.connect(conn.config.type, conn.config.connectionName)
                                 }
                             }
                         },
                         onViewLog = { onViewLog(conn.config.connectionName) },
-                        onDelete = { manager.removeProfile(conn.config.connectionName) }
+                        onDelete = { manager.removeProfile(conn.config.type, conn.config.connectionName) }
                     )
                 }
                 item {
@@ -165,7 +165,7 @@ fun ModernProtocolAddScreen(
                     runCatching { manager.importUri(uri) }
                         .onSuccess { parsed ->
                             if (parsed.type != type) {
-                                manager.removeProfile(parsed.connectionName)
+                                manager.removeProfile(parsed.type, parsed.connectionName)
                                 error = "Esse link é ${parsed.type.displayName}, não ${type.displayName}."
                             } else {
                                 onSaved()
@@ -239,6 +239,11 @@ private fun ModernConnectionCard(
         if (conn.status == ModernProtocolStatus.CONNECTED && conn.localSocksPort != null) {
             Spacer(Modifier.height(10.dp))
             Text("SOCKS5 local 127.0.0.1:${conn.localSocksPort}", color = C.Accent, fontSize = 11.sp)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TrafficChip("↓ Recebido", formatBytes(conn.rxBytes))
+                TrafficChip("↑ Enviado", formatBytes(conn.txBytes))
+            }
         }
         if (conn.status == ModernProtocolStatus.ERROR && !conn.lastError.isNullOrBlank()) {
             Spacer(Modifier.height(8.dp))
@@ -266,4 +271,24 @@ private fun ModernConnectionCard(
             textContentColor = C.TextDim
         )
     }
+}
+
+@Composable
+private fun TrafficChip(label: String, value: String) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(C.SurfaceAlt)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(label, color = C.TextDim, fontSize = 10.sp)
+        Text(value, color = C.Accent, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    val group = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceIn(0, units.lastIndex)
+    return String.format("%.1f %s", bytes / Math.pow(1024.0, group.toDouble()), units[group])
 }
