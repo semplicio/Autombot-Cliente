@@ -21,18 +21,18 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.autombot.client.protocols.modern.ModernProtocolManagerProvider
+import com.autombot.client.protocols.modern.ModernProtocolStatus
 import com.autombot.client.ui.components.AutomBotCard
 import com.autombot.client.ui.components.AutomBotGradientButton
 import com.autombot.client.ui.theme.AutomBotColors as C
@@ -53,10 +53,19 @@ fun DashboardScreen(
     applyingUpdate: Boolean = false,
     onApplyUpdate: () -> Unit = {}
 ) {
+    val context = LocalContext.current
+    val modernManager = remember(context) { ModernProtocolManagerProvider.get(context) }
+    val modernConnections by modernManager.connections.collectAsState()
+    val modernActive = modernConnections.count { it.status == ModernProtocolStatus.CONNECTED }
+    val totalActiveConnections = activeConnections + modernActive
+    val modernRx = modernConnections.sumOf { it.rxBytes }
+    val modernTx = modernConnections.sumOf { it.txBytes }
+    val modernTraffic = modernRx + modernTx
+
     val pingResult = remember { mutableStateOf("Desconectado") }
 
-    LaunchedEffect(activeConnections) {
-        pingResult.value = if (activeConnections > 0) {
+    LaunchedEffect(totalActiveConnections) {
+        pingResult.value = if (totalActiveConnections > 0) {
             withContext(Dispatchers.IO) {
                 try {
                     val process = ProcessBuilder("ping", "-c", "1", "-W", "2", "8.8.8.8").start()
@@ -151,9 +160,13 @@ fun DashboardScreen(
         }
 
         AutomBotCard(modifier = Modifier.fillMaxWidth(), onClick = onOpenConnections) {
-            DashboardMetric(Icons.Default.NetworkCheck, "Conexões", "$activeConnections ativa(s)", C.Green)
+            DashboardMetric(Icons.Default.NetworkCheck, "Conexões", "$totalActiveConnections ativa(s)", C.Green)
             MetricDivider()
             DashboardMetric(Icons.Default.SwapVert, "Tráfego da sessão", trafficLabel, C.AccentLight)
+            if (modernTraffic > 0L) {
+                MetricDivider()
+                DashboardMetric(Icons.Default.SwapVert, "Tráfego Hysteria2 / TUIC", formatDashboardBytes(modernTraffic), C.Accent)
+            }
             MetricDivider()
             DashboardMetric(Icons.Default.Speed, "Latência", pingResult.value, C.PrimaryLight)
             MetricDivider()
@@ -192,4 +205,11 @@ private fun MetricDivider() {
     Spacer(Modifier.height(7.dp))
     androidx.compose.material3.HorizontalDivider(color = C.Line.copy(alpha = 0.7f))
     Spacer(Modifier.height(7.dp))
+}
+
+private fun formatDashboardBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    val group = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceIn(0, units.lastIndex)
+    return String.format("%.2f %s", bytes / Math.pow(1024.0, group.toDouble()), units[group])
 }
