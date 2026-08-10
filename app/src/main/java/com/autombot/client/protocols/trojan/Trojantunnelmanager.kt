@@ -1,23 +1,25 @@
 package com.autombot.client.protocols.trojan
 
 import android.content.Context
-import com.autombot.client.core.AutomBotVpnService
-import com.autombot.client.protocols.ssh.Socks5Server
+import com.autombot.client.core.tun2socks.NativeTun2Socks
+import com.autombot.client.protocols.modern.SingBoxProcess
+import com.autombot.client.protocols.vmess.VmessUnderlyingNetworkDns
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import java.io.InputStream
-import java.io.OutputStream
+import java.io.File
+import java.net.Inet4Address
 import java.net.ServerSocket
+import java.util.concurrent.ConcurrentHashMap
 
 enum class TrojanStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
@@ -31,29 +33,71 @@ data class ManagedTrojanConnection(
 )
 
 /**
- * Nucleo real da conexao Trojan (TCP+TLS direto + servidor SOCKS5 local).
+ * Gerencia Trojan usando o núcleo sing-box já empacotado no AutomBot.
+ *
+ * A UI, os perfis trojan:// e o roteamento TUN/HEV continuam iguais:
+ *
+ *   TUN -> HEV/tun2socks -> mixed SOCKS local do sing-box -> Trojan remoto
+ *
+ * O transporte Trojan TCP/UDP/TLS próprio permanece no repositório como fallback
+ * histórico, mas deixa de participar do caminho de produção.
  */
 class TrojanTunnelManager(context: Context) {
-    private val prefs = context.getSharedPreferences("autombot_trojan", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences("autombot_trojan", Context.MODE_PRIVATE)
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val configDir = File(appContext.filesDir, "sing-box-trojan-runtime").apply { mkdirs() }
+    private val underlyingDns = VmessUnderlyingNetworkDns(appContext)
 
     private val _connections = MutableStateFlow<List<ManagedTrojanConnection>>(emptyList())
     val connections: StateFlow<List<ManagedTrojanConnection>> = _connections
 
-    private val activeSocksServers = mutableMapOf<String, Socks5Server>()
-    private val activeUdpTransports = mutableMapOf<String, TrojanUdpTransport>()
+    private val activeProcesses = ConcurrentHashMap<String, SingBoxProcess>()
 
     init {
         loadPersisted()
+
         managerScope.launch {
             while (isActive) {
                 delay(2000)
-                _connections.update { current ->
-                    current.map { conn ->
-                        val server = activeSocksServers[conn.config.connectionName]
-                        if (server != null && conn.status == TrojanStatus.CONNECTED) {
-                            conn.copy(rxBytes = server.totalRx.get(), txBytes = server.totalTx.get())
-                        } else conn
+
+                val dead = activeProcesses.entries
+                    .filter { !it.value.isAlive() }
+                    .map { it.key }
+
+                dead.forEach { name ->
+                    activeProcesses.remove(name)?.stop()
+                    runtimeConfigFile(name).delete()
+                    _connections.update { current ->
+                        current.map { conn ->
+                            if (conn.config.connectionName == name && conn.status == TrojanStatus.CONNECTED) {
+                                conn.copy(
+                                    status = TrojanStatus.ERROR,
+                                    localSocksPort = null,
+                                    lastError = "O núcleo sing-box do Trojan encerrou inesperadamente"
+                                )
+                            } else conn
+                        }
+                    }
+                    AppLog.log(
+                        "Trojan \"$name\": núcleo sing-box encerrou inesperadamente",
+                        AppLog.Level.ERROR
+                    )
+                }
+
+                if (_connections.value.any { it.status == TrojanStatus.CONNECTED }) {
+                    runCatching { NativeTun2Socks.stats() }.getOrNull()?.let { stats ->
+                        if (stats.size >= 4) {
+                            val tx = stats[1].coerceAtLeast(0L)
+                            val rx = stats[3].coerceAtLeast(0L)
+                            _connections.update { current ->
+                                current.map { conn ->
+                                    if (conn.status == TrojanStatus.CONNECTED) {
+                                        conn.copy(rxBytes = rx, txBytes = tx)
+                                    } else conn
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -63,7 +107,11 @@ class TrojanTunnelManager(context: Context) {
     fun addProfile(config: TrojanConnectionConfig) {
         _connections.update { current ->
             if (current.any { it.config.connectionName == config.connectionName }) {
-                current.map { if (it.config.connectionName == config.connectionName) it.copy(config = config) else it }
+                current.map {
+                    if (it.config.connectionName == config.connectionName) {
+                        it.copy(config = config, lastError = null)
+                    } else it
+                }
             } else {
                 current + ManagedTrojanConnection(config)
             }
@@ -72,126 +120,183 @@ class TrojanTunnelManager(context: Context) {
     }
 
     fun removeProfile(connectionName: String) {
-        if (_connections.value.firstOrNull { it.config.connectionName == connectionName }?.status == TrojanStatus.CONNECTED) {
-            managerScope.launch { disconnect(connectionName) }
-        }
+        activeProcesses.remove(connectionName)?.stop()
+        runtimeConfigFile(connectionName).delete()
         _connections.update { current -> current.filterNot { it.config.connectionName == connectionName } }
         persist()
     }
 
     suspend fun connect(connectionName: String) {
-        val managed = _connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return
+        val managed = _connections.value.firstOrNull {
+            it.config.connectionName == connectionName
+        } ?: return
         val config = managed.config
 
         markStatus(connectionName, TrojanStatus.CONNECTING)
-        AppLog.log("Trojan \"$connectionName\": iniciando conexão (${config.describeTransport()})", AppLog.Level.INFO)
+        AppLog.log(
+            "Trojan \"$connectionName\": iniciando núcleo sing-box (${config.describeTransport()})",
+            AppLog.Level.INFO
+        )
 
         withContext(Dispatchers.IO) {
             try {
-                val socksPort = findFreePort()
-                val socksServer = Socks5Server(
-                    socksPort,
-                    onConnectRequest = { destHost, destPort ->
-                        openTrojanChannel(config, connectionName, destHost, destPort)
-                    },
-                    onUdpAssociateRequest = { destHost, destPort, onIncoming ->
-                        openTrojanUdpSession(config, connectionName, destHost, destPort, onIncoming)
-                    },
-                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) },
-                    logPrefix = "Trojan \"$connectionName\""
+                activeProcesses.keys.filter { it != connectionName }.toList().forEach { other ->
+                    activeProcesses.remove(other)?.stop()
+                    runtimeConfigFile(other).delete()
+                    markStatus(
+                        other,
+                        TrojanStatus.DISCONNECTED,
+                        clearPort = true,
+                        clearStats = true
+                    )
+                }
+
+                activeProcesses.remove(connectionName)?.stop()
+                runtimeConfigFile(connectionName).delete()
+
+                val runner = SingBoxProcess(appContext, "Trojan \"$connectionName\"")
+                if (!runner.isCoreAvailable()) {
+                    throw IllegalStateException(
+                        "Núcleo sing-box ausente no APK. Gere novamente o aplicativo com o núcleo moderno incluído."
+                    )
+                }
+
+                val localPort = findFreePort()
+                val serverAddress = resolveServerAddress(config.server)
+                val runtimeFile = runtimeConfigFile(connectionName)
+
+                runtimeFile.parentFile?.mkdirs()
+                runtimeFile.writeText(
+                    TrojanSingBoxConfigFactory.build(
+                        config = config,
+                        localPort = localPort,
+                        serverAddress = serverAddress
+                    ).toString(2)
                 )
-                socksServer.start()
-                activeSocksServers[connectionName] = socksServer
+
+                val check = runner.checkConfig(runtimeFile)
+                if (check.exitCode != 0) {
+                    runtimeFile.delete()
+                    throw IllegalArgumentException(
+                        check.output.lineSequence().lastOrNull()?.take(500)
+                            ?: "Configuração Trojan rejeitada pelo sing-box"
+                    )
+                }
+
+                runner.start(runtimeFile)
+                if (!runner.awaitLocalPort(localPort)) {
+                    runner.stop()
+                    runtimeFile.delete()
+                    throw IllegalStateException("sing-box não abriu o proxy Trojan local em 12s")
+                }
+
+                runtimeFile.delete()
+                activeProcesses[connectionName] = runner
 
                 _connections.update { current ->
-                    current.map {
-                        if (it.config.connectionName == connectionName)
-                            it.copy(status = TrojanStatus.CONNECTED, localSocksPort = socksPort, lastError = null)
-                        else it
+                    current.map { conn ->
+                        if (conn.config.connectionName == connectionName) {
+                            conn.copy(
+                                status = TrojanStatus.CONNECTED,
+                                localSocksPort = localPort,
+                                rxBytes = 0L,
+                                txBytes = 0L,
+                                lastError = null
+                            )
+                        } else conn
                     }
                 }
-                AppLog.log("Trojan \"$connectionName\": conectado — proxy SOCKS5 em 127.0.0.1:$socksPort", AppLog.Level.SUCCESS)
+
+                val version = runner.version()?.substringBefore('\n')
+                AppLog.log(
+                    "Trojan \"$connectionName\": conectado — sing-box SOCKS5 em 127.0.0.1:$localPort" +
+                        " (servidor ${config.server} -> $serverAddress, SNI ${config.sni.ifBlank { config.server }})" +
+                        (version?.let { " [$it]" } ?: ""),
+                    AppLog.Level.SUCCESS
+                )
             } catch (e: Exception) {
+                runtimeConfigFile(connectionName).delete()
+                activeProcesses.remove(connectionName)?.stop()
                 markError(connectionName, e.message ?: e.javaClass.simpleName)
             }
         }
     }
 
-    suspend fun disconnect(connectionName: String) {
-        markStatus(connectionName, TrojanStatus.DISCONNECTED)
-        activeSocksServers.remove(connectionName)?.stop()
-        activeUdpTransports.remove(connectionName)?.close()
-        _connections.update { current ->
-            current.map {
-                if (it.config.connectionName == connectionName) it.copy(localSocksPort = null, rxBytes = 0L, txBytes = 0L)
-                else it
-            }
-        }
+    suspend fun disconnect(connectionName: String) = withContext(Dispatchers.IO) {
+        activeProcesses.remove(connectionName)?.stop()
+        runtimeConfigFile(connectionName).delete()
+        markStatus(
+            connectionName,
+            TrojanStatus.DISCONNECTED,
+            clearPort = true,
+            clearStats = true
+        )
         AppLog.log("Trojan \"$connectionName\" desconectado", AppLog.Level.INFO)
     }
 
-    private fun openTrojanChannel(
-        config: TrojanConnectionConfig,
-        connectionName: String,
-        destHost: String,
-        destPort: Int
-    ): Pair<InputStream, OutputStream>? {
-        return try {
-            TrojanTransport.connect(
-                config = config,
-                destHost = destHost,
-                destPort = destPort,
-                protectSocket = { socket -> AutomBotVpnService.protectSocket(socket) }
-            )
-        } catch (e: Exception) {
-            val detail = "${e.javaClass.simpleName}: ${e.message}"
-            AppLog.log("Trojan \"$connectionName\": falha ao abrir canal para $destHost:$destPort — $detail", AppLog.Level.ERROR)
-            android.util.Log.w("TrojanTunnelManager", "Falha ao abrir canal Trojan para $destHost:$destPort: $detail", e)
-            null
-        }
-    }
+    fun coreAvailable(): Boolean =
+        SingBoxProcess(appContext, "Trojan").isCoreAvailable()
 
-    /** Recria o transporte UDP compartilhado quando a conexão TLS anterior morreu. */
-    @Synchronized
-    private fun openTrojanUdpSession(
-        config: TrojanConnectionConfig,
-        connectionName: String,
-        destHost: String,
-        destPort: Int,
-        onIncoming: (ByteArray) -> Unit
-    ): com.autombot.client.protocols.ssh.UdpBackendSession? {
-        return try {
-            var transport = activeUdpTransports[connectionName]
-            if (transport == null || transport.isClosed()) {
-                if (transport != null) {
-                    activeUdpTransports.remove(connectionName)
-                    transport.close()
-                    AppLog.log("Trojan \"$connectionName\": transporte UDP/TLS encerrou; recriando", AppLog.Level.INFO)
-                }
-                transport = TrojanUdpTransport(config) { socket -> AutomBotVpnService.protectSocket(socket) }
-                activeUdpTransports[connectionName] = transport
-            }
-            transport.openSession(destHost, destPort, onIncoming)
-        } catch (e: Exception) {
-            activeUdpTransports.remove(connectionName)?.close()
-            val detail = "${e.javaClass.simpleName}: ${e.message}"
-            AppLog.log("Trojan \"$connectionName\": falha ao abrir UDP para $destHost:$destPort — $detail", AppLog.Level.ERROR)
-            null
+    private fun resolveServerAddress(server: String): String {
+        require(server.isNotBlank()) { "Servidor Trojan vazio" }
+
+        if (IPV4_REGEX.matches(server) || server.contains(':')) {
+            return server
         }
+
+        val addresses = underlyingDns.lookup(server)
+        val selected = addresses.firstOrNull { it is Inet4Address }
+            ?: addresses.firstOrNull()
+            ?: throw java.net.UnknownHostException(
+                "Nenhum endereço retornado para o servidor Trojan $server"
+            )
+
+        return selected.hostAddress
+            ?: throw java.net.UnknownHostException(
+                "Endereço inválido retornado para o servidor Trojan $server"
+            )
     }
 
     private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
 
-    private fun markStatus(name: String, status: TrojanStatus) {
+    private fun runtimeConfigFile(connectionName: String): File {
+        val safeName = connectionName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return File(configDir, "trojan-$safeName.json")
+    }
+
+    private fun markStatus(
+        name: String,
+        status: TrojanStatus,
+        clearPort: Boolean = false,
+        clearStats: Boolean = false
+    ) {
         _connections.update { current ->
-            current.map { if (it.config.connectionName == name) it.copy(status = status) else it }
+            current.map { conn ->
+                if (conn.config.connectionName == name) {
+                    conn.copy(
+                        status = status,
+                        localSocksPort = if (clearPort) null else conn.localSocksPort,
+                        rxBytes = if (clearStats) 0L else conn.rxBytes,
+                        txBytes = if (clearStats) 0L else conn.txBytes,
+                        lastError = if (status == TrojanStatus.ERROR) conn.lastError else null
+                    )
+                } else conn
+            }
         }
     }
 
     private fun markError(name: String, error: String) {
         AppLog.log("Erro na conexão Trojan \"$name\": $error", AppLog.Level.ERROR)
         _connections.update { current ->
-            current.map { if (it.config.connectionName == name) it.copy(status = TrojanStatus.ERROR, lastError = error) else it }
+            current.map { conn ->
+                if (conn.config.connectionName == name) {
+                    conn.copy(
+                        status = TrojanStatus.ERROR,
+                        localSocksPort = null,
+                        lastError = error
+                    )
+                } else conn
+            }
         }
     }
 
@@ -210,5 +315,9 @@ class TrojanTunnelManager(context: Context) {
             }
             _connections.value = loaded
         }
+    }
+
+    private companion object {
+        val IPV4_REGEX = Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")
     }
 }
