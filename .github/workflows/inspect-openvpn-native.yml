@@ -20,12 +20,20 @@ jobs:
           sha256sum "$BIN"
           file "$BIN"
           readelf -h "$BIN"
-          readelf -l "$BIN"
           readelf -d "$BIN" || true
-          readelf -n "$BIN" || true
-          readelf -A "$BIN" || true
           echo '--- exported entry symbols ---'
           readelf -Ws "$BIN" | grep -E '[[:space:]](main|openvpn_main)$' || true
           nm -D "$BIN" | grep -E '[[:space:]](main|openvpn_main)$' || true
-          echo '--- strings: build/compiler/crypto hints ---'
-          strings "$BIN" | grep -E -i 'openvpn|openssl|clang|gcc|android|aarch64|armv8|march|mcpu|musl|glibc|bionic' | head -n 250 || true
+
+          echo '--- prove upstream-style launcher can be linked ---'
+          NDK="${ANDROID_NDK_HOME:-}"
+          if [[ -z "$NDK" || ! -d "$NDK" ]]; then
+            NDK="$(find "$ANDROID_SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
+          fi
+          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+          test -x "$CC"
+          : > /tmp/minivpn.c
+          "$CC" -fPIE -pie /tmp/minivpn.c -Wl,--no-as-needed -Lapp/src/main/jniLibs/arm64-v8a -lopenvpn -o /tmp/libovpnexec.so
+          file /tmp/libovpnexec.so
+          readelf -h /tmp/libovpnexec.so
+          readelf -d /tmp/libovpnexec.so | grep -E 'NEEDED|RUNPATH|RPATH' || true
