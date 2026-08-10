@@ -24,11 +24,8 @@ import com.autombot.client.protocols.openvpn.OpenVpnTunnelManager
 import com.autombot.client.ui.theme.AutomBotColors as C
 
 /**
- * Tela de OpenVPN — DIFERENTE das outras (SSH/VLESS/VMess/Shadowsocks/Trojan): não
- * chama manager.connect()/disconnect() diretamente, porque a conexão real roda
- * dentro do AutomBotVpnService (só ele pode controlar a TUN pro OpenVPN — ver
- * OpenVpnTunnelManager.kt). Em vez disso, [onConnect]/[onDisconnect] disparam isso
- * através do Service (ver MainActivity.kt).
+ * Tela de OpenVPN — a conexão real roda dentro do AutomBotVpnService porque o
+ * OpenVPN assume a TUN Android diretamente.
  */
 @Composable
 fun OpenVpnScreen(
@@ -87,8 +84,15 @@ fun OpenVpnScreen(
                     OpenVpnConnectionCard(
                         conn = conn,
                         onToggle = {
-                            if (conn.status == OpenVpnStatus.CONNECTED) onDisconnect()
-                            else onConnect(conn.config)
+                            if (conn.status == OpenVpnStatus.CONNECTED) {
+                                // ACTION_STOP também é usado automaticamente pelo roteador
+                                // dos protocolos SOCKS. Marcamos antes que este STOP veio
+                                // explicitamente do botão do OpenVPN.
+                                manager.requestDisconnect(conn.config.connectionName)
+                                onDisconnect()
+                            } else {
+                                onConnect(conn.config)
+                            }
                         },
                         onDelete = { manager.removeProfile(conn.config.connectionName) }
                     )
@@ -221,4 +225,4 @@ private fun formatOpenVpnBytes(bytes: Long): String {
     val units = arrayOf("B", "KB", "MB", "GB", "TB")
     val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceIn(0, units.size - 1)
     return String.format("%.1f %s", bytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
-}   
+}
