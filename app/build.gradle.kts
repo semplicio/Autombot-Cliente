@@ -61,9 +61,9 @@ android {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
 
-    // O sing-box é executado via ProcessBuilder a partir de nativeLibraryDir.
-    // Portanto ele precisa ser extraído para o filesystem na instalação, e não
-    // permanecer apenas mapeado diretamente de dentro do APK.
+    // sing-box e o launcher OpenVPN são executados via ProcessBuilder a partir de
+    // nativeLibraryDir. Portanto precisam ser extraídos para o filesystem durante
+    // a instalação em vez de permanecer apenas mapeados dentro do APK.
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -95,8 +95,38 @@ val prepareSingBoxCore by tasks.registering(Exec::class) {
     }
 }
 
+// O arquivo libopenvpn.so existente é o core compartilhado do ics-openvpn e não
+// pode ser executado diretamente. O upstream usa um PIE mínimo (libovpnexec.so)
+// ligado contra esse core. Geramos esse launcher automaticamente com o NDK já
+// utilizado pelo projeto antes de o APK ser empacotado.
+val openVpnCoreFile = layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libopenvpn.so").asFile
+val openVpnLauncherFile = layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libovpnexec.so").asFile
+
+val prepareOpenVpnLauncher by tasks.registering(Exec::class) {
+    group = "build setup"
+    description = "Compila o launcher PIE Android do OpenVPN ligado ao libopenvpn.so"
+    commandLine("bash", rootProject.file("scripts/build_openvpn_android_launcher.sh").absolutePath)
+
+    doLast {
+        if (!openVpnCoreFile.isFile || openVpnCoreFile.length() <= 0L) {
+            throw GradleException("Core OpenVPN ausente em ${openVpnCoreFile.absolutePath}")
+        }
+        if (!openVpnLauncherFile.isFile || openVpnLauncherFile.length() <= 0L) {
+            throw GradleException(
+                "Launcher OpenVPN não foi preparado em ${openVpnLauncherFile.absolutePath}. " +
+                    "O APK não será gerado com um OpenVPN que encerra antes da Management Interface."
+            )
+        }
+        logger.lifecycle(
+            "[AutomBot] OpenVPN launcher pronto: ${openVpnLauncherFile.absolutePath} " +
+                "(${openVpnLauncherFile.length()} bytes)"
+        )
+    }
+}
+
 tasks.named("preBuild").configure {
     dependsOn(prepareSingBoxCore)
+    dependsOn(prepareOpenVpnLauncher)
 }
 
 dependencies {
