@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import com.autombot.client.core.tun2socks.NativeTun2Socks
 import com.autombot.client.protocols.modern.ModernProtocolManagerProvider
 import com.autombot.client.protocols.openvpn.OpenVpnManagementClient
+import com.autombot.client.protocols.openvpn.OpenVpnTunConfig
 import com.autombot.client.protocols.openvpn.OpenVpnTunnelManager
 import com.autombot.client.ui.MainActivity
 import com.autombot.client.util.AppLog
@@ -22,6 +23,9 @@ import com.autombot.client.util.AppLog
  * A interface TUN é entregue ao HEV/tun2socks e o HEV encaminha para a porta
  * SOCKS5 local publicada pelo protocolo conectado. Hysteria2/TUIC usam exatamente
  * o mesmo caminho, com o sing-box publicando esse SOCKS5 local.
+ *
+ * OpenVPN é a exceção: o próprio processo OpenVPN lê/escreve a TUN. Nesse caso a
+ * configuração da interface vem das callbacks Android da Management Interface.
  */
 class AutomBotVpnService : VpnService() {
 
@@ -83,13 +87,6 @@ class AutomBotVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                // MainActivity centraliza os protocolos clássicos e pode emitir um
-                // STOP quando ela é recriada e não encontra nenhum deles ativo.
-                // Hysteria2/TUIC vivem num manager de processo separado; sem esta
-                // proteção, apenas reabrir a Activity poderia matar o TUN/HEV de uma
-                // sessão moderna que continua válida. O próprio fluxo moderno muda
-                // o status para DISCONNECTED antes de pedir STOP, então a parada
-                // intencional continua funcionando normalmente.
                 val modernStillActive = runCatching {
                     ModernProtocolManagerProvider.get(applicationContext).hasActiveConnection()
                 }.getOrDefault(false)
@@ -187,6 +184,101 @@ class AutomBotVpnService : VpnService() {
             return null
         }
 
+        ensureForegroundResources()
+        return tun
+    }
+
+    /**
+     * OpenVPN TARGET_ANDROID entrega IFCONFIG/ROUTE/DNS/MTU pela Management Interface
+     * antes de OPENTUN. A TUN precisa refletir esses valores; usar o 10.0.0.1/24 fixo
+     * dos protocolos SOCKS quebra o roteamento OpenVPN mesmo que o TLS autentique.
+     */
+    private fun establishOpenVpnTunAndForeground(config: OpenVpnTunConfig): ParcelFileDescriptor? {
+        val builder = Builder()
+            .setSession("AutomBot Connect · OpenVPN")
+            .setMtu(config.mtu.coerceIn(576, 9000))
+
+        var addressCount = 0
+        try {
+            val ipv4 = config.ipv4Address
+            val ipv4Prefix = config.ipv4PrefixLength
+            if (!ipv4.isNullOrBlank() && ipv4Prefix != null) {
+                builder.addAddress(ipv4, ipv4Prefix.coerceIn(0, 32))
+                addressCount++
+            }
+
+            val ipv6 = config.ipv6Address
+            val ipv6Prefix = config.ipv6PrefixLength
+            if (!ipv6.isNullOrBlank() && ipv6Prefix != null) {
+                builder.addAddress(ipv6, ipv6Prefix.coerceIn(0, 128))
+                addressCount++
+            }
+
+            if (addressCount == 0) {
+                AppLog.log("OpenVPN: nenhuma interface IP foi recebida antes de OPENTUN", AppLog.Level.ERROR)
+                return null
+            }
+
+            config.routes
+                .distinctBy { "${it.address}/${it.prefixLength}" }
+                .forEach { route ->
+                    builder.addRoute(route.address, route.prefixLength)
+                }
+
+            config.dnsServers
+                .filter { it.isNotBlank() }
+                .distinct()
+                .forEach { dns -> builder.addDnsServer(dns) }
+
+            config.searchDomain
+                ?.takeIf { it.isNotBlank() }
+                ?.let { builder.addSearchDomain(it) }
+
+            // O subprocesso OpenVPN compartilha o UID do app. Excluir o próprio app
+            // evita qualquer tentativa de o socket remoto entrar na TUN que ele mesmo
+            // está alimentando; PROTECTFD continua sendo atendido também.
+            builder.addDisallowedApplication(packageName)
+        } catch (e: Exception) {
+            AppLog.log(
+                "OpenVPN: configuração da TUN Android foi rejeitada — ${e.message}",
+                AppLog.Level.ERROR
+            )
+            return null
+        }
+
+        if (config.routes.isEmpty()) {
+            AppLog.log(
+                "OpenVPN: servidor/perfil não enviou nenhuma rota; o túnel pode conectar sem carregar tráfego de internet",
+                AppLog.Level.ERROR
+            )
+        }
+
+        val newTun = builder.establish()
+        if (newTun == null) {
+            AppLog.log("OpenVPN: VpnService.Builder.establish() retornou null", AppLog.Level.ERROR)
+            return null
+        }
+
+        val previousTun = tunInterface
+        tunInterface = newTun
+        if (previousTun != null && previousTun !== newTun) {
+            runCatching { previousTun.close() }
+        }
+
+        activeSocksPort = null
+        activeDns1 = null
+        activeDns2 = null
+        ensureForegroundResources()
+
+        AppLog.log(
+            "OpenVPN: TUN Android criada (endereços=$addressCount, rotas=${config.routes.size}, " +
+                "DNS=${config.dnsServers.joinToString().ifBlank { "nenhum" }}, MTU=${config.mtu})",
+            AppLog.Level.SUCCESS
+        )
+        return newTun
+    }
+
+    private fun ensureForegroundResources() {
         try {
             startForeground(NOTIFICATION_ID, buildNotification())
         } catch (e: Exception) {
@@ -201,12 +293,12 @@ class AutomBotVpnService : VpnService() {
                     "AutomBotConnect::VpnWakeLock"
                 ).apply { setReferenceCounted(false) }
             }
-            wakeLock?.acquire(10 * 60 * 60 * 1000L)
+            if (wakeLock?.isHeld != true) {
+                wakeLock?.acquire(10 * 60 * 60 * 1000L)
+            }
         } catch (e: Exception) {
             AppLog.log("VPN de sistema: falha ao adquirir WakeLock (${e.message})", AppLog.Level.ERROR)
         }
-
-        return tun
     }
 
     private fun startOpenVpn(configPath: String, connectionName: String) {
@@ -214,6 +306,17 @@ class AutomBotVpnService : VpnService() {
             AppLog.log("VPN de sistema: já existe uma conexão OpenVPN ativa — desconecte antes de iniciar outra", AppLog.Level.ERROR)
             return
         }
+
+        // OpenVPN passa a ser o dono exclusivo da TUN. Se um protocolo SOCKS estava
+        // usando HEV, encerra somente o motor/TUN de sistema antes de iniciar OpenVPN.
+        NativeTun2Socks.stopTailing()
+        NativeTun2Socks.stopStatsLogging()
+        NativeTun2Socks.stop()
+        runCatching { tunInterface?.close() }
+        tunInterface = null
+        activeSocksPort = null
+        activeDns1 = null
+        activeDns2 = null
 
         val config = com.autombot.client.protocols.openvpn.OpenVpnConnectionConfig(
             connectionName = connectionName,
@@ -225,10 +328,8 @@ class AutomBotVpnService : VpnService() {
             context = applicationContext,
             config = config,
             connectionName = connectionName,
-            establishTun = {
-                val tun = establishTunAndForeground()
-                tunInterface = tun
-                tun
+            establishTun = { tunConfig ->
+                establishOpenVpnTunAndForeground(tunConfig)
             },
             protectFd = { fd ->
                 runCatching {
@@ -262,6 +363,8 @@ class AutomBotVpnService : VpnService() {
         runCatching { tunInterface?.close() }
         tunInterface = null
         activeSocksPort = null
+        activeDns1 = null
+        activeDns2 = null
         activeInstance = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -295,8 +398,6 @@ class AutomBotVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        // Evita recursão stopSelf -> onDestroy -> stopVpn -> stopSelf. Nesta fase o
-        // serviço já recebeu o comando de parada e basta liberar recursos restantes.
         runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
         wakeLock = null
         NativeTun2Socks.stopTailing()
@@ -307,6 +408,8 @@ class AutomBotVpnService : VpnService() {
         runCatching { tunInterface?.close() }
         tunInterface = null
         activeSocksPort = null
+        activeDns1 = null
+        activeDns2 = null
         activeInstance = null
         super.onDestroy()
     }
