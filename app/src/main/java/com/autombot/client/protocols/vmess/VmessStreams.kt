@@ -18,10 +18,12 @@ class VmessOutputStream(
     private val iv: ByteArray
 ) : OutputStream() {
     private var chunkIndex = 0
+    private var closed = false
 
     override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
 
     override fun write(b: ByteArray, off: Int, len: Int) {
+        if (closed) throw IOException("Escrita VMess já foi encerrada")
         var offset = off
         var remaining = len
         while (remaining > 0) {
@@ -47,11 +49,18 @@ class VmessOutputStream(
         rawOut.flush()
     }
 
-    // Importante: o relay SOCKS5 fecha esta stream quando uma navegação termina.
-    // Propagar o close para o transporte bruto libera também o WebSocket VMess;
-    // antes o close padrão de OutputStream era no-op e conexões ficavam órfãs.
     override fun close() {
-        rawOut.close()
+        if (closed) return
+        closed = true
+        try {
+            // No formato Standard com AES-128-GCM, o fim da direção de dados é um
+            // pedaço com plaintext vazio. O AES-GCM produz somente sua tag de 16B,
+            // portanto o comprimento transmitido é 16. Isso sinaliza EOF ao Xray sem
+            // fechar o WebSocket e preserva a direção servidor -> cliente.
+            writeChunk(ByteArray(0), 0, 0)
+        } finally {
+            rawOut.close()
+        }
     }
 }
 
