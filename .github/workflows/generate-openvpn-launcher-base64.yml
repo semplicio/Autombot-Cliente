@@ -1,9 +1,9 @@
 name: Generate OpenVPN launcher payload
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/openvpn-executable-launcher
+      - main
 
 jobs:
   generate:
