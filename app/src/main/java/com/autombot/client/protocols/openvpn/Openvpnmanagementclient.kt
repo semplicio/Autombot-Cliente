@@ -46,12 +46,13 @@ data class OpenVpnTunConfig(
 )
 
 /**
- * Controla o binário OpenVPN compilado com TARGET_ANDROID pela Management Interface.
+ * Controla o core OpenVPN compilado com TARGET_ANDROID pela Management Interface.
  *
- * O fluxo segue o mesmo desenho do OpenVPN for Android (ics-openvpn): o APP cria
- * primeiro o LocalServerSocket UNIX e o processo OpenVPN é iniciado com
- * --management-client para se conectar nele. Isso é importante no Android porque
- * PROTECTFD e OPENTUN trafegam descritores reais via SCM_RIGHTS.
+ * O core fica em libopenvpn.so e exporta main(), mas é uma shared library e não
+ * deve ser executado diretamente. Assim como o ics-openvpn upstream, o app inicia
+ * um PIE mínimo (libovpnexec.so) ligado ao core. O app cria primeiro o
+ * LocalServerSocket UNIX e o OpenVPN conecta nele com --management-client, mantendo
+ * PROTECTFD e OPENTUN via SCM_RIGHTS.
  */
 class OpenVpnManagementClient(
     private val context: Context,
@@ -145,10 +146,26 @@ class OpenVpnManagementClient(
     }
 
     private suspend fun runManagement() {
-        val binary = File(context.applicationInfo.nativeLibraryDir, "libopenvpn.so")
-        AppLog.log("OpenVPN \"$connectionName\": usando binário em ${binary.absolutePath}", AppLog.Level.INFO)
-        if (!binary.exists()) {
-            onStateChange(false, "Binário openvpn não encontrado no app")
+        val nativeLibDir = context.applicationInfo.nativeLibraryDir
+        val core = File(nativeLibDir, "libopenvpn.so")
+        val launcher = File(nativeLibDir, "libovpnexec.so")
+
+        AppLog.log(
+            "OpenVPN \"$connectionName\": core em ${core.absolutePath}",
+            AppLog.Level.INFO
+        )
+        AppLog.log(
+            "OpenVPN \"$connectionName\": usando launcher PIE em ${launcher.absolutePath}",
+            AppLog.Level.INFO
+        )
+
+        if (!core.isFile) {
+            onStateChange(false, "Core OpenVPN libopenvpn.so não encontrado no app")
+            running = false
+            return
+        }
+        if (!launcher.isFile) {
+            onStateChange(false, "Launcher OpenVPN libovpnexec.so não encontrado no app")
             running = false
             return
         }
@@ -179,7 +196,7 @@ class OpenVpnManagementClient(
         }
 
         val processArgs = listOf(
-            binary.absolutePath,
+            launcher.absolutePath,
             "--config", configFile.absolutePath,
             "--management", socketFile.absolutePath, "unix",
             "--management-client",
@@ -189,15 +206,18 @@ class OpenVpnManagementClient(
         )
 
         AppLog.log(
-            "OpenVPN \"$connectionName\": iniciando; processo vai conectar ao Management UNIX do app",
+            "OpenVPN \"$connectionName\": iniciando launcher; processo vai conectar ao Management UNIX do app",
             AppLog.Level.INFO
         )
 
         val proc = try {
-            ProcessBuilder(processArgs)
+            val processBuilder = ProcessBuilder(processArgs)
                 .redirectErrorStream(true)
                 .directory(context.filesDir)
-                .start()
+            // O launcher possui DT_NEEDED=libopenvpn.so. Mantemos explicitamente o
+            // diretório nativo do próprio app no caminho de busca do linker Android.
+            processBuilder.environment()["LD_LIBRARY_PATH"] = nativeLibDir
+            processBuilder.start()
         } catch (e: Exception) {
             onStateChange(false, "Falha ao iniciar OpenVPN: ${e.message}")
             running = false
