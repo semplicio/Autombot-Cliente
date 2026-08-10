@@ -38,6 +38,7 @@ import com.autombot.client.ui.components.AutomBotStatusDot
 import com.autombot.client.ui.components.AutomBotTopBar
 import com.autombot.client.ui.components.protocolVisual
 import com.autombot.client.ui.modern.ModernProtocolActivity
+import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 
 data class ConnectionRow(
@@ -56,6 +57,7 @@ fun ConnectionsScreen(
     onNewConnection: () -> Unit
 ) {
     val context = LocalContext.current
+    val managedMode = rememberManagedMode()
     val modernManager = remember(context) { ModernProtocolManagerProvider.get(context) }
     val modernConnections by modernManager.connections.collectAsState()
 
@@ -71,9 +73,6 @@ fun ConnectionsScreen(
         return ConnectionRow(type.id, type.displayName, status, connected, true)
     }
 
-    // MainActivity ainda monta as linhas dos protocolos antigos. Os protocolos
-    // modernos pertencem ao manager compartilhado e entram aqui para aparecerem
-    // sempre em "Minhas conexões", inclusive antes de existir um perfil importado.
     val existingIds = connections.mapTo(mutableSetOf()) { it.protocolId }
     val allConnections = buildList {
         addAll(connections)
@@ -95,7 +94,11 @@ fun ConnectionsScreen(
     Column(modifier = Modifier.fillMaxSize()) {
         AutomBotTopBar("Minhas conexões", onBack, "Minha rede")
         Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
-            Text("Protocolos configurados neste dispositivo", color = C.TextDim, fontSize = 11.sp)
+            Text(
+                if (managedMode) "Conexões fornecidas pelo administrador" else "Protocolos configurados neste dispositivo",
+                color = C.TextDim,
+                fontSize = 11.sp
+            )
         }
 
         LazyColumn(
@@ -106,14 +109,18 @@ fun ConnectionsScreen(
             items(allConnections, key = { it.protocolId }) { conn ->
                 ConnectionRowItem(conn, onClick = { if (conn.available) openConnection(conn) })
             }
-            item {
-                AutomBotGradientButton(
-                    text = "Nova conexão",
-                    onClick = onNewConnection,
-                    modifier = Modifier.fillMaxWidth(),
-                    leadingIcon = Icons.Default.Add
-                )
-                Spacer(Modifier.size(18.dp))
+            if (!managedMode) {
+                item {
+                    AutomBotGradientButton(
+                        text = "Nova conexão",
+                        onClick = onNewConnection,
+                        modifier = Modifier.fillMaxWidth(),
+                        leadingIcon = Icons.Default.Add
+                    )
+                    Spacer(Modifier.size(18.dp))
+                }
+            } else {
+                item { Spacer(Modifier.size(18.dp)) }
             }
         }
     }
