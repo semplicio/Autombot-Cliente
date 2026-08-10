@@ -457,9 +457,28 @@ class OpenVpnManagementClient(
     }
 
     private fun handleNeedOk(line: String, ancillaryFds: List<FileDescriptor>) {
-        val rest = line.removePrefix(">NEED-OK:")
-        val type = rest.substringBefore(':').trim().uppercase()
-        val message = rest.substringAfter("MSG:", rest.substringAfter(':', "")).trim()
+        val rest = line.removePrefix(">NEED-OK:").trim()
+
+        // TARGET_ANDROID/ics-openvpn envolve alguns pedidos no formato:
+        // NEED 'PROTECTFD' CONFIRMATION MSG:<mensagem>
+        // O parser antigo tratava a frase inteira como o tipo e respondia
+        // needok 'NEED 'PROTECTFD' CONFIRMATION MSG' ok, descartando o FD SCM_RIGHTS.
+        val wrappedNeed = Regex(
+            """^NEED\s+'([^']+)'\s+CONFIRMATION\s+MSG(?::(.*))?$""",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(rest)
+
+        val type = if (wrappedNeed != null) {
+            wrappedNeed.groupValues[1].trim().uppercase()
+        } else {
+            rest.substringBefore(':').trim().uppercase()
+        }
+
+        val message = if (wrappedNeed != null) {
+            wrappedNeed.groupValues.getOrElse(2) { "" }.trim()
+        } else {
+            rest.substringAfter("MSG:", rest.substringAfter(':', "")).trim()
+        }
 
         when (type) {
             "IFCONFIG" -> {
