@@ -5,22 +5,35 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+
 jobs:
   generate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: agent/openvpn-executable-launcher
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
       - name: Build launcher
         run: ./gradlew :app:prepareOpenVpnLauncher --stacktrace
-      - name: Emit launcher payload
+      - name: Commit launcher payload
         run: |
-          echo 'AUTOMBOT_OVPNEXEC_BASE64_BEGIN'
-          base64 -w0 app/src/main/jniLibs/arm64-v8a/libovpnexec.so
-          echo
-          echo 'AUTOMBOT_OVPNEXEC_BASE64_END'
+          mkdir -p scripts/prebuilt/openvpn
+          base64 -w0 app/src/main/jniLibs/arm64-v8a/libovpnexec.so > scripts/prebuilt/openvpn/libovpnexec-arm64-v8a.b64
+          echo >> scripts/prebuilt/openvpn/libovpnexec-arm64-v8a.b64
           sha256sum app/src/main/jniLibs/arm64-v8a/libovpnexec.so
           file app/src/main/jniLibs/arm64-v8a/libovpnexec.so
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/prebuilt/openvpn/libovpnexec-arm64-v8a.b64
+          if git diff --cached --quiet; then
+            echo 'Launcher payload already up to date.'
+            exit 0
+          fi
+          git commit -m 'Store prebuilt OpenVPN ARM64 launcher payload'
+          git push origin HEAD:agent/openvpn-executable-launcher
