@@ -18,19 +18,10 @@ data class ManagedOpenVpnConnection(
 )
 
 /**
- * Gerenciador de perfis OpenVPN — guarda a lista de perfis (cada um é só um arquivo
- * .ovpn salvo, ver OpenVpnModels.kt) e o status de cada um.
- *
- * DIFERENTE dos outros 4 protocolos (SSH/VLESS/VMess/Shadowsocks/Trojan): esses todos
- * rodam sua conexão real AQUI, no próprio Manager (escopo do Activity/Application),
- * expondo um proxy SOCKS5 local que o motor de VPN consome. O OpenVPN NÃO — ele
- * controla a interface TUN inteira sozinho (é assim que o processo `openvpn` de
- * verdade funciona), e só o AutomBotVpnService (rodando de fato como VpnService) tem
- * permissão de estabelecer essa TUN ou proteger sockets. Por isso, a conexão real
- * (OpenVpnManagementClient) roda DENTRO do AutomBotVpnService, não aqui — esse
- * Manager só guarda o estado (status/tráfego) e recebe atualizações dele através do
- * padrão de "instância ativa" (ver companion object), o mesmo já usado em outros
- * lugares do projeto pra esse tipo de ponte entre Service e Activity.
+ * Gerenciador de perfis OpenVPN. A conexão real vive no AutomBotVpnService porque
+ * OpenVPN assume a TUN do Android inteira; este manager mantém perfis/estado de UI
+ * e faz a pequena ponte de intenção necessária para diferenciar uma parada automática
+ * do roteador de protocolos de um desligamento solicitado pelo usuário.
  */
 class OpenVpnTunnelManager(context: Context) {
     private val appContext = context.applicationContext
@@ -41,9 +32,11 @@ class OpenVpnTunnelManager(context: Context) {
 
     companion object {
         @Volatile private var activeInstance: OpenVpnTunnelManager? = null
+        @Volatile private var explicitDisconnectRequested: Boolean = false
 
-        /** Chamado pelo AutomBotVpnService quando o estado de uma conexão OpenVPN muda de verdade. */
+        /** Chamado pelo AutomBotVpnService quando o estado real do OpenVPN muda. */
         fun reportStateChange(connectionName: String, connected: Boolean, error: String?) {
+            if (connected) explicitDisconnectRequested = false
             val instance = activeInstance ?: return
             instance._connections.update { current ->
                 current.map {
@@ -66,7 +59,7 @@ class OpenVpnTunnelManager(context: Context) {
             }
         }
 
-        /** Chamado pelo AutomBotVpnService a cada atualização de BYTECOUNT do processo openvpn. */
+        /** Chamado pelo AutomBotVpnService a cada atualização de BYTECOUNT. */
         fun reportBytes(connectionName: String, rx: Long, tx: Long) {
             val instance = activeInstance ?: return
             instance._connections.update { current ->
@@ -74,6 +67,21 @@ class OpenVpnTunnelManager(context: Context) {
                     if (it.config.connectionName == connectionName) it.copy(rxBytes = rx, txBytes = tx) else it
                 }
             }
+        }
+
+        /**
+         * ACTION_STOP também é emitido automaticamente pelo roteador dos protocolos
+         * SOCKS da MainActivity. OpenVPN não possui porta SOCKS, então o Service só
+         * deve aceitar esse STOP se a tela OpenVPN marcou antes uma intenção explícita.
+         */
+        fun consumeExplicitDisconnectRequest(): Boolean {
+            val requested = explicitDisconnectRequested
+            explicitDisconnectRequested = false
+            return requested
+        }
+
+        fun clearExplicitDisconnectRequest() {
+            explicitDisconnectRequested = false
         }
     }
 
@@ -85,7 +93,11 @@ class OpenVpnTunnelManager(context: Context) {
     fun addProfile(config: OpenVpnConnectionConfig) {
         _connections.update { current ->
             if (current.any { it.config.connectionName == config.connectionName }) {
-                current.map { if (it.config.connectionName == config.connectionName) it.copy(config = config) else it }
+                current.map {
+                    if (it.config.connectionName == config.connectionName) {
+                        it.copy(config = config, lastError = null)
+                    } else it
+                }
             } else {
                 current + ManagedOpenVpnConnection(config)
             }
@@ -94,24 +106,58 @@ class OpenVpnTunnelManager(context: Context) {
     }
 
     fun removeProfile(connectionName: String) {
+        val file = _connections.value
+            .firstOrNull { it.config.connectionName == connectionName }
+            ?.config
+            ?.configFile(appContext)
         _connections.update { current -> current.filterNot { it.config.connectionName == connectionName } }
         persist()
-        val file = _connections.value.firstOrNull { it.config.connectionName == connectionName }?.config?.configFile(appContext)
         runCatching { file?.delete() }
     }
 
-    /** Só marca "conectando" — a conexão real é disparada pelo AutomBotVpnService (ver MainActivity.kt). */
+    /** Só marca conectando; a conexão real é disparada pelo AutomBotVpnService. */
     fun markConnecting(connectionName: String) {
+        explicitDisconnectRequested = false
         _connections.update { current ->
-            current.map { if (it.config.connectionName == connectionName) it.copy(status = OpenVpnStatus.CONNECTING, lastError = null) else it }
+            current.map {
+                if (it.config.connectionName == connectionName) {
+                    it.copy(status = OpenVpnStatus.CONNECTING, lastError = null)
+                } else it
+            }
+        }
+    }
+
+    /**
+     * Deve ser chamado pela tela imediatamente antes de enviar ACTION_STOP.
+     * Assim o Service distingue o clique do usuário de um STOP automático.
+     */
+    fun requestDisconnect(connectionName: String) {
+        explicitDisconnectRequested = true
+        _connections.update { current ->
+            current.map {
+                if (it.config.connectionName == connectionName) {
+                    it.copy(
+                        status = OpenVpnStatus.DISCONNECTED,
+                        rxBytes = 0L,
+                        txBytes = 0L,
+                        lastError = null
+                    )
+                } else it
+            }
         }
     }
 
     fun markDisconnected(connectionName: String) {
         _connections.update { current ->
             current.map {
-                if (it.config.connectionName == connectionName) it.copy(status = OpenVpnStatus.DISCONNECTED, rxBytes = 0L, txBytes = 0L)
-                else it
+                if (it.config.connectionName == connectionName) {
+                    it.copy(
+                        status = OpenVpnStatus.DISCONNECTED,
+                        rxBytes = 0L,
+                        txBytes = 0L,
+                        lastError = null
+                    )
+                } else it
             }
         }
     }
