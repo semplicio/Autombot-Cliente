@@ -16,7 +16,12 @@ object SingBoxConfigFactory {
 
         return JSONObject().apply {
             put("log", JSONObject().apply {
-                put("level", "info")
+                // INFO gera uma linha para praticamente cada socket TCP/UDP que
+                // atravessa o mixed inbound. Como cada linha entra no AppLog/StateFlow,
+                // rajadas do navegador causavam centenas de alocações e recomposições
+                // enquanto o túnel estava transferindo dados. WARN mantém avisos e
+                // erros úteis sem colocar a telemetria de cada conexão no caminho quente.
+                put("level", "warn")
                 put("timestamp", true)
             })
             put("dns", bootstrapDns())
