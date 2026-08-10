@@ -1,9 +1,9 @@
 name: Inspect OpenVPN native binary
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/inspect-openvpn-native
+      - main
   workflow_dispatch:
 
 jobs:
