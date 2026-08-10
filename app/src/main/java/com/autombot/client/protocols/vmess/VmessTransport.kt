@@ -1,5 +1,6 @@
 package com.autombot.client.protocols.vmess
 
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -12,8 +13,10 @@ import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Abre uma conexao VMess sobre WebSocket pro destino pedido.
@@ -36,6 +39,21 @@ object VmessTransport {
     private const val WS_QUEUE_DRAIN_TIMEOUT_MS = 15_000L
     private const val RECEIVE_PIPE_BYTES = 512 * 1024
 
+    // Depois que o lado local encerra definitivamente o upload, o Xray pode manter a
+    // conexao remota aberta sem produzir mais nenhum byte. O SOCKS5 compartilhado tem
+    // uma drenagem conservadora de 30s (necessaria para SSH e outros protocolos), mas
+    // no VMess isso estava acumulando dezenas de WebSockets mortos ao mesmo tempo.
+    // Fechamos somente o transporte VMess se, APOS o EOF local, nao houver qualquer
+    // byte recebido por este intervalo. Trafego de download real reinicia o relogio.
+    private const val POST_EOF_IDLE_CLOSE_MS = 8_000L
+    private const val POST_EOF_CHECK_INTERVAL_MS = 1_000L
+
+    // Um unico scheduler leve para todos os canais VMess. Nao cria uma thread por
+    // conexao e so acorda enquanto existe um canal em drenagem apos EOF local.
+    private val staleChannelScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "AutomBot-VMess-StaleChannel").apply { isDaemon = true }
+    }
+
     /**
      * Cria o cliente compartilhado pelo VmessTunnelManager.
      *
@@ -43,50 +61,62 @@ object VmessTransport {
      * conexao do navegador. Reutilizar uma instancia reduz drasticamente threads,
      * alocacoes e latencia de abertura. O payload VMess ja e AES-GCM (incompressivel),
      * portanto desabilitamos compressao WebSocket de saida para nao gastar CPU a toa.
+     *
+     * Como todos os WebSockets VMess apontam para o mesmo host, elevamos tambem a
+     * concorrencia de handshakes no Dispatcher. Isso evita que paginas com muitas
+     * conexoes simultaneas fiquem esperando em fila antes mesmo do WebSocket abrir.
      */
     fun createClient(
         protectSocket: (java.net.Socket) -> Boolean,
         timeoutMs: Int = 10_000
-    ): OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .pingInterval(20, TimeUnit.SECONDS)
-        .minWebSocketMessageToCompress(Long.MAX_VALUE)
-        .socketFactory(object : javax.net.SocketFactory() {
-            override fun createSocket(): java.net.Socket {
-                val socket = java.net.Socket()
-                socket.bind(java.net.InetSocketAddress(0))
-                if (!protectSocket(socket)) {
-                    runCatching { socket.close() }
-                    throw IOException(
-                        "Nao consegui isentar esta conexao da VPN (protect() falhou) — verifique " +
-                            "se \"Bloquear conexoes sem VPN\" esta desligado pra este app."
-                    )
+    ): OkHttpClient {
+        val dispatcher = Dispatcher().apply {
+            maxRequests = 128
+            maxRequestsPerHost = 32
+        }
+
+        return OkHttpClient.Builder()
+            .dispatcher(dispatcher)
+            .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(20, TimeUnit.SECONDS)
+            .minWebSocketMessageToCompress(Long.MAX_VALUE)
+            .socketFactory(object : javax.net.SocketFactory() {
+                override fun createSocket(): java.net.Socket {
+                    val socket = java.net.Socket()
+                    socket.bind(java.net.InetSocketAddress(0))
+                    if (!protectSocket(socket)) {
+                        runCatching { socket.close() }
+                        throw IOException(
+                            "Nao consegui isentar esta conexao da VPN (protect() falhou) — verifique " +
+                                "se \"Bloquear conexoes sem VPN\" esta desligado pra este app."
+                        )
+                    }
+                    return socket
                 }
-                return socket
-            }
 
-            override fun createSocket(host: String?, p: Int): java.net.Socket =
-                createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
+                override fun createSocket(host: String?, p: Int): java.net.Socket =
+                    createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
 
-            override fun createSocket(
-                host: String?,
-                p: Int,
-                localHost: java.net.InetAddress?,
-                localPort: Int
-            ) = createSocket(host, p)
+                override fun createSocket(
+                    host: String?,
+                    p: Int,
+                    localHost: java.net.InetAddress?,
+                    localPort: Int
+                ) = createSocket(host, p)
 
-            override fun createSocket(host: java.net.InetAddress?, p: Int): java.net.Socket =
-                createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
+                override fun createSocket(host: java.net.InetAddress?, p: Int): java.net.Socket =
+                    createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
 
-            override fun createSocket(
-                address: java.net.InetAddress?,
-                p: Int,
-                localAddress: java.net.InetAddress?,
-                localPort: Int
-            ) = createSocket(address, p)
-        })
-        .build()
+                override fun createSocket(
+                    address: java.net.InetAddress?,
+                    p: Int,
+                    localAddress: java.net.InetAddress?,
+                    localPort: Int
+                ) = createSocket(address, p)
+            })
+            .build()
+    }
 
     /** Compatibilidade para qualquer chamador que ainda nao mantenha um cliente compartilhado. */
     fun connect(
@@ -115,6 +145,7 @@ object VmessTransport {
         val pipedIn = PipedInputStream(pipedOut, RECEIVE_PIPE_BYTES)
         val transportClosed = AtomicBoolean(false)
         val writeClosed = AtomicBoolean(false)
+        val lastInboundProgressNanos = AtomicLong(System.nanoTime())
 
         val scheme = if (config.useTls) "wss" else "ws"
         val path = config.wsPath.ifBlank { "/" }
@@ -133,6 +164,10 @@ object VmessTransport {
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (!transportClosed.get()) {
+                    // Marca progresso antes de entrar no pipe bloqueante. Assim um
+                    // download que continua chegando impede corretamente o watchdog
+                    // pos-EOF de encerrar um canal que ainda esta produzindo dados.
+                    lastInboundProgressNanos.set(System.nanoTime())
                     runCatching {
                         pipedOut.write(bytes.toByteArray())
                         pipedOut.flush()
@@ -169,6 +204,29 @@ object VmessTransport {
             }
             runCatching { pipedOut.close() }
             runCatching { pipedIn.close() }
+        }
+
+        fun closeRemoteSideAfterIdle() {
+            // Nao fechamos pipedIn aqui: o consumidor pode ainda ter bytes pendentes.
+            // Fechar somente o produtor faz a leitura terminar com EOF natural.
+            if (transportClosed.compareAndSet(false, true)) {
+                runCatching { webSocket.cancel() }
+            }
+            runCatching { pipedOut.close() }
+        }
+
+        fun schedulePostEofIdleCheck(delayMs: Long = POST_EOF_CHECK_INTERVAL_MS) {
+            staleChannelScheduler.schedule({
+                if (transportClosed.get() || !writeClosed.get()) return@schedule
+
+                val idleMs = (System.nanoTime() - lastInboundProgressNanos.get()) / 1_000_000L
+                if (idleMs >= POST_EOF_IDLE_CLOSE_MS) {
+                    closeRemoteSideAfterIdle()
+                } else {
+                    val remaining = (POST_EOF_IDLE_CLOSE_MS - idleMs).coerceAtLeast(1L)
+                    schedulePostEofIdleCheck(minOf(POST_EOF_CHECK_INTERVAL_MS, remaining))
+                }
+            }, delayMs, TimeUnit.MILLISECONDS)
         }
 
         val opened = latch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
@@ -233,9 +291,12 @@ object VmessTransport {
             override fun close() {
                 // O Data Section do VMess possui seu proprio pacote final autenticado
                 // (enviado por VmessOutputStream.close()). Aqui fazemos apenas o
-                // half-close logico da escrita e mantemos o WebSocket vivo para a
-                // direcao de resposta.
-                writeClosed.set(true)
+                // half-close logico da escrita e mantemos o WebSocket vivo enquanto
+                // ainda houver download. Se ficar realmente ocioso apos esse EOF, o
+                // watchdog VMess encerra o transporte bem antes dos 30s do SOCKS5.
+                if (writeClosed.compareAndSet(false, true)) {
+                    schedulePostEofIdleCheck()
+                }
             }
         }
 
