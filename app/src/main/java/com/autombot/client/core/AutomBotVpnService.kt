@@ -87,6 +87,26 @@ class AutomBotVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                // MainActivity também usa ACTION_STOP automaticamente quando não há
+                // protocolo SOCKS ativo. OpenVPN não expõe SOCKS e, por isso, seria
+                // encerrado por engano logo ao iniciar ou ao recriar a Activity.
+                // A tela OpenVPN marca antes um pedido explícito de desconexão.
+                val explicitOpenVpnStop = OpenVpnTunnelManager.consumeExplicitDisconnectRequest()
+                if (openVpnClient != null && !explicitOpenVpnStop) {
+                    AppLog.log(
+                        "VPN de sistema: STOP automático ignorado porque OpenVPN continua ativo/conectando",
+                        AppLog.Level.INFO
+                    )
+                    return START_STICKY
+                }
+
+                // Se o usuário pediu explicitamente para desligar o OpenVPN, não
+                // deixamos outro guard interceptar esse STOP.
+                if (openVpnClient != null && explicitOpenVpnStop) {
+                    stopVpn()
+                    return START_NOT_STICKY
+                }
+
                 val modernStillActive = runCatching {
                     ModernProtocolManagerProvider.get(applicationContext).hasActiveConnection()
                 }.getOrDefault(false)
@@ -307,6 +327,8 @@ class AutomBotVpnService : VpnService() {
             return
         }
 
+        OpenVpnTunnelManager.clearExplicitDisconnectRequest()
+
         // OpenVPN passa a ser o dono exclusivo da TUN. Se um protocolo SOCKS estava
         // usando HEV, encerra somente o motor/TUN de sistema antes de iniciar OpenVPN.
         NativeTun2Socks.stopTailing()
@@ -341,6 +363,17 @@ class AutomBotVpnService : VpnService() {
             },
             onStateChange = { connected, error ->
                 OpenVpnTunnelManager.reportStateChange(connectionName, connected, error)
+                if (!connected) {
+                    // RECONNECTING não passa por este callback. Portanto false aqui
+                    // significa que esta execução terminou/está saindo e a referência
+                    // precisa ser liberada para permitir uma nova tentativa.
+                    val finishedClient = openVpnClient
+                    openVpnClient = null
+                    openVpnConnectionName = null
+                    if (error != null) {
+                        runCatching { finishedClient?.stop() }
+                    }
+                }
             },
             onBytesUpdate = { rx, tx ->
                 OpenVpnTunnelManager.reportBytes(connectionName, rx, tx)
@@ -360,6 +393,7 @@ class AutomBotVpnService : VpnService() {
         openVpnClient = null
         openVpnConnectionName?.let { OpenVpnTunnelManager.reportStateChange(it, connected = false, error = null) }
         openVpnConnectionName = null
+        OpenVpnTunnelManager.clearExplicitDisconnectRequest()
         runCatching { tunInterface?.close() }
         tunInterface = null
         activeSocksPort = null
