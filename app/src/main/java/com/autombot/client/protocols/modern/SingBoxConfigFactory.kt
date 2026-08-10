@@ -7,7 +7,6 @@ import org.json.JSONObject
 object SingBoxConfigFactory {
     private const val BOOTSTRAP_DNS_TAG = "bootstrap-dns"
     private const val BOOTSTRAP_DNS_IP = "8.8.8.8"
-    private const val BOOTSTRAP_DNS_SNI = "dns.google"
 
     fun build(config: ModernProtocolConfig, localPort: Int): JSONObject {
         val outbound = when (config.type) {
@@ -38,23 +37,18 @@ object SingBoxConfigFactory {
      * resolver libc/local (por exemplo ::1:53), criando uma dependência circular
      * assim que o TUN do AutomBot sobe.
      *
-     * Usamos DoH para um IP literal, então o próprio resolver de bootstrap não
-     * precisa de outra consulta DNS. O tráfego sai direto pelo UID do app, que é
-     * excluído do VpnService, enquanto apenas a resolução do host remoto usa este
-     * servidor. DNS originado pelos aplicativos continua passando normalmente pelo
-     * proxy/túnel.
+     * O bootstrap usa um IP literal, então a resolução do host remoto não depende
+     * de outra consulta de nomes. O socket do core sai pelo UID do próprio app,
+     * excluído do VpnService. DNS originado pelos aplicativos continua passando
+     * normalmente pelo proxy/túnel; este servidor resolve apenas nomes usados pelo
+     * próprio sing-box, como o endereço do servidor Hysteria2/TUIC.
      */
     private fun bootstrapDns(): JSONObject = JSONObject().apply {
         put("servers", JSONArray().put(JSONObject().apply {
-            put("type", "https")
+            put("type", "udp")
             put("tag", BOOTSTRAP_DNS_TAG)
             put("server", BOOTSTRAP_DNS_IP)
-            put("server_port", 443)
-            put("path", "/dns-query")
-            put("tls", JSONObject().apply {
-                put("enabled", true)
-                put("server_name", BOOTSTRAP_DNS_SNI)
-            })
+            put("server_port", 53)
         }))
     }
 
