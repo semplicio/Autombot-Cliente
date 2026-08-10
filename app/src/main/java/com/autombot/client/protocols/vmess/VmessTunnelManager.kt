@@ -32,9 +32,7 @@ data class ManagedVmessConnection(
 
 /**
  * Nucleo real da conexao VMess (WebSocket + protocolo AEAD proprio + servidor SOCKS5
- * local) — mesma estrutura do VlessTunnelManager.kt/SshTunnelManager.kt. Ver avisos de
- * risco em VmessCrypto.kt: protocolo criptografico reconstruido e parcialmente
- * confirmado contra a especificacao oficial, mas nunca testado contra servidor real.
+ * local) — mesma estrutura do VlessTunnelManager.kt/SshTunnelManager.kt.
  */
 class VmessTunnelManager(context: Context) {
     private val prefs = context.getSharedPreferences("autombot_vmess", Context.MODE_PRIVATE)
@@ -44,6 +42,14 @@ class VmessTunnelManager(context: Context) {
     val connections: StateFlow<List<ManagedVmessConnection>> = _connections
 
     private val activeSocksServers = mutableMapOf<String, Socks5Server>()
+
+    // O navegador pode abrir dezenas de conexoes TCP ao mesmo tempo. Criar um
+    // OkHttpClient por canal VMess criava um pool/dispatcher/task runner completo para
+    // cada uma delas. Uma instancia compartilhada e o modelo recomendado pelo OkHttp
+    // e reduz bastante o custo de navegacao com muitos recursos paralelos.
+    private val vmessSocketProtector: (java.net.Socket) -> Boolean =
+        { socket -> AutomBotVpnService.protectSocket(socket) }
+    private val sharedVmessHttpClient = VmessTransport.createClient(vmessSocketProtector)
 
     init {
         loadPersisted()
@@ -86,7 +92,7 @@ class VmessTunnelManager(context: Context) {
         val config = managed.config
 
         markStatus(connectionName, VmessStatus.CONNECTING)
-        AppLog.log("VMess \"$connectionName\": iniciando conexão (${config.describeTransport()})", AppLog.Level.INFO)
+        AppLog.log("VMess \"$connectionName\": iniciando conexao (${config.describeTransport()})", AppLog.Level.INFO)
 
         withContext(Dispatchers.IO) {
             try {
@@ -142,7 +148,7 @@ class VmessTunnelManager(context: Context) {
                 config = config,
                 destHost = destHost,
                 destPort = destPort,
-                protectSocket = { socket -> AutomBotVpnService.protectSocket(socket) }
+                client = sharedVmessHttpClient
             )
         } catch (e: Exception) {
             val detail = "${e.javaClass.simpleName}: ${e.message}"
@@ -183,7 +189,7 @@ class VmessTunnelManager(context: Context) {
     }
 
     private fun markError(name: String, error: String) {
-        AppLog.log("Erro na conexão VMess \"$name\": $error", AppLog.Level.ERROR)
+        AppLog.log("Erro na conexao VMess \"$name\": $error", AppLog.Level.ERROR)
         _connections.update { current ->
             current.map { if (it.config.connectionName == name) it.copy(status = VmessStatus.ERROR, lastError = error) else it }
         }
