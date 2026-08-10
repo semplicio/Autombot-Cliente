@@ -49,7 +49,16 @@ class VmessTunnelManager(context: Context) {
     // e reduz bastante o custo de navegacao com muitos recursos paralelos.
     private val vmessSocketProtector: (java.net.Socket) -> Boolean =
         { socket -> AutomBotVpnService.protectSocket(socket) }
+
+    // O host externo do servidor VMess precisa ser resolvido pela rede fisica, nao
+    // pelo DNS roteado dentro da propria VPN. Caso contrario, depois que o TUN sobe,
+    // a abertura de um novo WebSocket pode entrar num ciclo de bootstrap e falhar com
+    // "Unable to resolve host". O hostname continua intacto na URL, portanto TLS/SNI
+    // e Host seguem usando o dominio original.
     private val sharedVmessHttpClient = VmessTransport.createClient(vmessSocketProtector)
+        .newBuilder()
+        .dns(VmessUnderlyingNetworkDns(context.applicationContext))
+        .build()
 
     init {
         loadPersisted()
