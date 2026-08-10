@@ -19,9 +19,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Abre uma conexao VMess sobre WebSocket pro destino pedido.
  *
  * O handshake AEAD precisa seguir exatamente a ordem definida pelo protocolo:
- * EAuID -> ALength -> Nonce -> AHeader. Depois do handshake, o fechamento do
- * OutputStream representa apenas o fim da direcao cliente -> servidor; o WebSocket
- * permanece vivo para que a resposta servidor -> cliente possa ser drenada.
+ * EAuID -> ALength -> Nonce -> AHeader.
+ *
+ * IMPORTANTE: VMess nao possui uma etapa de handshake sincrona em que o cliente
+ * precisa esperar a resposta antes de poder enviar o primeiro payload. O Xray envia
+ * request header + request body enquanto, em paralelo, aguarda o response header.
+ * Portanto esta implementacao envia apenas o request header durante connect() e
+ * devolve imediatamente os streams ao relay SOCKS5. O response header e decodificado
+ * de forma lazy na primeira leitura da direcao servidor -> cliente.
  */
 object VmessTransport {
 
@@ -158,10 +163,10 @@ object VmessTransport {
             }
 
             override fun close() {
-                // O Data Section do VMess possui seu próprio pacote final autenticado
+                // O Data Section do VMess possui seu proprio pacote final autenticado
                 // (enviado por VmessOutputStream.close()). Aqui fazemos apenas o
-                // half-close lógico da escrita e mantemos o WebSocket vivo para a
-                // direção de resposta.
+                // half-close logico da escrita e mantemos o WebSocket vivo para a
+                // direcao de resposta.
                 writeClosed.set(true)
             }
         }
@@ -174,42 +179,60 @@ object VmessTransport {
         }
 
         try {
-            // VMess AEAD, ordem obrigatória:
+            // VMess AEAD, ordem obrigatoria:
             // 16B EAuID + 18B ALength + 8B Nonce + AHeader.
-            // A implementação anterior enviava o Nonce antes de ALength; o Xray
-            // interpretava bytes aleatórios como o campo de tamanho autenticado e
-            // encerrava a conexão sem produzir o cabeçalho de resposta.
             rawSendStream.write(request.authId)
             rawSendStream.write(request.encryptedLength)
             rawSendStream.write(request.connectionNonce)
             rawSendStream.write(request.encryptedHeader)
-
-            VmessCrypto.decodeResponseHeader(
-                requestBodyKey = request.requestBodyKey,
-                requestBodyIv = request.requestBodyIv,
-                expectedResponseHeaderByte = request.responseHeaderByte,
-                input = pipedIn
-            )
         } catch (e: Exception) {
             closeTransport()
             throw e
         }
 
+        // Nao esperamos o response header aqui. Para HTTPS isso criava um deadlock:
+        // o Xray conectava ao destino e esperava o ClientHello, enquanto o app ficava
+        // bloqueado esperando o response header antes de devolver o OutputStream ao
+        // SOCKS5. O Xray oficial processa uplink e downlink em paralelo.
+        val dataOut = VmessOutputStream(rawSendStream, request.requestBodyKey, request.requestBodyIv)
         val responseBodyKey = VmessCrypto.responseKey(request.requestBodyKey)
         val responseBodyIv = VmessCrypto.responseIv(request.requestBodyIv)
 
-        val dataOut = VmessOutputStream(rawSendStream, request.requestBodyKey, request.requestBodyIv)
-        val vmessInput = VmessInputStream(pipedIn, responseBodyKey, responseBodyIv)
+        val responseLock = Any()
+        var decodedInput: VmessInputStream? = null
+
+        fun ensureResponseInput(): VmessInputStream {
+            decodedInput?.let { return it }
+            synchronized(responseLock) {
+                decodedInput?.let { return it }
+                try {
+                    VmessCrypto.decodeResponseHeader(
+                        requestBodyKey = request.requestBodyKey,
+                        requestBodyIv = request.requestBodyIv,
+                        expectedResponseHeaderByte = request.responseHeaderByte,
+                        input = pipedIn
+                    )
+                    return VmessInputStream(pipedIn, responseBodyKey, responseBodyIv)
+                        .also { decodedInput = it }
+                } catch (e: Exception) {
+                    closeTransport()
+                    if (e is IOException) throw e
+                    throw IOException("Falha ao decodificar resposta VMess: ${e.message}", e)
+                }
+            }
+        }
+
         val dataIn = object : InputStream() {
-            override fun read(): Int = vmessInput.read()
+            override fun read(): Int = ensureResponseInput().read()
 
             override fun read(b: ByteArray, off: Int, len: Int): Int =
-                vmessInput.read(b, off, len)
+                ensureResponseInput().read(b, off, len)
 
-            override fun available(): Int = vmessInput.available()
+            override fun available(): Int = decodedInput?.available() ?: 0
 
             override fun close() {
-                runCatching { vmessInput.close() }
+                decodedInput?.let { runCatching { it.close() } }
+                    ?: runCatching { pipedIn.close() }
                 closeTransport()
             }
         }
