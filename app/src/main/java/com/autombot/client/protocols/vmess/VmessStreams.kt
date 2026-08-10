@@ -23,7 +23,7 @@ class VmessOutputStream(
     override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
 
     override fun write(b: ByteArray, off: Int, len: Int) {
-        if (closed) throw IOException("Escrita VMess já foi encerrada")
+        if (closed) throw IOException("Escrita VMess ja foi encerrada")
         var offset = off
         var remaining = len
         while (remaining > 0) {
@@ -39,10 +39,16 @@ class VmessOutputStream(
         val nonce = VmessCrypto.chunkNonce(iv, chunkIndex)
         chunkIndex++
         val ciphertext = VmessCrypto.aesGcmEncrypt(key, nonce, plaintext)
-        rawOut.write((ciphertext.size shr 8) and 0xFF)
-        rawOut.write(ciphertext.size and 0xFF)
-        rawOut.write(ciphertext)
-        rawOut.flush()
+
+        // O VMess e um fluxo: [2B tamanho][ciphertext]. Antes esses tres trechos eram
+        // entregues ao rawOut separadamente, e no transporte WebSocket isso virava
+        // tres mensagens WebSocket para cada chunk. Montar um frame unico reduz
+        // framing, filas e alternancias de thread sem alterar nenhum byte do protocolo.
+        val frame = ByteArray(2 + ciphertext.size)
+        frame[0] = ((ciphertext.size shr 8) and 0xFF).toByte()
+        frame[1] = (ciphertext.size and 0xFF).toByte()
+        System.arraycopy(ciphertext, 0, frame, 2, ciphertext.size)
+        rawOut.write(frame)
     }
 
     override fun flush() {
@@ -53,10 +59,10 @@ class VmessOutputStream(
         if (closed) return
         closed = true
         try {
-            // No formato Standard com AES-128-GCM, o fim da direção de dados é um
-            // pedaço com plaintext vazio. O AES-GCM produz somente sua tag de 16B,
-            // portanto o comprimento transmitido é 16. Isso sinaliza EOF ao Xray sem
-            // fechar o WebSocket e preserva a direção servidor -> cliente.
+            // No formato Standard com AES-128-GCM, o fim da direcao de dados e um
+            // pedaco com plaintext vazio. O AES-GCM produz somente sua tag de 16B,
+            // portanto o comprimento transmitido e 16. Isso sinaliza EOF ao Xray sem
+            // fechar o WebSocket e preserva a direcao servidor -> cliente.
             writeChunk(ByteArray(0), 0, 0)
         } finally {
             rawOut.close()
@@ -98,13 +104,13 @@ class VmessInputStream(
             endOfStream = true
             return false
         }
-        val ciphertext = readExact(chunkLen) ?: throw EOFException("Conexão VMess fechada no meio de um pedaço de dados")
+        val ciphertext = readExact(chunkLen) ?: throw EOFException("Conexao VMess fechada no meio de um pedaco de dados")
         val nonce = VmessCrypto.chunkNonce(iv, chunkIndex)
         chunkIndex++
         buffer = try {
             VmessCrypto.aesGcmDecrypt(key, nonce, ciphertext)
         } catch (e: Exception) {
-            throw IOException("Falha ao descriptografar pedaço de dados VMess (tag GCM inválida): ${e.message}", e)
+            throw IOException("Falha ao descriptografar pedaco de dados VMess (tag GCM invalida): ${e.message}", e)
         }
         bufferPos = 0
         return buffer.isNotEmpty()
@@ -115,7 +121,7 @@ class VmessInputStream(
         var offset = 0
         while (offset < size) {
             val n = rawIn.read(buf, offset, size - offset)
-            if (n == -1) return if (offset == 0) null else throw EOFException("Conexão fechada no meio de um campo de $size bytes")
+            if (n == -1) return if (offset == 0) null else throw EOFException("Conexao fechada no meio de um campo de $size bytes")
             offset += n
         }
         return buf
