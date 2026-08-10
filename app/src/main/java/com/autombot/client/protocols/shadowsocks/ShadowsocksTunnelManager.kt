@@ -1,23 +1,25 @@
 package com.autombot.client.protocols.shadowsocks
 
 import android.content.Context
-import com.autombot.client.core.AutomBotVpnService
-import com.autombot.client.protocols.ssh.Socks5Server
+import com.autombot.client.core.tun2socks.NativeTun2Socks
+import com.autombot.client.protocols.modern.SingBoxProcess
+import com.autombot.client.protocols.vmess.VmessUnderlyingNetworkDns
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import java.io.InputStream
-import java.io.OutputStream
+import java.io.File
+import java.net.Inet4Address
 import java.net.ServerSocket
+import java.util.concurrent.ConcurrentHashMap
 
 enum class ShadowsocksStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
@@ -31,30 +33,71 @@ data class ManagedShadowsocksConnection(
 )
 
 /**
- * Nucleo real da conexao Shadowsocks (TCP direto + AEAD proprio + servidor SOCKS5
- * local) — mesma estrutura do VlessTunnelManager.kt/VmessTunnelManager.kt.
+ * Gerencia Shadowsocks usando o núcleo sing-box já empacotado no AutomBot.
+ *
+ * A UI, o formato ss://, os perfis e o roteamento do aplicativo continuam iguais:
+ *
+ *   TUN -> HEV/tun2socks -> mixed SOCKS local do sing-box -> Shadowsocks remoto
+ *
+ * O codec AEAD TCP/UDP próprio e o Socks5Server antigo permanecem no repositório
+ * como fallback histórico, mas não fazem mais parte do caminho de produção.
  */
 class ShadowsocksTunnelManager(context: Context) {
-    private val prefs = context.getSharedPreferences("autombot_shadowsocks", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences("autombot_shadowsocks", Context.MODE_PRIVATE)
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val configDir = File(appContext.filesDir, "sing-box-shadowsocks-runtime").apply { mkdirs() }
+    private val underlyingDns = VmessUnderlyingNetworkDns(appContext)
 
     private val _connections = MutableStateFlow<List<ManagedShadowsocksConnection>>(emptyList())
     val connections: StateFlow<List<ManagedShadowsocksConnection>> = _connections
 
-    private val activeSocksServers = mutableMapOf<String, Socks5Server>()
-    private val activeUdpTransports = mutableMapOf<String, ShadowsocksUdpTransport>()
+    private val activeProcesses = ConcurrentHashMap<String, SingBoxProcess>()
 
     init {
         loadPersisted()
+
         managerScope.launch {
             while (isActive) {
                 delay(2000)
-                _connections.update { current ->
-                    current.map { conn ->
-                        val server = activeSocksServers[conn.config.connectionName]
-                        if (server != null && conn.status == ShadowsocksStatus.CONNECTED) {
-                            conn.copy(rxBytes = server.totalRx.get(), txBytes = server.totalTx.get())
-                        } else conn
+
+                val dead = activeProcesses.entries
+                    .filter { !it.value.isAlive() }
+                    .map { it.key }
+
+                dead.forEach { name ->
+                    activeProcesses.remove(name)?.stop()
+                    runtimeConfigFile(name).delete()
+                    _connections.update { current ->
+                        current.map { conn ->
+                            if (conn.config.connectionName == name && conn.status == ShadowsocksStatus.CONNECTED) {
+                                conn.copy(
+                                    status = ShadowsocksStatus.ERROR,
+                                    localSocksPort = null,
+                                    lastError = "O núcleo sing-box do Shadowsocks encerrou inesperadamente"
+                                )
+                            } else conn
+                        }
+                    }
+                    AppLog.log(
+                        "Shadowsocks \"$name\": núcleo sing-box encerrou inesperadamente",
+                        AppLog.Level.ERROR
+                    )
+                }
+
+                if (_connections.value.any { it.status == ShadowsocksStatus.CONNECTED }) {
+                    runCatching { NativeTun2Socks.stats() }.getOrNull()?.let { stats ->
+                        if (stats.size >= 4) {
+                            val tx = stats[1].coerceAtLeast(0L)
+                            val rx = stats[3].coerceAtLeast(0L)
+                            _connections.update { current ->
+                                current.map { conn ->
+                                    if (conn.status == ShadowsocksStatus.CONNECTED) {
+                                        conn.copy(rxBytes = rx, txBytes = tx)
+                                    } else conn
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -64,7 +107,11 @@ class ShadowsocksTunnelManager(context: Context) {
     fun addProfile(config: ShadowsocksConnectionConfig) {
         _connections.update { current ->
             if (current.any { it.config.connectionName == config.connectionName }) {
-                current.map { if (it.config.connectionName == config.connectionName) it.copy(config = config) else it }
+                current.map {
+                    if (it.config.connectionName == config.connectionName) {
+                        it.copy(config = config, lastError = null)
+                    } else it
+                }
             } else {
                 current + ManagedShadowsocksConnection(config)
             }
@@ -73,133 +120,183 @@ class ShadowsocksTunnelManager(context: Context) {
     }
 
     fun removeProfile(connectionName: String) {
-        if (_connections.value.firstOrNull { it.config.connectionName == connectionName }?.status == ShadowsocksStatus.CONNECTED) {
-            managerScope.launch { disconnect(connectionName) }
-        }
+        activeProcesses.remove(connectionName)?.stop()
+        runtimeConfigFile(connectionName).delete()
         _connections.update { current -> current.filterNot { it.config.connectionName == connectionName } }
         persist()
     }
 
     suspend fun connect(connectionName: String) {
-        val managed = _connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return
+        val managed = _connections.value.firstOrNull {
+            it.config.connectionName == connectionName
+        } ?: return
         val config = managed.config
 
         markStatus(connectionName, ShadowsocksStatus.CONNECTING)
-        AppLog.log("Shadowsocks \"$connectionName\": iniciando conexão (${config.describeTransport()})", AppLog.Level.INFO)
+        AppLog.log(
+            "Shadowsocks \"$connectionName\": iniciando núcleo sing-box (${config.describeTransport()})",
+            AppLog.Level.INFO
+        )
 
         withContext(Dispatchers.IO) {
             try {
-                val socksPort = findFreePort()
-                val socksServer = Socks5Server(
-                    socksPort,
-                    onConnectRequest = { destHost, destPort ->
-                        openShadowsocksChannel(config, connectionName, destHost, destPort)
-                    },
-                    onUdpAssociateRequest = { destHost, destPort, onIncoming ->
-                        openShadowsocksUdpSession(config, connectionName, destHost, destPort, onIncoming)
-                    },
-                    protectDatagramSocket = { socket -> AutomBotVpnService.protectDatagramSocket(socket) },
-                    logPrefix = "Shadowsocks \"$connectionName\""
+                activeProcesses.keys.filter { it != connectionName }.toList().forEach { other ->
+                    activeProcesses.remove(other)?.stop()
+                    runtimeConfigFile(other).delete()
+                    markStatus(
+                        other,
+                        ShadowsocksStatus.DISCONNECTED,
+                        clearPort = true,
+                        clearStats = true
+                    )
+                }
+
+                activeProcesses.remove(connectionName)?.stop()
+                runtimeConfigFile(connectionName).delete()
+
+                val runner = SingBoxProcess(appContext, "Shadowsocks \"$connectionName\"")
+                if (!runner.isCoreAvailable()) {
+                    throw IllegalStateException(
+                        "Núcleo sing-box ausente no APK. Gere novamente o aplicativo com o núcleo moderno incluído."
+                    )
+                }
+
+                val localPort = findFreePort()
+                val serverAddress = resolveServerAddress(config.server)
+                val runtimeFile = runtimeConfigFile(connectionName)
+
+                runtimeFile.parentFile?.mkdirs()
+                runtimeFile.writeText(
+                    ShadowsocksSingBoxConfigFactory.build(
+                        config = config,
+                        localPort = localPort,
+                        serverAddress = serverAddress
+                    ).toString(2)
                 )
-                socksServer.start()
-                activeSocksServers[connectionName] = socksServer
+
+                val check = runner.checkConfig(runtimeFile)
+                if (check.exitCode != 0) {
+                    runtimeFile.delete()
+                    throw IllegalArgumentException(
+                        check.output.lineSequence().lastOrNull()?.take(500)
+                            ?: "Configuração Shadowsocks rejeitada pelo sing-box"
+                    )
+                }
+
+                runner.start(runtimeFile)
+                if (!runner.awaitLocalPort(localPort)) {
+                    runner.stop()
+                    runtimeFile.delete()
+                    throw IllegalStateException("sing-box não abriu o proxy Shadowsocks local em 12s")
+                }
+
+                runtimeFile.delete()
+                activeProcesses[connectionName] = runner
 
                 _connections.update { current ->
-                    current.map {
-                        if (it.config.connectionName == connectionName)
-                            it.copy(status = ShadowsocksStatus.CONNECTED, localSocksPort = socksPort, lastError = null)
-                        else it
+                    current.map { conn ->
+                        if (conn.config.connectionName == connectionName) {
+                            conn.copy(
+                                status = ShadowsocksStatus.CONNECTED,
+                                localSocksPort = localPort,
+                                rxBytes = 0L,
+                                txBytes = 0L,
+                                lastError = null
+                            )
+                        } else conn
                     }
                 }
-                AppLog.log("Shadowsocks \"$connectionName\": conectado — proxy SOCKS5 em 127.0.0.1:$socksPort", AppLog.Level.SUCCESS)
+
+                val version = runner.version()?.substringBefore('\n')
+                AppLog.log(
+                    "Shadowsocks \"$connectionName\": conectado — sing-box SOCKS5 em 127.0.0.1:$localPort" +
+                        " (servidor ${config.server} -> $serverAddress)" +
+                        (version?.let { " [$it]" } ?: ""),
+                    AppLog.Level.SUCCESS
+                )
             } catch (e: Exception) {
+                runtimeConfigFile(connectionName).delete()
+                activeProcesses.remove(connectionName)?.stop()
                 markError(connectionName, e.message ?: e.javaClass.simpleName)
             }
         }
     }
 
-    suspend fun disconnect(connectionName: String) {
-        markStatus(connectionName, ShadowsocksStatus.DISCONNECTED)
-        activeSocksServers.remove(connectionName)?.stop()
-        activeUdpTransports.remove(connectionName)?.close()
-        _connections.update { current ->
-            current.map {
-                if (it.config.connectionName == connectionName) it.copy(localSocksPort = null, rxBytes = 0L, txBytes = 0L)
-                else it
-            }
-        }
+    suspend fun disconnect(connectionName: String) = withContext(Dispatchers.IO) {
+        activeProcesses.remove(connectionName)?.stop()
+        runtimeConfigFile(connectionName).delete()
+        markStatus(
+            connectionName,
+            ShadowsocksStatus.DISCONNECTED,
+            clearPort = true,
+            clearStats = true
+        )
         AppLog.log("Shadowsocks \"$connectionName\" desconectado", AppLog.Level.INFO)
     }
 
-    private fun openShadowsocksChannel(
-        config: ShadowsocksConnectionConfig,
-        connectionName: String,
-        destHost: String,
-        destPort: Int
-    ): Pair<InputStream, OutputStream>? {
-        return try {
-            ShadowsocksTransport.connect(
-                config = config,
-                destHost = destHost,
-                destPort = destPort,
-                protectSocket = { socket -> AutomBotVpnService.protectSocket(socket) }
-            )
-        } catch (e: Exception) {
-            val detail = "${e.javaClass.simpleName}: ${e.message}"
-            AppLog.log("Shadowsocks \"$connectionName\": falha ao abrir canal para $destHost:$destPort — $detail", AppLog.Level.ERROR)
-            android.util.Log.w("ShadowsocksTunnelManager", "Falha ao abrir canal Shadowsocks para $destHost:$destPort: $detail", e)
-            null
+    fun coreAvailable(): Boolean =
+        SingBoxProcess(appContext, "Shadowsocks").isCoreAvailable()
+
+    private fun resolveServerAddress(server: String): String {
+        require(server.isNotBlank()) { "Servidor Shadowsocks vazio" }
+
+        if (IPV4_REGEX.matches(server) || server.contains(':')) {
+            return server
         }
+
+        val addresses = underlyingDns.lookup(server)
+        val selected = addresses.firstOrNull { it is Inet4Address }
+            ?: addresses.firstOrNull()
+            ?: throw java.net.UnknownHostException(
+                "Nenhum endereço retornado para o servidor Shadowsocks $server"
+            )
+
+        return selected.hostAddress
+            ?: throw java.net.UnknownHostException(
+                "Endereço inválido retornado para o servidor Shadowsocks $server"
+            )
     }
 
     private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
 
-    /**
-     * Reaproveita o socket UDP enquanto estiver saudável. Se o receive/send detectou
-     * que ele morreu, remove a instância velha e cria outra imediatamente. Isso evita
-     * o estado em que a conexão aparece como ativa mas todo UDP/DNS fica sendo enviado
-     * para um socket já encerrado.
-     */
-    @Synchronized
-    private fun openShadowsocksUdpSession(
-        config: ShadowsocksConnectionConfig,
-        connectionName: String,
-        destHost: String,
-        destPort: Int,
-        onIncoming: (ByteArray) -> Unit
-    ): com.autombot.client.protocols.ssh.UdpBackendSession? {
-        return try {
-            var transport = activeUdpTransports[connectionName]
-            if (transport == null || transport.isClosed()) {
-                if (transport != null) {
-                    activeUdpTransports.remove(connectionName)
-                    transport.close()
-                    AppLog.log("Shadowsocks \"$connectionName\": transporte UDP encerrou; recriando", AppLog.Level.INFO)
-                }
-                transport = ShadowsocksUdpTransport(config) { socket ->
-                    AutomBotVpnService.protectDatagramSocket(socket)
-                }
-                activeUdpTransports[connectionName] = transport
-            }
-            transport.openSession(destHost, destPort, onIncoming)
-        } catch (e: Exception) {
-            activeUdpTransports.remove(connectionName)?.close()
-            val detail = "${e.javaClass.simpleName}: ${e.message}"
-            AppLog.log("Shadowsocks \"$connectionName\": falha ao abrir UDP para $destHost:$destPort — $detail", AppLog.Level.ERROR)
-            null
-        }
+    private fun runtimeConfigFile(connectionName: String): File {
+        val safeName = connectionName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return File(configDir, "shadowsocks-$safeName.json")
     }
 
-    private fun markStatus(name: String, status: ShadowsocksStatus) {
+    private fun markStatus(
+        name: String,
+        status: ShadowsocksStatus,
+        clearPort: Boolean = false,
+        clearStats: Boolean = false
+    ) {
         _connections.update { current ->
-            current.map { if (it.config.connectionName == name) it.copy(status = status) else it }
+            current.map { conn ->
+                if (conn.config.connectionName == name) {
+                    conn.copy(
+                        status = status,
+                        localSocksPort = if (clearPort) null else conn.localSocksPort,
+                        rxBytes = if (clearStats) 0L else conn.rxBytes,
+                        txBytes = if (clearStats) 0L else conn.txBytes,
+                        lastError = if (status == ShadowsocksStatus.ERROR) conn.lastError else null
+                    )
+                } else conn
+            }
         }
     }
 
     private fun markError(name: String, error: String) {
         AppLog.log("Erro na conexão Shadowsocks \"$name\": $error", AppLog.Level.ERROR)
         _connections.update { current ->
-            current.map { if (it.config.connectionName == name) it.copy(status = ShadowsocksStatus.ERROR, lastError = error) else it }
+            current.map { conn ->
+                if (conn.config.connectionName == name) {
+                    conn.copy(
+                        status = ShadowsocksStatus.ERROR,
+                        localSocksPort = null,
+                        lastError = error
+                    )
+                } else conn
+            }
         }
     }
 
@@ -218,5 +315,9 @@ class ShadowsocksTunnelManager(context: Context) {
             }
             _connections.value = loaded
         }
+    }
+
+    private companion object {
+        val IPV4_REGEX = Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")
     }
 }
