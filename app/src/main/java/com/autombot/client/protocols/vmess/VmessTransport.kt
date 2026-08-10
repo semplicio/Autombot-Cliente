@@ -29,57 +29,92 @@ import java.util.concurrent.atomic.AtomicBoolean
  * de forma lazy na primeira leitura da direcao servidor -> cliente.
  */
 object VmessTransport {
+    // OkHttp usa uma fila de envio WebSocket assincrona com limite duro de 16 MiB.
+    // Manter uma janela bem menor aplica backpressure no relay antes que um burst de
+    // upload/Speedtest encha essa fila e faca WebSocket.send() iniciar o fechamento.
+    private const val WS_QUEUE_HIGH_WATER_BYTES = 2L * 1024L * 1024L
+    private const val WS_QUEUE_DRAIN_TIMEOUT_MS = 15_000L
+    private const val RECEIVE_PIPE_BYTES = 512 * 1024
 
+    /**
+     * Cria o cliente compartilhado pelo VmessTunnelManager.
+     *
+     * Um OkHttpClient por canal TCP criava um Dispatcher/ConnectionPool/TaskRunner por
+     * conexao do navegador. Reutilizar uma instancia reduz drasticamente threads,
+     * alocacoes e latencia de abertura. O payload VMess ja e AES-GCM (incompressivel),
+     * portanto desabilitamos compressao WebSocket de saida para nao gastar CPU a toa.
+     */
+    fun createClient(
+        protectSocket: (java.net.Socket) -> Boolean,
+        timeoutMs: Int = 10_000
+    ): OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .pingInterval(20, TimeUnit.SECONDS)
+        .minWebSocketMessageToCompress(Long.MAX_VALUE)
+        .socketFactory(object : javax.net.SocketFactory() {
+            override fun createSocket(): java.net.Socket {
+                val socket = java.net.Socket()
+                socket.bind(java.net.InetSocketAddress(0))
+                if (!protectSocket(socket)) {
+                    runCatching { socket.close() }
+                    throw IOException(
+                        "Nao consegui isentar esta conexao da VPN (protect() falhou) — verifique " +
+                            "se \"Bloquear conexoes sem VPN\" esta desligado pra este app."
+                    )
+                }
+                return socket
+            }
+
+            override fun createSocket(host: String?, p: Int): java.net.Socket =
+                createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
+
+            override fun createSocket(
+                host: String?,
+                p: Int,
+                localHost: java.net.InetAddress?,
+                localPort: Int
+            ) = createSocket(host, p)
+
+            override fun createSocket(host: java.net.InetAddress?, p: Int): java.net.Socket =
+                createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
+
+            override fun createSocket(
+                address: java.net.InetAddress?,
+                p: Int,
+                localAddress: java.net.InetAddress?,
+                localPort: Int
+            ) = createSocket(address, p)
+        })
+        .build()
+
+    /** Compatibilidade para qualquer chamador que ainda nao mantenha um cliente compartilhado. */
     fun connect(
         config: VmessConnectionConfig,
         destHost: String,
         destPort: Int,
         protectSocket: (java.net.Socket) -> Boolean,
         timeoutMs: Int = 10_000
+    ): Pair<InputStream, OutputStream> = connect(
+        config = config,
+        destHost = destHost,
+        destPort = destPort,
+        client = createClient(protectSocket, timeoutMs),
+        timeoutMs = timeoutMs
+    )
+
+    /** Caminho usado em producao: um OkHttpClient compartilhado entre todos os canais VMess. */
+    fun connect(
+        config: VmessConnectionConfig,
+        destHost: String,
+        destPort: Int,
+        client: OkHttpClient,
+        timeoutMs: Int = 10_000
     ): Pair<InputStream, OutputStream> {
         val pipedOut = PipedOutputStream()
-        val pipedIn = PipedInputStream(pipedOut, 256 * 1024)
+        val pipedIn = PipedInputStream(pipedOut, RECEIVE_PIPE_BYTES)
         val transportClosed = AtomicBoolean(false)
         val writeClosed = AtomicBoolean(false)
-
-        val clientBuilder = OkHttpClient.Builder()
-            .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .pingInterval(20, TimeUnit.SECONDS)
-            .socketFactory(object : javax.net.SocketFactory() {
-                override fun createSocket(): java.net.Socket {
-                    val socket = java.net.Socket()
-                    socket.bind(java.net.InetSocketAddress(0))
-                    if (!protectSocket(socket)) {
-                        runCatching { socket.close() }
-                        throw IOException(
-                            "Não consegui isentar esta conexão da VPN (protect() falhou) — verifique " +
-                                "se \"Bloquear conexões sem VPN\" está desligado pra este app."
-                        )
-                    }
-                    return socket
-                }
-
-                override fun createSocket(host: String?, p: Int): java.net.Socket =
-                    createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
-
-                override fun createSocket(
-                    host: String?,
-                    p: Int,
-                    localHost: java.net.InetAddress?,
-                    localPort: Int
-                ) = createSocket(host, p)
-
-                override fun createSocket(host: java.net.InetAddress?, p: Int): java.net.Socket =
-                    createSocket().apply { connect(java.net.InetSocketAddress(host, p)) }
-
-                override fun createSocket(
-                    address: java.net.InetAddress?,
-                    p: Int,
-                    localAddress: java.net.InetAddress?,
-                    localPort: Int
-                ) = createSocket(address, p)
-            })
 
         val scheme = if (config.useTls) "wss" else "ws"
         val path = config.wsPath.ifBlank { "/" }
@@ -126,7 +161,7 @@ object VmessTransport {
             }
         }
 
-        val webSocket = clientBuilder.build().newWebSocket(requestBuilder.build(), listener)
+        val webSocket = client.newWebSocket(requestBuilder.build(), listener)
 
         fun closeTransport() {
             if (transportClosed.compareAndSet(false, true)) {
@@ -139,26 +174,59 @@ object VmessTransport {
         val opened = latch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
         if (!opened) {
             closeTransport()
-            throw IOException("Timeout ao abrir conexão WebSocket com o servidor VMess")
+            throw IOException("Timeout ao abrir conexao WebSocket com o servidor VMess")
         }
         failure?.let {
             closeTransport()
             throw IOException("Falha ao conectar WebSocket: ${it.message}")
         }
 
+        fun awaitSendCapacity(nextMessageBytes: Int) {
+            val startedAt = System.nanoTime()
+            while (webSocket.queueSize() + nextMessageBytes > WS_QUEUE_HIGH_WATER_BYTES) {
+                if (transportClosed.get()) {
+                    throw IOException("WebSocket VMess ja esta fechado")
+                }
+                val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
+                if (elapsedMs >= WS_QUEUE_DRAIN_TIMEOUT_MS) {
+                    throw IOException(
+                        "Fila WebSocket VMess nao drenou em ${WS_QUEUE_DRAIN_TIMEOUT_MS / 1000}s " +
+                            "(${webSocket.queueSize()} bytes pendentes)"
+                    )
+                }
+                try {
+                    Thread.sleep(1L)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IOException("Espera da fila WebSocket VMess foi interrompida", e)
+                }
+            }
+        }
+
         val rawSendStream = object : OutputStream() {
+            private val sendLock = Any()
+
             override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
 
             override fun write(b: ByteArray, off: Int, len: Int) {
-                if (writeClosed.get()) throw IOException("Escrita VMess já foi encerrada")
-                if (transportClosed.get()) throw IOException("WebSocket VMess já está fechado")
+                if (len <= 0) return
+                synchronized(sendLock) {
+                    if (writeClosed.get()) throw IOException("Escrita VMess ja foi encerrada")
+                    if (transportClosed.get()) throw IOException("WebSocket VMess ja esta fechado")
 
-                val sent = webSocket.send(ByteString.of(*b.copyOfRange(off, off + len)))
-                if (!sent) {
-                    transportClosed.set(true)
-                    webSocket.cancel()
-                    runCatching { pipedOut.close() }
-                    throw IOException("Falha ao enviar dados pelo WebSocket VMess")
+                    // WebSocket.send() retorna imediatamente e apenas enfileira dados.
+                    // Bloqueamos o produtor quando a fila passa da janela de seguranca,
+                    // preservando throughput sem chegar ao limite duro de 16 MiB do OkHttp.
+                    awaitSendCapacity(len)
+
+                    val payload = b.copyOfRange(off, off + len)
+                    val sent = webSocket.send(ByteString.of(*payload))
+                    if (!sent) {
+                        transportClosed.set(true)
+                        webSocket.cancel()
+                        runCatching { pipedOut.close() }
+                        throw IOException("Falha ao enviar dados pelo WebSocket VMess")
+                    }
                 }
             }
 
@@ -179,12 +247,23 @@ object VmessTransport {
         }
 
         try {
-            // VMess AEAD, ordem obrigatoria:
-            // 16B EAuID + 18B ALength + 8B Nonce + AHeader.
-            rawSendStream.write(request.authId)
-            rawSendStream.write(request.encryptedLength)
-            rawSendStream.write(request.connectionNonce)
-            rawSendStream.write(request.encryptedHeader)
+            // Uma unica mensagem WebSocket para o request VMess. Antes eram quatro
+            // mensagens pequenas separadas, gerando framing e agendamento extras.
+            val requestFrame = ByteArray(
+                request.authId.size +
+                    request.encryptedLength.size +
+                    request.connectionNonce.size +
+                    request.encryptedHeader.size
+            )
+            var offset = 0
+            System.arraycopy(request.authId, 0, requestFrame, offset, request.authId.size)
+            offset += request.authId.size
+            System.arraycopy(request.encryptedLength, 0, requestFrame, offset, request.encryptedLength.size)
+            offset += request.encryptedLength.size
+            System.arraycopy(request.connectionNonce, 0, requestFrame, offset, request.connectionNonce.size)
+            offset += request.connectionNonce.size
+            System.arraycopy(request.encryptedHeader, 0, requestFrame, offset, request.encryptedHeader.size)
+            rawSendStream.write(requestFrame)
         } catch (e: Exception) {
             closeTransport()
             throw e
