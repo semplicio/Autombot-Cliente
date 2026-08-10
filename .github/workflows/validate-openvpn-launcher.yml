@@ -1,0 +1,25 @@
+name: Validate OpenVPN launcher fix
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build OpenVPN PIE launcher
+        run: ./gradlew :app:prepareOpenVpnLauncher --stacktrace
+      - name: Verify generated ELF
+        run: |
+          file app/src/main/jniLibs/arm64-v8a/libovpnexec.so
+          readelf -h app/src/main/jniLibs/arm64-v8a/libovpnexec.so | grep -E 'Type:|Machine:|Entry point'
+          readelf -d app/src/main/jniLibs/arm64-v8a/libovpnexec.so | grep 'libopenvpn.so'
+      - name: Compile Kotlin
+        run: ./gradlew :app:compileDebugKotlin --stacktrace
