@@ -24,5 +24,8 @@ jobs:
           readelf -d "$BIN" || true
           readelf -n "$BIN" || true
           readelf -A "$BIN" || true
+          echo '--- exported entry symbols ---'
+          readelf -Ws "$BIN" | grep -E '[[:space:]](main|openvpn_main)$' || true
+          nm -D "$BIN" | grep -E '[[:space:]](main|openvpn_main)$' || true
           echo '--- strings: build/compiler/crypto hints ---'
           strings "$BIN" | grep -E -i 'openvpn|openssl|clang|gcc|android|aarch64|armv8|march|mcpu|musl|glibc|bionic' | head -n 250 || true
