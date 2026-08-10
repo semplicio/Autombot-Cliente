@@ -1,6 +1,7 @@
 package com.autombot.client.protocols.openvpn
 
 import android.content.Context
+import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.os.ParcelFileDescriptor
@@ -9,6 +10,7 @@ import com.autombot.client.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -18,6 +20,7 @@ import java.io.File
 import java.io.FileDescriptor
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.util.ArrayDeque
 import kotlin.coroutines.coroutineContext
 
 /** Uma rota que o OpenVPN pediu para instalar na interface VPN do Android. */
@@ -44,11 +47,10 @@ data class OpenVpnTunConfig(
 /**
  * Controla o binário OpenVPN compilado com TARGET_ANDROID pela Management Interface.
  *
- * No Android, TCP localhost NÃO é suficiente: PROTECTFD e OPENTUN precisam transportar
- * descritores de arquivo com SCM_RIGHTS. Por isso usamos um UNIX-domain socket real
- * e android.net.LocalSocket, que suporta getAncillaryFileDescriptors() e
- * setFileDescriptorsForSend(). Esse é o mecanismo descrito pelo próprio OpenVPN em
- * doc/android.txt.
+ * O fluxo segue o mesmo desenho do OpenVPN for Android (ics-openvpn): o APP cria
+ * primeiro o LocalServerSocket UNIX e o processo OpenVPN é iniciado com
+ * --management-client para se conectar nele. Isso é importante no Android porque
+ * PROTECTFD e OPENTUN trafegam descritores reais via SCM_RIGHTS.
  */
 class OpenVpnManagementClient(
     private val context: Context,
@@ -63,6 +65,8 @@ class OpenVpnManagementClient(
 ) {
     private var process: Process? = null
     private var managementSocket: LocalSocket? = null
+    private var managementServerSocket: LocalServerSocket? = null
+    private var managementServerBackingSocket: LocalSocket? = null
     private var managementSocketPath: File? = null
     private var tunPfd: ParcelFileDescriptor? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -99,11 +103,44 @@ class OpenVpnManagementClient(
 
     private fun cleanup() {
         runCatching { managementSocket?.close() }
+        runCatching { managementServerSocket?.close() }
+        runCatching { managementServerBackingSocket?.close() }
         runCatching { tunPfd?.close() }
         managementSocket = null
+        managementServerSocket = null
+        managementServerBackingSocket = null
         tunPfd = null
         managementSocketPath?.let { runCatching { it.delete() } }
         managementSocketPath = null
+    }
+
+    private fun openManagementServer(socketFile: File): LocalServerSocket? {
+        runCatching { socketFile.delete() }
+
+        val backing = LocalSocket(LocalSocket.SOCKET_STREAM)
+        return try {
+            backing.bind(
+                LocalSocketAddress(
+                    socketFile.absolutePath,
+                    LocalSocketAddress.Namespace.FILESYSTEM
+                )
+            )
+            val server = LocalServerSocket(backing.fileDescriptor)
+            managementServerBackingSocket = backing
+            managementServerSocket = server
+            AppLog.log(
+                "OpenVPN \"$connectionName\": Management UNIX preparado pelo app em ${socketFile.absolutePath}",
+                AppLog.Level.INFO
+            )
+            server
+        } catch (e: Exception) {
+            runCatching { backing.close() }
+            AppLog.log(
+                "OpenVPN \"$connectionName\": falha ao criar Management UNIX local — ${e.message}",
+                AppLog.Level.ERROR
+            )
+            null
+        }
     }
 
     private suspend fun runManagement() {
@@ -127,22 +164,31 @@ class OpenVpnManagementClient(
             context.cacheDir,
             "ovpn_${Integer.toHexString(connectionName.hashCode())}_${android.os.Process.myPid()}.sock"
         )
-        runCatching { socketFile.delete() }
         managementSocketPath = socketFile
+
+        // O app precisa estar ouvindo ANTES do OpenVPN começar. Este é o padrão usado
+        // pelo OpenVPN for Android: LocalServerSocket no app + --management-client.
+        val server = openManagementServer(socketFile)
+        if (server == null) {
+            val error = "Não foi possível preparar a Management Interface UNIX"
+            onStateChange(false, error)
+            running = false
+            cleanup()
+            return
+        }
 
         val processArgs = listOf(
             binary.absolutePath,
             "--config", configFile.absolutePath,
-            // OpenVPN fica como servidor da Management Interface; o app conecta
-            // pelo pathname UNIX e ambos conseguem trocar FDs com SCM_RIGHTS.
             "--management", socketFile.absolutePath, "unix",
+            "--management-client",
             "--management-query-passwords",
             "--management-hold",
             "--verb", "3"
         )
 
         AppLog.log(
-            "OpenVPN \"$connectionName\": iniciando com management UNIX em ${socketFile.absolutePath}",
+            "OpenVPN \"$connectionName\": iniciando; processo vai conectar ao Management UNIX do app",
             AppLog.Level.INFO
         )
 
@@ -159,25 +205,48 @@ class OpenVpnManagementClient(
         }
         process = proc
 
-        scope.launch(Dispatchers.IO) {
+        // Mantém as últimas linhas para que uma saída muito rápida do binário nunca
+        // resulte apenas em "encerrou antes de abrir management" sem a causa real.
+        val recentProcessOutput = ArrayDeque<String>()
+        val outputJob = scope.launch(Dispatchers.IO) {
             try {
                 BufferedReader(InputStreamReader(proc.inputStream)).forEachLine { line ->
+                    synchronized(recentProcessOutput) {
+                        if (recentProcessOutput.size >= 20) recentProcessOutput.removeFirst()
+                        recentProcessOutput.addLast(line)
+                    }
                     AppLog.log("OpenVPN \"$connectionName\" (processo): $line", AppLog.Level.INFO)
                 }
             } catch (e: Exception) {
-                AppLog.log(
-                    "OpenVPN \"$connectionName\" (processo): saída encerrada — ${e.message}",
-                    AppLog.Level.INFO
-                )
+                if (running) {
+                    AppLog.log(
+                        "OpenVPN \"$connectionName\" (processo): saída encerrada — ${e.message}",
+                        AppLog.Level.INFO
+                    )
+                }
             }
         }
 
-        val socket = connectManagementSocket(socketFile, proc)
+        val socket = acceptManagementSocket(server, proc)
         if (socket == null) {
-            val error = if (proc.isAlive) {
-                "Management UNIX do OpenVPN não ficou disponível em 30s"
-            } else {
-                "Processo OpenVPN encerrou antes de abrir a Management Interface"
+            if (!proc.isAlive) {
+                try {
+                    outputJob.join()
+                } catch (_: Exception) {
+                }
+            }
+
+            val exitCode = if (!proc.isAlive) runCatching { proc.exitValue() }.getOrNull() else null
+            val tail = synchronized(recentProcessOutput) {
+                recentProcessOutput.joinToString(" | ").take(1200)
+            }
+            val error = when {
+                !proc.isAlive && tail.isNotBlank() ->
+                    "OpenVPN encerrou antes da Management Interface (exit=${exitCode ?: "?"}): $tail"
+                !proc.isAlive ->
+                    "Processo OpenVPN encerrou antes de abrir a Management Interface (exit=${exitCode ?: "?"})"
+                else ->
+                    "OpenVPN não conectou à Management Interface UNIX do app em 30s"
             }
             AppLog.log("OpenVPN \"$connectionName\": $error", AppLog.Level.ERROR)
             onStateChange(false, error)
@@ -218,41 +287,46 @@ class OpenVpnManagementClient(
             if (wasConnected) {
                 onStateChange(false, null)
             } else if (lastFatalError == null && !proc.isAlive) {
-                onStateChange(false, "Processo OpenVPN encerrou antes de conectar")
+                val exitCode = runCatching { proc.exitValue() }.getOrNull()
+                onStateChange(false, "Processo OpenVPN encerrou antes de conectar (exit=${exitCode ?: "?"})")
             }
             cleanup()
         }
     }
 
-    private suspend fun connectManagementSocket(socketFile: File, proc: Process): LocalSocket? {
-        val deadline = System.currentTimeMillis() + 30_000L
-        var lastError: String? = null
-
-        while (running && proc.isAlive && System.currentTimeMillis() < deadline) {
-            val candidate = LocalSocket(LocalSocket.SOCKET_STREAM)
+    /**
+     * O LocalServerSocket não expõe timeout. Aceitamos em uma coroutine IO e, em
+     * paralelo, observamos o processo. Se ele morrer ou exceder 30s, fechar o server
+     * desbloqueia accept() imediatamente.
+     */
+    private suspend fun acceptManagementSocket(server: LocalServerSocket, proc: Process): LocalSocket? {
+        val acceptDeferred = scope.async(Dispatchers.IO) {
             try {
-                candidate.connect(
-                    LocalSocketAddress(
-                        socketFile.absolutePath,
-                        LocalSocketAddress.Namespace.FILESYSTEM
-                    ),
-                    1000
-                )
-                return candidate
-            } catch (e: Exception) {
-                lastError = e.message
-                runCatching { candidate.close() }
-                delay(100)
+                server.accept()
+            } catch (_: Exception) {
+                null
             }
         }
 
-        if (!lastError.isNullOrBlank()) {
-            AppLog.log(
-                "OpenVPN \"$connectionName\": última falha ao conectar no management UNIX: $lastError",
-                AppLog.Level.ERROR
-            )
+        val deadline = System.currentTimeMillis() + 30_000L
+        while (
+            running &&
+            proc.isAlive &&
+            !acceptDeferred.isCompleted &&
+            System.currentTimeMillis() < deadline
+        ) {
+            delay(50)
         }
-        return null
+
+        if (!acceptDeferred.isCompleted) {
+            runCatching { server.close() }
+        }
+
+        return try {
+            acceptDeferred.await()
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private data class ManagementLine(
@@ -383,7 +457,6 @@ class OpenVpnManagementClient(
 
             "PERSIST_TUN_ACTION" -> {
                 closeAncillaryFds(ancillaryFds)
-                // Android moderno suporta abrir a nova interface antes de fechar a antiga.
                 sendNeedOk(type, "OPEN_BEFORE_CLOSE")
             }
 
@@ -551,7 +624,6 @@ class OpenVpnManagementClient(
             val socket = managementSocket
                 ?: throw IllegalStateException("Management Interface não está conectada")
 
-            // O OpenVPN espera o fd em SCM_RIGHTS junto da resposta textual.
             socket.setFileDescriptorsForSend(arrayOf(pfd.fileDescriptor))
             if (!sendCommandRaw("needok 'OPENTUN' ok\n")) {
                 throw IllegalStateException("Falha ao enviar resposta OPENTUN")
