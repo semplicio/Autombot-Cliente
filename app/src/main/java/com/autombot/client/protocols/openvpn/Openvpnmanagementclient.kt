@@ -6,11 +6,12 @@ import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.os.ParcelFileDescriptor
 import android.system.Os
+import android.system.OsConstants
+import android.system.StructPollfd
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -246,7 +247,7 @@ class OpenVpnManagementClient(
                 !proc.isAlive ->
                     "Processo OpenVPN encerrou antes de abrir a Management Interface (exit=${exitCode ?: "?"})"
                 else ->
-                    "OpenVPN não conectou à Management Interface UNIX do app em 30s"
+                    "OpenVPN não conectou à Management Interface UNIX do app em 15s"
             }
             AppLog.log("OpenVPN \"$connectionName\": $error", AppLog.Level.ERROR)
             onStateChange(false, error)
@@ -295,38 +296,70 @@ class OpenVpnManagementClient(
     }
 
     /**
-     * O LocalServerSocket não expõe timeout. Aceitamos em uma coroutine IO e, em
-     * paralelo, observamos o processo. Se ele morrer ou exceder 30s, fechar o server
-     * desbloqueia accept() imediatamente.
+     * LocalServerSocket(FileDescriptor) não é dono do descritor recebido. No Android,
+     * close() nessa instância NÃO desbloqueia accept(); o FD continua pertencendo ao
+     * LocalSocket usado no bind. O código anterior esperava esse desbloqueio e podia
+     * ficar preso para sempre em acceptDeferred.await().
+     *
+     * Aqui esperamos o FD ficar legível com poll() em janelas curtas. Só chamamos
+     * accept() quando já existe uma conexão pendente, então o timeout é real e nunca
+     * deixa a UI em carregamento infinito.
      */
     private suspend fun acceptManagementSocket(server: LocalServerSocket, proc: Process): LocalSocket? {
-        val acceptDeferred = scope.async(Dispatchers.IO) {
-            try {
-                server.accept()
-            } catch (_: Exception) {
-                null
+        val pollFd = StructPollfd().apply {
+            fd = server.fileDescriptor
+            events = OsConstants.POLLIN.toShort()
+        }
+        val deadline = System.currentTimeMillis() + 15_000L
+        var nextProgressLog = System.currentTimeMillis() + 5_000L
+
+        while (running && proc.isAlive && System.currentTimeMillis() < deadline) {
+            pollFd.revents = 0
+            val ready = try {
+                Os.poll(arrayOf(pollFd), 250)
+            } catch (e: Exception) {
+                AppLog.log(
+                    "OpenVPN \"$connectionName\": falha aguardando Management UNIX — ${e.message}",
+                    AppLog.Level.ERROR
+                )
+                return null
+            }
+
+            val revents = pollFd.revents.toInt()
+            if (ready > 0 && (revents and OsConstants.POLLIN) != 0) {
+                return try {
+                    server.accept()
+                } catch (e: Exception) {
+                    AppLog.log(
+                        "OpenVPN \"$connectionName\": falha ao aceitar Management UNIX — ${e.message}",
+                        AppLog.Level.ERROR
+                    )
+                    null
+                }
+            }
+
+            val terminalEvents = OsConstants.POLLERR or OsConstants.POLLHUP or OsConstants.POLLNVAL
+            if ((revents and terminalEvents) != 0) {
+                AppLog.log(
+                    "OpenVPN \"$connectionName\": socket Management UNIX ficou inválido (revents=$revents)",
+                    AppLog.Level.ERROR
+                )
+                return null
+            }
+
+            val now = System.currentTimeMillis()
+            if (now >= nextProgressLog) {
+                val remaining = ((deadline - now).coerceAtLeast(0L) + 999L) / 1000L
+                AppLog.log(
+                    "OpenVPN \"$connectionName\": aguardando processo conectar ao Management UNIX " +
+                        "(processo ativo=${proc.isAlive}, restante=${remaining}s)",
+                    AppLog.Level.INFO
+                )
+                nextProgressLog += 5_000L
             }
         }
 
-        val deadline = System.currentTimeMillis() + 30_000L
-        while (
-            running &&
-            proc.isAlive &&
-            !acceptDeferred.isCompleted &&
-            System.currentTimeMillis() < deadline
-        ) {
-            delay(50)
-        }
-
-        if (!acceptDeferred.isCompleted) {
-            runCatching { server.close() }
-        }
-
-        return try {
-            acceptDeferred.await()
-        } catch (_: Exception) {
-            null
-        }
+        return null
     }
 
     private data class ManagementLine(
