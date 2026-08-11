@@ -22,9 +22,12 @@ import com.autombot.client.protocols.wireguard.WireGuardManager
 import com.autombot.client.util.AppLog
 
 /**
- * Pega a resposta de GET /api/v1/configs.php e importa cada protocolo disponível
- * no manager certo. A mesma rotina também é usada quando o usuário aplica uma
- * atualização de configuração pelo Dashboard.
+ * Importa as configurações do painel e respeita a rota preferida indicada pelo Core.
+ *
+ * O contrato novo pode trazer várias rotas para a mesma credencial (por exemplo,
+ * VMess/VLESS em HTTP/80 direto + CDN/443 + origem TLS). O app usa a URI da rota
+ * preferida/recomendada e mantém compatibilidade com painéis antigos que ainda
+ * entregam somente um campo ``uri``.
  */
 suspend fun importPanelConfigs(
     context: Context,
@@ -48,9 +51,21 @@ suspend fun importPanelConfigs(
         AppLog.log(msg, AppLog.Level.ERROR)
     }
 
+    fun registrarRota(protocolo: String, item: ProtocolPackage) {
+        item.selectedRoute()?.let { route ->
+            AppLog.log(
+                "Painel: $protocolo usando rota ${route.id} — ${route.host ?: "?"}:${route.port ?: "?"} " +
+                    "${route.transport ?: ""}${if (route.tls) " + TLS" else ""}${route.path?.let { " path=$it" } ?: ""}",
+                AppLog.Level.INFO
+            )
+        }
+    }
+
     val itemVmess = response.protocols["vmess"]
-    if (itemVmess != null && itemVmess.success && itemVmess.uri != null) {
-        runCatching { vmessManager.addProfile(parseVmessUri(itemVmess.uri)) }
+    val uriVmess = itemVmess?.effectiveUri()
+    if (itemVmess != null && itemVmess.success && !uriVmess.isNullOrBlank()) {
+        registrarRota("vmess", itemVmess)
+        runCatching { vmessManager.addProfile(parseVmessUri(uriVmess)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("vmess", it.message ?: "erro ao interpretar a URI") }
     } else {
@@ -59,8 +74,10 @@ suspend fun importPanelConfigs(
     }
 
     val itemVless = response.protocols["vless"]
-    if (itemVless != null && itemVless.success && itemVless.uri != null) {
-        runCatching { vlessManager.addProfile(parseVlessUri(itemVless.uri)) }
+    val uriVless = itemVless?.effectiveUri()
+    if (itemVless != null && itemVless.success && !uriVless.isNullOrBlank()) {
+        registrarRota("vless", itemVless)
+        runCatching { vlessManager.addProfile(parseVlessUri(uriVless)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("vless", it.message ?: "erro ao interpretar a URI") }
     } else {
@@ -69,8 +86,10 @@ suspend fun importPanelConfigs(
     }
 
     val itemTrojan = response.protocols["trojan"]
-    if (itemTrojan != null && itemTrojan.success && itemTrojan.uri != null) {
-        runCatching { trojanManager.addProfile(parseTrojanUri(itemTrojan.uri)) }
+    val uriTrojan = itemTrojan?.effectiveUri()
+    if (itemTrojan != null && itemTrojan.success && !uriTrojan.isNullOrBlank()) {
+        registrarRota("trojan", itemTrojan)
+        runCatching { trojanManager.addProfile(parseTrojanUri(uriTrojan)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("trojan", it.message ?: "erro ao interpretar a URI") }
     } else {
@@ -79,8 +98,10 @@ suspend fun importPanelConfigs(
     }
 
     val itemSs = response.protocols["shadowsocks"]
-    if (itemSs != null && itemSs.success && itemSs.uri != null) {
-        runCatching { shadowsocksManager.addProfile(parseShadowsocksUri(itemSs.uri)) }
+    val uriSs = itemSs?.effectiveUri()
+    if (itemSs != null && itemSs.success && !uriSs.isNullOrBlank()) {
+        registrarRota("shadowsocks", itemSs)
+        runCatching { shadowsocksManager.addProfile(parseShadowsocksUri(uriSs)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("shadowsocks", it.message ?: "erro ao interpretar a URI") }
     } else {
@@ -88,15 +109,13 @@ suspend fun importPanelConfigs(
         runCatching { shadowsocksManager.removeProfile(nomeBase) }
     }
 
-    // Hysteria2 e TUIC já chegam do AutomBot Core como links completos. O parser
-    // compartilhado do manager preserva TLS/SNI, Salamander, UUID, ALPN e controle
-    // de congestionamento. Como os dois podem usar o mesmo nome de usuário, a
-    // identidade interna é tipo+nome e um nunca sobrescreve o outro.
     fun importModern(protocolKey: String, expectedType: ModernProtocolType) {
         val item = response.protocols[protocolKey]
+        val uri = item?.effectiveUri()
         val managedNames = setOf(response.usuario, nomeBase).filter { it.isNotBlank() }.toSet()
-        if (item != null && item.success && !item.uri.isNullOrBlank()) {
-            runCatching { modernManager.importUri(item.uri) }
+        if (item != null && item.success && !uri.isNullOrBlank()) {
+            registrarRota(protocolKey, item)
+            runCatching { modernManager.importUri(uri) }
                 .onSuccess { parsed ->
                     if (parsed.type != expectedType) {
                         modernManager.removeProfile(parsed.type, parsed.connectionName)
@@ -109,8 +128,8 @@ suspend fun importPanelConfigs(
         } else {
             if (item != null && !item.success) {
                 avisar(protocolKey, item.error ?: "sem sucesso")
-            } else if (item != null && item.success && item.uri.isNullOrBlank()) {
-                avisar(protocolKey, "o painel não devolveu a URI")
+            } else if (item != null && item.success && uri.isNullOrBlank()) {
+                avisar(protocolKey, "o painel não devolveu uma URI utilizável")
             }
             modernManager.removeManagedProfiles(expectedType, managedNames)
         }
@@ -132,6 +151,7 @@ suspend fun importPanelConfigs(
 
     val itemOvpn = response.protocols["openvpn"]
     val confOvpn = itemOvpn?.raw?.optString("config")?.takeIf { it.isNotBlank() }
+        ?: itemOvpn?.wireGuardConf
     if (itemOvpn != null && itemOvpn.success && confOvpn != null) {
         runCatching {
             val config = saveOpenVpnConfig(context, nomeBase, confOvpn)
