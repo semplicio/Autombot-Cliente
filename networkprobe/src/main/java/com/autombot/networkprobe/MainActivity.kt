@@ -91,6 +91,8 @@ private fun ProbeScreen(
     var tcpPort by remember { mutableStateOf("443") }
     var udpPort by remember { mutableStateOf("443") }
     var wsPath by remember { mutableStateOf("/") }
+    var extraTcpPorts by remember { mutableStateOf("80,109,2222,8080,8443") }
+    var extraUdpPorts by remember { mutableStateOf("36712,44300,51820") }
     var running by remember { mutableStateOf(false) }
     var report by remember { mutableStateOf<ProbeReport?>(null) }
     var validationError by remember { mutableStateOf<String?>(null) }
@@ -102,9 +104,7 @@ private fun ProbeScreen(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            item {
-                HeaderCard()
-            }
+            item { HeaderCard() }
 
             item {
                 EndpointCard(
@@ -115,14 +115,24 @@ private fun ProbeScreen(
                     udpPort = udpPort,
                     onUdpPortChange = { udpPort = it.filter(Char::isDigit); validationError = null },
                     wsPath = wsPath,
-                    onWsPathChange = { wsPath = it; validationError = null }
+                    onWsPathChange = { wsPath = it; validationError = null },
+                    extraTcpPorts = extraTcpPorts,
+                    onExtraTcpPortsChange = {
+                        extraTcpPorts = sanitizePortList(it)
+                        validationError = null
+                    },
+                    extraUdpPorts = extraUdpPorts,
+                    onExtraUdpPortsChange = {
+                        extraUdpPorts = sanitizePortList(it)
+                        validationError = null
+                    }
                 )
             }
 
+            item { ToolsCard() }
+
             validationError?.let { error ->
-                item {
-                    Text(error, color = Fail, fontSize = 12.sp)
-                }
+                item { Text(error, color = Fail, fontSize = 12.sp) }
             }
 
             item {
@@ -130,10 +140,15 @@ private fun ProbeScreen(
                     onClick = {
                         val tcp = tcpPort.toIntOrNull()
                         val udp = udpPort.toIntOrNull()
+                        val tcpExtras = parsePorts(extraTcpPorts)
+                        val udpExtras = parsePorts(extraUdpPorts)
+
                         when {
                             host.isBlank() -> validationError = "Informe um domínio/host da sua infraestrutura."
-                            tcp == null || tcp !in 1..65535 -> validationError = "Porta TCP inválida."
-                            udp == null || udp !in 1..65535 -> validationError = "Porta UDP inválida."
+                            tcp == null || tcp !in 1..65535 -> validationError = "Porta TCP principal inválida."
+                            udp == null || udp !in 1..65535 -> validationError = "Porta UDP principal inválida."
+                            tcpExtras == null -> validationError = "Lista de portas TCP extras inválida."
+                            udpExtras == null -> validationError = "Lista de portas UDP extras inválida."
                             else -> {
                                 validationError = null
                                 running = true
@@ -144,7 +159,9 @@ private fun ProbeScreen(
                                             host = host.trim(),
                                             tcpPort = tcp,
                                             udpPort = udp,
-                                            webSocketPath = wsPath.ifBlank { "/" }
+                                            webSocketPath = wsPath.ifBlank { "/" },
+                                            extraTcpPorts = tcpExtras,
+                                            extraUdpPorts = udpExtras
                                         )
                                     )
                                     running = false
@@ -153,7 +170,7 @@ private fun ProbeScreen(
                         }
                     },
                     enabled = !running,
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    modifier = Modifier.fillMaxWidth().height(54.dp),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Accent)
                 ) {
@@ -164,25 +181,23 @@ private fun ProbeScreen(
                             color = Color.White
                         )
                         Spacer(Modifier.size(10.dp))
-                        Text("Analisando rede…")
+                        Text("Executando matriz de diagnóstico…")
                     } else {
-                        Text("Executar diagnóstico", fontWeight = FontWeight.SemiBold)
+                        Text("Executar diagnóstico completo", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
 
             report?.let { current ->
-                item {
-                    NetworkSummaryCard(current)
-                }
+                item { NetworkSummaryCard(current) }
+                item { NetworkDetailsCard(current) }
 
                 items(current.results) { result ->
                     ResultCard(result)
                 }
 
-                item {
-                    RecommendationCard(current.recommendation)
-                }
+                item { TransportHintsCard(current.transportHints) }
+                item { RecommendationCard(current.recommendation) }
 
                 item {
                     Button(
@@ -198,7 +213,7 @@ private fun ProbeScreen(
 
             item {
                 Text(
-                    "O scanner testa somente o endpoint informado. Ele não procura domínios de terceiros, exceções de cobrança ou zero-rating.",
+                    "O Network Probe testa somente o endpoint informado e as portas escolhidas. Ele diferencia timeout, porta recusada, TLS, WSS e resposta UDP; não procura domínios de terceiros, exceções de cobrança ou zero-rating.",
                     color = TextDim,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
@@ -225,7 +240,7 @@ private fun HeaderCard() {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "Detecta a capacidade real da rede física antes de escolher o transporte VPN.",
+            "Diagnóstico em camadas para descobrir onde a conexão quebra e quais transportes da sua infraestrutura respondem naquela rede.",
             color = TextDim,
             fontSize = 13.sp,
             lineHeight = 18.sp
@@ -242,7 +257,11 @@ private fun EndpointCard(
     udpPort: String,
     onUdpPortChange: (String) -> Unit,
     wsPath: String,
-    onWsPathChange: (String) -> Unit
+    onWsPathChange: (String) -> Unit,
+    extraTcpPorts: String,
+    onExtraTcpPortsChange: (String) -> Unit,
+    extraUdpPorts: String,
+    onExtraUdpPortsChange: (String) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -252,31 +271,73 @@ private fun EndpointCard(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text("Endpoint autorizado", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+
         ProbeTextField(
             value = host,
             onValueChange = onHostChange,
             label = "Domínio / host"
         )
+
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             ProbeTextField(
                 value = tcpPort,
                 onValueChange = onTcpPortChange,
-                label = "TCP",
+                label = "TCP principal",
                 keyboardType = KeyboardType.Number,
                 modifier = Modifier.weight(1f)
             )
             ProbeTextField(
                 value = udpPort,
                 onValueChange = onUdpPortChange,
-                label = "UDP",
+                label = "UDP principal",
                 keyboardType = KeyboardType.Number,
                 modifier = Modifier.weight(1f)
             )
         }
+
         ProbeTextField(
             value = wsPath,
             onValueChange = onWsPathChange,
             label = "WebSocket path"
+        )
+
+        ProbeTextField(
+            value = extraTcpPorts,
+            onValueChange = onExtraTcpPortsChange,
+            label = "Portas TCP extras (separadas por vírgula)",
+            keyboardType = KeyboardType.Number
+        )
+
+        ProbeTextField(
+            value = extraUdpPorts,
+            onValueChange = onExtraUdpPortsChange,
+            label = "Portas UDP extras (separadas por vírgula)",
+            keyboardType = KeyboardType.Number
+        )
+    }
+}
+
+@Composable
+private fun ToolsCard() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(SurfaceColor, RoundedCornerShape(18.dp))
+            .padding(16.dp)
+    ) {
+        Text("Ferramentas do diagnóstico", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(7.dp))
+        Text(
+            "• Estado/validação da rede, MTU, DNS e detecção de CGNAT\n" +
+                "• Resolução A/AAAA e comparação IPv4/IPv6\n" +
+                "• Matriz de portas TCP com distinção entre timeout e porta recusada\n" +
+                "• TLS/SNI, validade do certificado e ALPN\n" +
+                "• HTTPS e WebSocket TLS\n" +
+                "• Matriz UDP para Hysteria2, TUIC, WireGuard e portas personalizadas\n" +
+                "• Pontuação de capacidade e candidatos de transporte",
+            color = TextDim,
+            fontSize = 11.sp,
+            lineHeight = 17.sp
         )
     }
 }
@@ -327,6 +388,17 @@ private fun NetworkSummaryCard(report: ProbeReport) {
             fontSize = 17.sp,
             fontWeight = FontWeight.Bold
         )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Capacidade observada: ${report.score}%",
+            color = when {
+                report.score >= 70 -> Pass
+                report.score >= 40 -> Warn
+                else -> Fail
+            },
+            fontWeight = FontWeight.Bold,
+            fontSize = 13.sp
+        )
         if (report.localAddresses.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
             Text(
@@ -335,6 +407,37 @@ private fun NetworkSummaryCard(report: ProbeReport) {
                 fontSize = 11.sp
             )
         }
+    }
+}
+
+@Composable
+private fun NetworkDetailsCard(report: ProbeReport) {
+    val info = report.networkInfo
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(SurfaceColor, RoundedCornerShape(18.dp))
+            .padding(16.dp)
+    ) {
+        Text("Detalhes da rede", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(7.dp))
+        Text(
+            buildString {
+                append("Validada: ").append(if (info.validated) "sim" else "não")
+                append(" · Medida: ").append(if (info.metered) "sim" else "não")
+                info.mtu?.let { append(" · MTU: ").append(it) }
+                append("\nIPv4: ").append(if (info.hasIpv4) "sim" else "não")
+                append(" · IPv6: ").append(if (info.hasIpv6) "sim" else "não")
+                info.interfaceName?.let { append(" · Interface: ").append(it) }
+                if (info.dnsServers.isNotEmpty()) {
+                    append("\nDNS: ").append(info.dnsServers.joinToString())
+                }
+                info.natHint?.let { append("\nNAT: ").append(it) }
+            },
+            color = TextDim,
+            fontSize = 11.sp,
+            lineHeight = 17.sp
+        )
     }
 }
 
@@ -381,6 +484,23 @@ private fun ResultCard(result: ProbeResult) {
 }
 
 @Composable
+private fun TransportHintsCard(hints: List<String>) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(SurfaceColor, RoundedCornerShape(18.dp))
+            .padding(16.dp)
+    ) {
+        Text("Transportes candidatos", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(7.dp))
+        hints.forEach { hint ->
+            Text("• $hint", color = TextDim, fontSize = 11.sp, lineHeight = 17.sp)
+            Spacer(Modifier.height(4.dp))
+        }
+    }
+}
+
+@Composable
 private fun RecommendationCard(text: String) {
     Column(
         modifier = Modifier
@@ -388,10 +508,25 @@ private fun RecommendationCard(text: String) {
             .background(Accent.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
             .padding(16.dp)
     ) {
-        Text("Recomendação", color = Accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Text("Diagnóstico", color = Accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(5.dp))
         Text(text, color = TextPrimary, fontSize = 13.sp, lineHeight = 19.sp)
     }
+}
+
+private fun sanitizePortList(value: String): String =
+    value.filter { it.isDigit() || it == ',' || it == ';' || it.isWhitespace() }
+
+private fun parsePorts(value: String): List<Int>? {
+    if (value.isBlank()) return emptyList()
+    val tokens = value.split(',', ';', ' ', '\n', '\t').filter { it.isNotBlank() }
+    val ports = mutableListOf<Int>()
+    for (token in tokens) {
+        val port = token.toIntOrNull() ?: return null
+        if (port !in 1..65535) return null
+        if (port !in ports) ports += port
+    }
+    return ports.take(8)
 }
 
 private val Background = Color(0xFF120E1B)
