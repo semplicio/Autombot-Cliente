@@ -11,10 +11,13 @@ import java.util.Locale
 
 object ReportShare {
     fun share(activity: Activity, json: String) {
+        val enrichedJson = DiagnosticReportEnhancer.enrich(json)
+        val readableText = DiagnosticReportEnhancer.readableShareText(enrichedJson)
+
         val dir = File(activity.cacheDir, "shared_reports").apply { mkdirs() }
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val file = File(dir, "autombot-network-probe-$stamp.json")
-        file.writeText(json, Charsets.UTF_8)
+        file.writeText(enrichedJson, Charsets.UTF_8)
 
         val uri = FileProvider.getUriForFile(
             activity,
@@ -25,7 +28,7 @@ object ReportShare {
         val sendFile = Intent(Intent.ACTION_SEND).apply {
             type = "application/json"
             putExtra(Intent.EXTRA_SUBJECT, "AutomBot Network Probe")
-            putExtra(Intent.EXTRA_TEXT, "Diagnóstico exportado pelo AutomBot Network Probe.")
+            putExtra(Intent.EXTRA_TEXT, readableText)
             putExtra(Intent.EXTRA_STREAM, uri)
             clipData = ClipData.newRawUri("AutomBot Network Probe JSON", uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
