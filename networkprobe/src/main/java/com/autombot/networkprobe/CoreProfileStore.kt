@@ -22,7 +22,9 @@ data class CoreProtocolProfile(
     val transport: String,
     val tls: Boolean,
     val path: String?,
-    val sni: String?
+    val sni: String?,
+    val originHost: String? = null,
+    val originPort: Int? = null
 )
 
 data class CoreProfileSnapshot(
@@ -105,6 +107,11 @@ data class CoreProfileSnapshot(
                 }
                 val host = item.optString("host")
                 if (host.isBlank() || ports.isEmpty()) continue
+                val origin = item.optJSONObject("origin")
+                val originHost = origin?.optString("host")
+                    ?.takeIf { it.isNotBlank() && it != "null" }
+                val originPort = origin?.optInt("port", -1)
+                    ?.takeIf { it in 1..65535 }
                 protocols += CoreProtocolProfile(
                     id = item.optString("id", item.optString("type", "unknown")),
                     type = item.optString("type", "unknown"),
@@ -113,7 +120,9 @@ data class CoreProfileSnapshot(
                     transport = item.optString("transport", "tcp"),
                     tls = item.optBoolean("tls", false),
                     path = item.optString("path").takeIf { it.isNotBlank() && it != "null" },
-                    sni = item.optString("sni").takeIf { it.isNotBlank() && it != "null" }
+                    sni = item.optString("sni").takeIf { it.isNotBlank() && it != "null" },
+                    originHost = originHost,
+                    originPort = originPort
                 )
             }
 
