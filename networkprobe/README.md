@@ -1,12 +1,12 @@
 # AutomBot Network Probe
 
-Aplicativo Android separado para medir a capacidade real da rede física antes de escolher um transporte no AutomBot Connect.
+Aplicativo Android separado para medir a capacidade real da rede física antes de escolher um transporte no AutomBot Connect e para transformar o diagnóstico em recomendações operacionais para o AutomBot Core.
 
 ## Objetivo
 
 O probe testa **somente endpoints informados pelo operador**. Ele não procura domínios de terceiros, exceções de cobrança, zero-rating ou formas de obter acesso não autorizado.
 
-## Testes da v0.3
+## Testes da v0.4
 
 - Detecta Wi‑Fi / rede móvel e evita usar uma VPN já ativa como rede de teste.
 - Exibe validação da rede, interface, MTU, DNS, IPv4/IPv6 e indício de CGNAT/NAT privado.
@@ -16,11 +16,48 @@ O probe testa **somente endpoints informados pelo operador**. Ele não procura d
 - Faz handshake TLS/SNI com validação do certificado.
 - Faz requisição HTTPS e tenta upgrade WebSocket TLS no path configurado.
 - Faz matriz de portas UDP configuráveis.
-- Gera pontuação de capacidade, candidatos de transporte, diagnóstico contextual e relatório JSON.
+- Gera pontuação de capacidade, candidatos de transporte e diagnóstico contextual.
+- Ao exportar o relatório, gera também um **Plano de Infraestrutura AutomCore**.
+- Gera um **Manual de Conexão AutomBot Connect** com perfis confirmados/candidatos.
+- O manual inclui orientação de payload somente para o próprio endpoint testado e separa payload direto, WebSocket nativo e HTTP CONNECT via Proxy Analyzer.
+- Quando o caminho direto principal falha, mas portas HTTP respondem, o plano marca CDN/edge como **teste adicional** para HTTP(S)/WS/WSS, sem tratar CDN como solução automática para SSH bruto ou UDP.
+
+## Plano de Infraestrutura AutomCore
+
+O relatório exportado passa a incluir `automcore_plan`. Essa seção transforma a matriz observada em um plano de configuração para a VPS, por exemplo:
+
+- portas HTTP/WS que responderam ficam como **candidatas** para front door WebSocket;
+- WSS só aparece como **confirmado** quando o handshake WebSocket TLS realmente passou;
+- portas SSH abertas ficam como candidatas até o handshake SSH real ser validado;
+- UDP só é promovido quando existe resposta determinística;
+- portas típicas de proxy só são sugeridas para Proxy Analyzer, nunca assumidas como proxy apenas porque o TCP abriu;
+- CDN/edge é sugerida apenas quando existe motivo de rota/alcance e somente para transportes HTTP(S)/WS/WSS compatíveis com o provedor escolhido.
+
+## Manual AutomBot Connect
+
+O relatório exportado também inclui `autombot_connect_manual` com os campos operacionais do cliente:
+
+- servidor;
+- porta;
+- TLS;
+- SNI/Server Name;
+- WebSocket;
+- WS Host;
+- WS Path;
+- proxy/payload quando realmente aplicável;
+- classificação `CONFIRMADO`, `CANDIDATO` ou `NÃO RECOMENDADO`.
+
+### Payload
+
+O Network Probe não gera domínio de fachada de terceiros. Quando existe uma porta HTTP candidata, o manual pode gerar um modelo dirigido ao **mesmo host do operador** para validar um front door HTTP/WebSocket configurado no AutomCore.
+
+Para WebSocket padrão, o manual lembra que `Sec-WebSocket-Key` precisa ser gerado dinamicamente. Se o campo de payload do cliente não faz isso, o modo recomendado é usar o transporte WebSocket nativo do AutomBot Connect e deixar payload personalizado desligado.
+
+Para **SSH + HTTP Proxy / HTTP CONNECT**, o relatório principal não inventa um proxy. Esse payload só é gerado no **Proxy Analyzer** depois que HTTP CONNECT é realmente confirmado contra o proxy e o destino informados pelo operador.
 
 ## Proxy Analyzer
 
-A v0.3 inclui o **AutomBot Proxy Analyzer**:
+A v0.4 mantém o **AutomBot Proxy Analyzer**:
 
 - Testa um proxy HTTP CONNECT ou SOCKS5 informado pelo operador.
 - Valida DNS e TCP do proxy pela rede física.
@@ -32,7 +69,15 @@ A v0.3 inclui o **AutomBot Proxy Analyzer**:
 - Gera automaticamente um **manual de conexão** com servidor, porta, proxy, porta do proxy, opções TLS/WSS e um modelo HTTP CONNECT dirigido somente ao endpoint testado.
 - O manual pode ser compartilhado diretamente como texto e o relatório técnico continua disponível em JSON.
 
-O manual não inventa domínios de fachada nem sugere terceiros para contornar políticas de rede. Ele só usa o proxy e o destino explicitamente informados no teste e diferencia capacidade confirmada de simples compatibilidade de transporte.
+## Compartilhamento
+
+O botão de compartilhar continua anexando o arquivo JSON via `FileProvider`, mas a mensagem enviada junto ao arquivo agora contém também, em texto legível:
+
+- Plano AutomCore;
+- Manual AutomBot Connect;
+- Manual do Proxy Analyzer, quando aplicável.
+
+Isso facilita o envio pelo WhatsApp sem depender de abrir o JSON manualmente.
 
 ## Interpretação do UDP
 
@@ -77,4 +122,4 @@ networkprobe/build/outputs/apk/debug/networkprobe-debug.apk
 - Histórico local por rede/operadora para comparar Wi‑Fi x 4G/5G.
 - Testes reais de handshake dos protocolos AutomBot (Hysteria2, TUIC, WireGuard, VMess/VLESS, SSH/OpenVPN) sem ativar a VPN de sistema.
 - Endpoint AutomBot Probe Server próprio para TCP/UDP com respostas determinísticas e baixa amplificação.
-- Exportação de um perfil de transporte recomendado para o AutomBot Connect.
+- Exportação/importação direta do perfil recomendado para o AutomBot Connect.
