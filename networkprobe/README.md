@@ -6,21 +6,33 @@ Aplicativo Android separado para medir a capacidade real da rede física antes d
 
 O probe testa **somente endpoints informados pelo operador**. Ele não procura domínios de terceiros, exceções de cobrança, zero-rating ou formas de obter acesso não autorizado.
 
-## Testes da v0.2
+## Testes da v0.3
 
 - Detecta Wi‑Fi / rede móvel e evita usar uma VPN já ativa como rede de teste.
 - Exibe validação da rede, interface, MTU, DNS, IPv4/IPv6 e indício de CGNAT/NAT privado.
 - Resolve A/AAAA explicitamente pela rede física Android.
 - Faz matriz de portas TCP configuráveis e diferencia `timeout` de `connection refused`.
-  - `connection refused`: o host respondeu, mas a porta TCP está fechada/sem serviço.
-  - `timeout`: pode indicar filtragem, rota indisponível ou ausência de resposta.
 - Quando há A e AAAA, testa também o TCP principal pelo IPv6 para comparar as famílias.
-- Faz handshake TLS/SNI com validação do certificado, versão TLS, validade e ALPN quando disponível.
-- Faz requisição HTTPS e registra código/protocolo HTTP.
-- Tenta upgrade WebSocket TLS no path configurado.
-- Faz matriz de portas UDP configuráveis; qualquer resposta recebida confirma caminho UDP bidirecional naquela porta.
-- Vem com portas úteis da infraestrutura AutomBot como referência: TCP 80/109/2222/8080/8443 e UDP 36712/44300/51820.
+- Faz handshake TLS/SNI com validação do certificado.
+- Faz requisição HTTPS e tenta upgrade WebSocket TLS no path configurado.
+- Faz matriz de portas UDP configuráveis.
 - Gera pontuação de capacidade, candidatos de transporte, diagnóstico contextual e relatório JSON.
+
+## Proxy Analyzer
+
+A v0.3 inclui o **AutomBot Proxy Analyzer**:
+
+- Testa um proxy HTTP CONNECT ou SOCKS5 informado pelo operador.
+- Valida DNS e TCP do proxy pela rede física.
+- Possui detecção opcional de uma lista curta de portas comuns de proxy: `80, 443, 1080, 3128, 8080, 8000, 8118, 8888, 8889, 9090`.
+- Testa HTTP CONNECT até um endpoint da própria infraestrutura.
+- Testa SOCKS5 CONNECT e SOCKS5 UDP ASSOCIATE.
+- Quando o túnel TCP é confirmado, testa TLS real através do proxy.
+- Também tenta WebSocket Seguro (WSS) através do proxy usando o path informado.
+- Gera automaticamente um **manual de conexão** com servidor, porta, proxy, porta do proxy, opções TLS/WSS e um modelo HTTP CONNECT dirigido somente ao endpoint testado.
+- O manual pode ser compartilhado diretamente como texto e o relatório técnico continua disponível em JSON.
+
+O manual não inventa domínios de fachada nem sugere terceiros para contornar políticas de rede. Ele só usa o proxy e o destino explicitamente informados no teste e diferencia capacidade confirmada de simples compatibilidade de transporte.
 
 ## Interpretação do UDP
 
@@ -30,7 +42,7 @@ Para confirmação determinística de uma porta UDP de diagnóstico, pode ser cr
 
 ## Como usar
 
-Use como TCP principal a porta do serviço que realmente fala TCP/TLS/WSS. Para Hysteria2/TUIC/WireGuard, coloque as portas correspondentes na matriz UDP em vez de interpretar uma porta UDP como TCP.
+Para o Network Probe principal, use como TCP principal a porta do serviço que realmente fala TCP/TLS/WSS. Para Hysteria2/TUIC/WireGuard, coloque as portas correspondentes na matriz UDP.
 
 Exemplo:
 
@@ -43,7 +55,7 @@ UDP extras: 36712,44300,51820
 WebSocket path: /
 ```
 
-Compare o mesmo conjunto de testes no Wi‑Fi e na rede móvel.
+No Proxy Analyzer, informe o proxy a testar e um endpoint da sua VPS como destino. Se a porta do proxy for desconhecida, use **Detectar porta comum do proxy** e depois execute a análise completa.
 
 ## Compilar
 
