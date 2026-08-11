@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -132,8 +133,8 @@ private fun ProbeScreen(
                         val udp = udpPort.toIntOrNull()
                         when {
                             host.isBlank() -> validationError = "Informe um domínio/host da sua infraestrutura."
-                            tcp !in 1..65535 -> validationError = "Porta TCP inválida."
-                            udp !in 1..65535 -> validationError = "Porta UDP inválida."
+                            tcp == null || tcp !in 1..65535 -> validationError = "Porta TCP inválida."
+                            udp == null || udp !in 1..65535 -> validationError = "Porta UDP inválida."
                             else -> {
                                 validationError = null
                                 running = true
@@ -142,8 +143,8 @@ private fun ProbeScreen(
                                     report = engine.run(
                                         ProbeConfig(
                                             host = host.trim(),
-                                            tcpPort = tcp!!,
-                                            udpPort = udp!!,
+                                            tcpPort = tcp,
+                                            udpPort = udp,
                                             webSocketPath = wsPath.ifBlank { "/" }
                                         )
                                     )
