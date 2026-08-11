@@ -22,6 +22,7 @@ import com.autombot.client.protocols.modern.ModernProtocolTunnelManager
 import com.autombot.client.protocols.modern.ModernProtocolType
 import com.autombot.client.ui.components.AutomBotGradientButton
 import com.autombot.client.ui.components.AutomBotTopBar
+import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 import kotlinx.coroutines.launch
 
@@ -37,6 +38,7 @@ fun ModernProtocolScreen(
     val connections = allConnections.filter { it.config.type == type }
     val scope = rememberCoroutineScope()
     val coreAvailable = remember { manager.coreAvailable() }
+    val managedMode = rememberManagedMode()
 
     Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
         AutomBotTopBar(type.displayName, onBack, "Núcleo sing-box")
@@ -65,13 +67,15 @@ fun ModernProtocolScreen(
                 verticalArrangement = Arrangement.Center
             ) {
                 Text("Nenhum perfil ${type.displayName} configurado", color = C.TextDim, fontSize = 13.sp)
-                Spacer(Modifier.height(16.dp))
-                AutomBotGradientButton(
-                    text = "Importar link ${if (type == ModernProtocolType.HYSTERIA2) "hysteria2://" else "tuic://"}",
-                    onClick = onAddProfile,
-                    modifier = Modifier.fillMaxWidth(),
-                    accent = C.Accent
-                )
+                if (!managedMode) {
+                    Spacer(Modifier.height(16.dp))
+                    AutomBotGradientButton(
+                        text = "Importar link ${if (type == ModernProtocolType.HYSTERIA2) "hysteria2://" else "tuic://"}",
+                        onClick = onAddProfile,
+                        modifier = Modifier.fillMaxWidth(),
+                        accent = C.Accent
+                    )
+                }
             }
         } else {
             LazyColumn(
@@ -81,6 +85,7 @@ fun ModernProtocolScreen(
                 items(connections, key = { "${it.config.type.id}:${it.config.connectionName}" }) { conn ->
                     ModernConnectionCard(
                         conn = conn,
+                        allowDelete = !managedMode,
                         onToggle = {
                             scope.launch {
                                 if (conn.status == ModernProtocolStatus.CONNECTED) {
@@ -94,14 +99,16 @@ fun ModernProtocolScreen(
                         onDelete = { manager.removeProfile(conn.config.type, conn.config.connectionName) }
                     )
                 }
-                item {
-                    AutomBotGradientButton(
-                        text = "Importar novo link",
-                        onClick = onAddProfile,
-                        modifier = Modifier.fillMaxWidth(),
-                        accent = C.Accent
-                    )
-                    Spacer(Modifier.height(12.dp))
+                if (!managedMode) {
+                    item {
+                        AutomBotGradientButton(
+                            text = "Importar novo link",
+                            onClick = onAddProfile,
+                            modifier = Modifier.fillMaxWidth(),
+                            accent = C.Accent
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
                 }
             }
         }
@@ -185,6 +192,7 @@ fun ModernProtocolAddScreen(
 @Composable
 private fun ModernConnectionCard(
     conn: ManagedModernConnection,
+    allowDelete: Boolean,
     onToggle: () -> Unit,
     onViewLog: () -> Unit,
     onDelete: () -> Unit
@@ -253,11 +261,13 @@ private fun ModernConnectionCard(
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Ver log", color = C.TextDim, fontSize = 11.sp, modifier = Modifier.clickable(onClick = onViewLog))
-            Text("Excluir", color = C.Red, fontSize = 11.sp, modifier = Modifier.clickable { showDeleteConfirm = true })
+            if (allowDelete) {
+                Text("Excluir", color = C.Red, fontSize = 11.sp, modifier = Modifier.clickable { showDeleteConfirm = true })
+            }
         }
     }
 
-    if (showDeleteConfirm) {
+    if (allowDelete && showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
             title = { Text("Excluir conexão?") },

@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.sp
 import com.autombot.client.protocols.openvpn.ManagedOpenVpnConnection
 import com.autombot.client.protocols.openvpn.OpenVpnStatus
 import com.autombot.client.protocols.openvpn.OpenVpnTunnelManager
+import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 
 /**
@@ -36,6 +37,7 @@ fun OpenVpnScreen(
     onDisconnect: () -> Unit
 ) {
     val connections by manager.connections.collectAsState()
+    val managedMode = rememberManagedMode()
 
     Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -69,11 +71,13 @@ fun OpenVpnScreen(
                 verticalArrangement = Arrangement.Center
             ) {
                 Text("Nenhuma conexão OpenVPN configurada", color = C.TextDim, fontSize = 13.sp)
-                Spacer(Modifier.height(16.dp))
-                Button(
-                    onClick = onAddProfile,
-                    colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-                ) { Text("Importar .ovpn") }
+                if (!managedMode) {
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = onAddProfile,
+                        colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                    ) { Text("Importar .ovpn") }
+                }
             }
         } else {
             LazyColumn(
@@ -83,6 +87,7 @@ fun OpenVpnScreen(
                 items(connections, key = { it.config.connectionName }) { conn ->
                     OpenVpnConnectionCard(
                         conn = conn,
+                        allowDelete = !managedMode,
                         onToggle = {
                             if (conn.status == OpenVpnStatus.CONNECTED) {
                                 // ACTION_STOP também é usado automaticamente pelo roteador
@@ -97,13 +102,15 @@ fun OpenVpnScreen(
                         onDelete = { manager.removeProfile(conn.config.connectionName) }
                     )
                 }
-                item {
-                    Button(
-                        onClick = onAddProfile,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-                    ) { Text("Importar .ovpn") }
-                    Spacer(Modifier.height(12.dp))
+                if (!managedMode) {
+                    item {
+                        Button(
+                            onClick = onAddProfile,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                        ) { Text("Importar .ovpn") }
+                        Spacer(Modifier.height(12.dp))
+                    }
                 }
             }
         }
@@ -113,6 +120,7 @@ fun OpenVpnScreen(
 @Composable
 private fun OpenVpnConnectionCard(
     conn: ManagedOpenVpnConnection,
+    allowDelete: Boolean,
     onToggle: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -176,17 +184,19 @@ private fun OpenVpnConnectionCard(
             Text(conn.lastError, color = C.Red, fontSize = 11.sp)
         }
 
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "Excluir",
-            color = C.Red,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.clickable { showDeleteConfirm = true }
-        )
+        if (allowDelete) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Excluir",
+                color = C.Red,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.clickable { showDeleteConfirm = true }
+            )
+        }
     }
 
-    if (showDeleteConfirm) {
+    if (allowDelete && showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
             title = { Text("Excluir conexão?") },

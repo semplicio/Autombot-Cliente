@@ -22,6 +22,7 @@ import com.autombot.client.protocols.shadowsocks.ManagedShadowsocksConnection
 import com.autombot.client.protocols.shadowsocks.ShadowsocksStatus
 import com.autombot.client.protocols.shadowsocks.ShadowsocksTunnelManager
 import com.autombot.client.protocols.shadowsocks.describeTransport
+import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 import kotlinx.coroutines.launch
 
@@ -39,6 +40,7 @@ fun ShadowsocksScreen(
 ) {
     val connections by manager.connections.collectAsState()
     val scope = rememberCoroutineScope()
+    val managedMode = rememberManagedMode()
 
     Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -73,11 +75,13 @@ fun ShadowsocksScreen(
                 verticalArrangement = Arrangement.Center
             ) {
                 Text("Nenhuma conexão Shadowsocks configurada", color = C.TextDim, fontSize = 13.sp)
-                Spacer(Modifier.height(16.dp))
-                Button(
-                    onClick = onAddProfile,
-                    colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-                ) { Text("Colar link shadowsocks://") }
+                if (!managedMode) {
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = onAddProfile,
+                        colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                    ) { Text("Colar link shadowsocks://") }
+                }
             }
         } else {
             LazyColumn(
@@ -87,6 +91,7 @@ fun ShadowsocksScreen(
                 items(connections, key = { it.config.connectionName }) { conn ->
                     ShadowsocksConnectionCard(
                         conn = conn,
+                        allowDelete = !managedMode,
                         onToggle = {
                             scope.launch {
                                 if (conn.status == ShadowsocksStatus.CONNECTED) manager.disconnect(conn.config.connectionName)
@@ -97,13 +102,15 @@ fun ShadowsocksScreen(
                         onDelete = { manager.removeProfile(conn.config.connectionName) }
                     )
                 }
-                item {
-                    Button(
-                        onClick = onAddProfile,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-                    ) { Text("Colar link shadowsocks://") }
-                    Spacer(Modifier.height(12.dp))
+                if (!managedMode) {
+                    item {
+                        Button(
+                            onClick = onAddProfile,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                        ) { Text("Colar link shadowsocks://") }
+                        Spacer(Modifier.height(12.dp))
+                    }
                 }
             }
         }
@@ -113,6 +120,7 @@ fun ShadowsocksScreen(
 @Composable
 private fun ShadowsocksConnectionCard(
     conn: ManagedShadowsocksConnection,
+    allowDelete: Boolean,
     onToggle: () -> Unit,
     onViewLog: () -> Unit,
     onDelete: () -> Unit
@@ -201,17 +209,19 @@ private fun ShadowsocksConnectionCard(
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.clickable(onClick = onViewLog)
             )
-            Text(
-                "Excluir",
-                color = C.Red,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.clickable { showDeleteConfirm = true }
-            )
+            if (allowDelete) {
+                Text(
+                    "Excluir",
+                    color = C.Red,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clickable { showDeleteConfirm = true }
+                )
+            }
         }
     }
 
-    if (showDeleteConfirm) {
+    if (allowDelete && showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
             title = { Text("Excluir conexão?") },

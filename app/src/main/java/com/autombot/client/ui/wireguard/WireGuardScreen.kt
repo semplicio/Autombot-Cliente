@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.sp
 import com.autombot.client.protocols.wireguard.ManagedTunnel
 import com.autombot.client.protocols.wireguard.TunnelStatus
 import com.autombot.client.protocols.wireguard.WireGuardManager
+import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 import com.wireguard.android.backend.Tunnel
 import kotlinx.coroutines.launch
@@ -38,6 +39,7 @@ fun WireGuardScreen(
     onViewLog: (String) -> Unit
 ) {
     val tunnels by manager.tunnels.collectAsState()
+    val managedMode = rememberManagedMode()
     var showImport by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -49,7 +51,7 @@ fun WireGuardScreen(
         TopBar(title = "WireGuard", onBack = onBack)
 
         if (tunnels.isEmpty()) {
-            EmptyState(onAddClick = { showImport = true })
+            EmptyState(allowAdd = !managedMode, onAddClick = { showImport = true })
         } else {
             LazyColumn(
                 modifier = Modifier.weight(1f),
@@ -59,6 +61,7 @@ fun WireGuardScreen(
                 items(tunnels, key = { it.name }) { tunnel ->
                     TunnelCard(
                         tunnel = tunnel,
+                        allowDelete = !managedMode,
                         onToggle = {
                             onRequestVpnPermission {
                                 scope.launch { manager.toggle(tunnel) }
@@ -69,14 +72,16 @@ fun WireGuardScreen(
                         onDelete = { manager.removeTunnel(tunnel.name) }
                     )
                 }
-                item {
-                    AddTunnelRow(onClick = { showImport = true })
+                if (!managedMode) {
+                    item {
+                        AddTunnelRow(onClick = { showImport = true })
+                    }
                 }
             }
         }
     }
 
-    if (showImport) {
+    if (!managedMode && showImport) {
         ImportTunnelSheet(
             onDismiss = { showImport = false },
             onPickFile = onPickConfigFile,
@@ -110,7 +115,7 @@ private fun TopBar(title: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun EmptyState(onAddClick: () -> Unit) {
+private fun EmptyState(allowAdd: Boolean, onAddClick: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -125,14 +130,16 @@ private fun EmptyState(onAddClick: () -> Unit) {
             color = C.TextDim,
             fontSize = 13.sp
         )
-        Spacer(Modifier.height(20.dp))
-        Button(
-            onClick = onAddClick,
-            colors = ButtonDefaults.buttonColors(containerColor = C.Primary, contentColor = C.OnPrimary)
-        ) {
-            Icon(Icons.Default.Add, contentDescription = null)
-            Spacer(Modifier.width(6.dp))
-            Text("Adicionar túnel")
+        if (allowAdd) {
+            Spacer(Modifier.height(20.dp))
+            Button(
+                onClick = onAddClick,
+                colors = ButtonDefaults.buttonColors(containerColor = C.Primary, contentColor = C.OnPrimary)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text("Adicionar túnel")
+            }
         }
     }
 }
@@ -158,6 +165,7 @@ private fun AddTunnelRow(onClick: () -> Unit) {
 @Composable
 private fun TunnelCard(
     tunnel: ManagedTunnel,
+    allowDelete: Boolean,
     onToggle: () -> Unit,
     onRefreshStats: () -> Unit,
     onViewLog: () -> Unit,
@@ -248,17 +256,19 @@ private fun TunnelCard(
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.clickable(onClick = onViewLog)
             )
-            Text(
-                "Excluir",
-                color = C.Red,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.clickable { showDeleteConfirm = true }
-            )
+            if (allowDelete) {
+                Text(
+                    "Excluir",
+                    color = C.Red,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clickable { showDeleteConfirm = true }
+                )
+            }
         }
     }
 
-    if (showDeleteConfirm) {
+    if (allowDelete && showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
             title = { Text("Excluir túnel?") },

@@ -22,6 +22,7 @@ import com.autombot.client.protocols.vless.ManagedVlessConnection
 import com.autombot.client.protocols.vless.VlessStatus
 import com.autombot.client.protocols.vless.VlessTunnelManager
 import com.autombot.client.protocols.vless.describeTransport
+import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 import kotlinx.coroutines.launch
 
@@ -39,6 +40,7 @@ fun VlessScreen(
 ) {
     val connections by manager.connections.collectAsState()
     val scope = rememberCoroutineScope()
+    val managedMode = rememberManagedMode()
 
     Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -71,11 +73,13 @@ fun VlessScreen(
                 verticalArrangement = Arrangement.Center
             ) {
                 Text("Nenhuma conexão VLESS configurada", color = C.TextDim, fontSize = 13.sp)
-                Spacer(Modifier.height(16.dp))
-                Button(
-                    onClick = onAddProfile,
-                    colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-                ) { Text("Colar link vless://") }
+                if (!managedMode) {
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = onAddProfile,
+                        colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                    ) { Text("Colar link vless://") }
+                }
             }
         } else {
             LazyColumn(
@@ -85,6 +89,7 @@ fun VlessScreen(
                 items(connections, key = { it.config.connectionName }) { conn ->
                     VlessConnectionCard(
                         conn = conn,
+                        allowDelete = !managedMode,
                         onToggle = {
                             scope.launch {
                                 if (conn.status == VlessStatus.CONNECTED) manager.disconnect(conn.config.connectionName)
@@ -95,13 +100,15 @@ fun VlessScreen(
                         onDelete = { manager.removeProfile(conn.config.connectionName) }
                     )
                 }
-                item {
-                    Button(
-                        onClick = onAddProfile,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-                    ) { Text("Colar link vless://") }
-                    Spacer(Modifier.height(12.dp))
+                if (!managedMode) {
+                    item {
+                        Button(
+                            onClick = onAddProfile,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                        ) { Text("Colar link vless://") }
+                        Spacer(Modifier.height(12.dp))
+                    }
                 }
             }
         }
@@ -111,6 +118,7 @@ fun VlessScreen(
 @Composable
 private fun VlessConnectionCard(
     conn: ManagedVlessConnection,
+    allowDelete: Boolean,
     onToggle: () -> Unit,
     onViewLog: () -> Unit,
     onDelete: () -> Unit
@@ -199,17 +207,19 @@ private fun VlessConnectionCard(
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.clickable(onClick = onViewLog)
             )
-            Text(
-                "Excluir",
-                color = C.Red,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.clickable { showDeleteConfirm = true }
-            )
+            if (allowDelete) {
+                Text(
+                    "Excluir",
+                    color = C.Red,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clickable { showDeleteConfirm = true }
+                )
+            }
         }
     }
 
-    if (showDeleteConfirm) {
+    if (allowDelete && showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
             title = { Text("Excluir conexão?") },

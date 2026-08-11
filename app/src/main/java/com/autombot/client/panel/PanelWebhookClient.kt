@@ -66,6 +66,16 @@ data class TrialAccount(
     val warnings: List<String>
 )
 
+data class PanelPromotion(
+    val id: String,
+    val title: String,
+    val description: String,
+    val mediaType: String,
+    val mediaUrl: String,
+    val linkUrl: String?,
+    val order: Int
+)
+
 class PanelWebhookClient(
     private val panelBaseUrl: String,
     private val apiKey: String = DEFAULT_API_KEY
@@ -168,6 +178,34 @@ class PanelWebhookClient(
             protocols = protocols,
             warnings = json.optJSONArray("avisos").toStringList()
         )
+    }
+
+    /** Feed público de divulgações exibido no Dashboard do modo gerenciado. */
+    suspend fun fetchPromotions(): List<PanelPromotion> {
+        var lastError: Exception? = null
+        val endpoints = listOf("$base/v1/divulgacoes/publicas", "$base/api/v1/divulgacoes.php")
+        for (url in endpoints) {
+            try {
+                val json = requestJson("GET", url, null)
+                val array = json.optJSONArray("divulgacoes") ?: continue
+                return (0 until array.length()).mapNotNull { index ->
+                    val item = array.optJSONObject(index) ?: return@mapNotNull null
+                    val mediaUrl = item.optString("midia_url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    PanelPromotion(
+                        id = item.optString("id", index.toString()),
+                        title = item.optString("titulo", "Divulgação"),
+                        description = item.optString("descricao"),
+                        mediaType = item.optString("tipo_midia", "imagem").lowercase(),
+                        mediaUrl = mediaUrl,
+                        linkUrl = item.optString("link_url").takeIf { it.isNotBlank() },
+                        order = item.optInt("ordem", 0)
+                    )
+                }.sortedByDescending { it.order }
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        throw PanelException(lastError?.message ?: "O painel não possui o feed de divulgações")
     }
 
     private fun org.json.JSONArray?.toStringList(): List<String> {

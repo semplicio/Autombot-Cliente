@@ -23,6 +23,7 @@ import com.autombot.client.protocols.ssh.SshConnectionConfig
 import com.autombot.client.protocols.ssh.SshStatus
 import com.autombot.client.protocols.ssh.SshTunnelManager
 import com.autombot.client.protocols.ssh.describeLayers
+import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 import kotlinx.coroutines.launch
 
@@ -40,6 +41,7 @@ fun SshScreen(
 ) {
     val connections by manager.connections.collectAsState()
     val scope = rememberCoroutineScope()
+    val managedMode = rememberManagedMode()
 
     Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -72,11 +74,13 @@ fun SshScreen(
                 verticalArrangement = Arrangement.Center
             ) {
                 Text("Nenhuma conexão SSH configurada", color = C.TextDim, fontSize = 13.sp)
-                Spacer(Modifier.height(16.dp))
-                Button(
-                    onClick = onAddProfile,
-                    colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-                ) { Text("Adicionar Perfil") }
+                if (!managedMode) {
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = onAddProfile,
+                        colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                    ) { Text("Adicionar Perfil") }
+                }
             }
         } else {
             LazyColumn(
@@ -86,6 +90,7 @@ fun SshScreen(
                 items(connections, key = { it.config.connectionName }) { conn ->
                     SshConnectionCard(
                         conn = conn,
+                        allowManage = !managedMode,
                         onToggle = {
                             scope.launch {
                                 if (conn.status == SshStatus.CONNECTED) manager.disconnect(conn.config.connectionName)
@@ -97,13 +102,15 @@ fun SshScreen(
                         onDelete = { manager.removeProfile(conn.config.connectionName) }
                     )
                 }
-                item {
-                    Button(
-                        onClick = onAddProfile,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
-                    ) { Text("Adicionar Perfil") }
-                    Spacer(Modifier.height(12.dp))
+                if (!managedMode) {
+                    item {
+                        Button(
+                            onClick = onAddProfile,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                        ) { Text("Adicionar Perfil") }
+                        Spacer(Modifier.height(12.dp))
+                    }
                 }
             }
         }
@@ -113,6 +120,7 @@ fun SshScreen(
 @Composable
 private fun SshConnectionCard(
     conn: ManagedSshConnection,
+    allowManage: Boolean,
     onToggle: () -> Unit,
     onEdit: () -> Unit,
     onViewLog: () -> Unit,
@@ -134,7 +142,7 @@ private fun SshConnectionCard(
             .background(C.Surface)
             .border(1.dp, if (conn.status == SshStatus.CONNECTED) C.Green.copy(alpha = 0.35f) else C.Line, RoundedCornerShape(16.dp))
             .padding(16.dp)
-            .clickable { onEdit() }
+            .then(if (allowManage) Modifier.clickable { onEdit() } else Modifier)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
@@ -203,17 +211,19 @@ private fun SshConnectionCard(
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.clickable(onClick = onViewLog)
             )
-            Text(
-                "Excluir",
-                color = C.Red,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.clickable { showDeleteConfirm = true }
-            )
+            if (allowManage) {
+                Text(
+                    "Excluir",
+                    color = C.Red,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clickable { showDeleteConfirm = true }
+                )
+            }
         }
     }
 
-    if (showDeleteConfirm) {
+    if (allowManage && showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
             title = { Text("Excluir conexão?") },

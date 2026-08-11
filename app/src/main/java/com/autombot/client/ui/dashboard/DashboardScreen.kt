@@ -1,6 +1,13 @@
 package com.autombot.client.ui.dashboard
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.widget.MediaController
+import android.widget.VideoView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,20 +34,28 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.autombot.client.panel.PanelPromotion
+import com.autombot.client.panel.PanelWebhookClient
 import com.autombot.client.protocols.modern.ModernProtocolManagerProvider
 import com.autombot.client.protocols.modern.ModernProtocolStatus
 import com.autombot.client.ui.components.AutomBotCard
 import com.autombot.client.ui.components.AutomBotGradientButton
+import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.URL
 
 /** Dashboard visual do modo gerenciado, conectado aos mesmos estados reais. */
 @Composable
@@ -54,6 +70,25 @@ fun DashboardScreen(
     onApplyUpdate: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val managedMode = rememberManagedMode()
+    val prefs = remember(context) {
+        context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE)
+    }
+    val managedBaseUrl = remember(managedMode) {
+        if (managedMode) prefs.getString("managed_base_url", "").orEmpty() else ""
+    }
+    var promotions by remember(managedBaseUrl) { mutableStateOf<List<PanelPromotion>>(emptyList()) }
+
+    LaunchedEffect(managedMode, managedBaseUrl) {
+        promotions = if (managedMode && managedBaseUrl.isNotBlank()) {
+            withContext(Dispatchers.IO) {
+                runCatching { PanelWebhookClient(managedBaseUrl).fetchPromotions() }.getOrDefault(emptyList())
+            }
+        } else {
+            emptyList()
+        }
+    }
+
     val modernManager = remember(context) { ModernProtocolManagerProvider.get(context) }
     val modernConnections by modernManager.connections.collectAsState()
     val modernActive = modernConnections.count { it.status == ModernProtocolStatus.CONNECTED }
@@ -179,8 +214,104 @@ fun DashboardScreen(
             onClick = onOpenConnections,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(Modifier.height(18.dp))
+
+        if (managedMode && promotions.isNotEmpty()) {
+            Spacer(Modifier.height(24.dp))
+            Text("DIVULGAÇÕES", color = C.PrimaryLight, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+            Spacer(Modifier.height(10.dp))
+            promotions.forEach { promotion ->
+                PromotionCard(promotion)
+                Spacer(Modifier.height(14.dp))
+            }
+        } else {
+            Spacer(Modifier.height(18.dp))
+        }
     }
+}
+
+@Composable
+private fun PromotionCard(promotion: PanelPromotion) {
+    val uriHandler = LocalUriHandler.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(C.Surface)
+            .padding(12.dp)
+    ) {
+        if (promotion.mediaType == "video") {
+            PromotionVideo(promotion.mediaUrl)
+        } else {
+            PromotionImage(promotion.mediaUrl, promotion.title)
+        }
+        Spacer(Modifier.height(12.dp))
+        Text(promotion.title, color = C.Text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        if (promotion.description.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(promotion.description, color = C.TextDim, fontSize = 11.sp)
+        }
+        promotion.linkUrl?.let { link ->
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Saiba mais",
+                color = C.AccentLight,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.clickable { runCatching { uriHandler.openUri(link) } }
+            )
+        }
+    }
+}
+
+@Composable
+private fun PromotionImage(url: String, description: String) {
+    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = url) {
+        value = withContext(Dispatchers.IO) {
+            runCatching { URL(url).openStream().use { BitmapFactory.decodeStream(it) } }.getOrNull()
+        }
+    }
+    androidx.compose.foundation.layout.Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 150.dp, max = 260.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(C.SurfaceAlt),
+        contentAlignment = Alignment.Center
+    ) {
+        bitmap?.let {
+            Image(
+                bitmap = it.asImageBitmap(),
+                contentDescription = description,
+                modifier = Modifier.fillMaxWidth(),
+                contentScale = ContentScale.FillWidth
+            )
+        } ?: Text("Carregando imagem…", color = C.TextDim, fontSize = 11.sp, modifier = Modifier.padding(28.dp))
+    }
+}
+
+@Composable
+private fun PromotionVideo(url: String) {
+    AndroidView(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(210.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(C.SurfaceAlt),
+        factory = { ctx ->
+            VideoView(ctx).apply {
+                tag = url
+                setMediaController(MediaController(ctx).also { it.setAnchorView(this) })
+                setVideoURI(Uri.parse(url))
+                setOnPreparedListener { player -> player.isLooping = false }
+            }
+        },
+        update = { view ->
+            if (view.tag != url) {
+                view.tag = url
+                view.setVideoURI(Uri.parse(url))
+            }
+        }
+    )
 }
 
 @Composable
