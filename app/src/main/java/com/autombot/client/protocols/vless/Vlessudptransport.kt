@@ -33,8 +33,8 @@ object VlessUdpTransport {
         destPort: Int,
         protectSocket: (java.net.Socket) -> Boolean,
         onIncoming: (ByteArray) -> Unit,
-        dns: Dns = Dns.SYSTEM,
-        timeoutMs: Int = 10_000
+        timeoutMs: Int = 10_000,
+        dns: Dns = Dns.SYSTEM
     ): UdpBackendSession? {
         val pipedOut = PipedOutputStream()
         val pipedIn = PipedInputStream(pipedOut, 256 * 1024)
