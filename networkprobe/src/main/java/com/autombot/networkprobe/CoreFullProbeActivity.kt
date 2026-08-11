@@ -39,7 +39,7 @@ class CoreFullProbeActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val profile = CoreProfileStore(applicationContext).loadProfile()
-        val engine = CoreFullProbeEngine(applicationContext)
+        val engine = CoreAdvisorEngine(applicationContext)
 
         setContent {
             MaterialTheme {
@@ -48,7 +48,7 @@ class CoreFullProbeActivity : ComponentActivity() {
                     engine = engine,
                     onShareJson = { report -> ReportShare.share(this, report.toJson()) },
                     onShareText = { report ->
-                        ReportShare.shareText(this, "AutomBot Core — diagnóstico completo", report.toText())
+                        ReportShare.shareText(this, "AutomBot Core — diagnóstico e plano de ajuste", report.toText())
                     }
                 )
             }
@@ -59,12 +59,12 @@ class CoreFullProbeActivity : ComponentActivity() {
 @Composable
 private fun CoreFullProbeScreen(
     profile: CoreProfileSnapshot?,
-    engine: CoreFullProbeEngine,
-    onShareJson: (CoreFullProbeReport) -> Unit,
-    onShareText: (CoreFullProbeReport) -> Unit
+    engine: CoreAdvisorEngine,
+    onShareJson: (CoreAdvisorReport) -> Unit,
+    onShareText: (CoreAdvisorReport) -> Unit
 ) {
     var running by remember { mutableStateOf(false) }
-    var report by remember { mutableStateOf<CoreFullProbeReport?>(null) }
+    var report by remember { mutableStateOf<CoreAdvisorReport?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -76,10 +76,10 @@ private fun CoreFullProbeScreen(
         ) {
             item {
                 FullCard {
-                    Text("Teste completo AutomBot Core", color = FullText, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text("AutomBot Core Network Advisor", color = FullText, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Executa todas as combinações válidas importadas do Core: protocolo + endpoint + porta + transporte + TLS/WS aplicável.",
+                        "Testa toda a configuração importada, repete TCP três vezes, verifica todos os IPs resolvidos, avalia portas padrão candidatas e gera um plano de ajuste da VPS.",
                         color = FullDim,
                         fontSize = 13.sp,
                         lineHeight = 18.sp
@@ -105,10 +105,10 @@ private fun CoreFullProbeScreen(
                         Text(profile.profileName, color = FullText, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                         Text("Versão: ${profile.profileVersion}", color = FullDim, fontSize = 11.sp)
                         Text("Configurações recebidas do Core: ${profile.protocols.size}", color = FullDim, fontSize = 11.sp)
-                        Text("Combinações válidas planejadas: $planned", color = FullAccent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Combinações brutas no perfil: $planned", color = FullAccent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "O teste não mistura portas aleatoriamente. Ex.: porta de WireGuard continua sendo testada como UDP; path de VMess/VLESS continua associado ao WebSocket correspondente.",
+                            "Duplicatas semânticas são removidas no teste. Portas de protocolos incompatíveis não são misturadas. O catálogo de portas candidatas é limitado e executado somente contra a VPS vinculada.",
                             color = FullDim,
                             fontSize = 11.sp,
                             lineHeight = 16.sp
@@ -130,16 +130,16 @@ private fun CoreFullProbeScreen(
                             }
                         },
                         enabled = !running,
-                        modifier = Modifier.fillMaxWidth().height(54.dp),
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = FullAccent)
                     ) {
                         if (running) {
                             CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp)
                             Spacer(Modifier.padding(horizontal = 6.dp))
-                            Text("Testando toda a configuração…")
+                            Text("Testando protocolos e portas candidatas…")
                         } else {
-                            Text("Executar teste completo do Core", fontWeight = FontWeight.SemiBold)
+                            Text("Executar diagnóstico + plano de ajuste", fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -152,7 +152,7 @@ private fun CoreFullProbeScreen(
             report?.let { current ->
                 item {
                     FullCard {
-                        Text("Resumo", color = FullText, fontWeight = FontWeight.SemiBold)
+                        Text("Resumo do diagnóstico", color = FullText, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(7.dp))
                         Text(
                             current.carrier?.let { "${current.networkLabel} · $it" } ?: current.networkLabel,
@@ -178,13 +178,43 @@ private fun CoreFullProbeScreen(
                 }
 
                 item {
+                    FullCard {
+                        Text("Portas TCP padrão candidatas", color = FullText, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(7.dp))
+                        Text(
+                            "Porta recusada rapidamente é tratada como caminho alcançável sem listener identificado. Porta aberta e não declarada é conflito potencial, não oportunidade automática.",
+                            color = FullDim,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+
+                items(current.candidateTcpPorts) { item ->
+                    CandidatePortCard(item)
+                }
+
+                item {
+                    FullCard {
+                        Text("Plano de ajuste AutomBot Core", color = FullAccent, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            current.optimizationPlan,
+                            color = FullText,
+                            fontSize = 11.sp,
+                            lineHeight = 17.sp
+                        )
+                    }
+                }
+
+                item {
                     Button(
                         onClick = { onShareText(current) },
                         modifier = Modifier.fillMaxWidth().height(50.dp),
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = FullAccent)
                     ) {
-                        Text("Compartilhar relatório completo", fontWeight = FontWeight.SemiBold)
+                        Text("Compartilhar diagnóstico + plano", fontWeight = FontWeight.SemiBold)
                     }
                 }
 
@@ -202,7 +232,7 @@ private fun CoreFullProbeScreen(
 
             item {
                 Text(
-                    "Para UDP, ausência de resposta a um payload genérico permanece PARCIAL; Hysteria2, TUIC, WireGuard e OpenVPN UDP podem ignorar pacotes que não pertencem ao protocolo. O relatório deixa essa diferença explícita.",
+                    "UDP continua classificado como PARCIAL quando não há resposta ao payload genérico. Mudanças de Hysteria2, TUIC, WireGuard e OpenVPN UDP só devem ser promovidas depois de um teste de protocolo real.",
                     color = FullDim,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
@@ -255,6 +285,39 @@ private fun CoreCaseCard(result: CoreProbeCaseResult) {
             }
             Text("• ${layer.name}: ${layer.detail}", color = layerColor, fontSize = 11.sp, lineHeight = 16.sp)
         }
+    }
+}
+
+@Composable
+private fun CandidatePortCard(result: CoreCandidatePortResult) {
+    val color = when (result.state) {
+        CandidatePortState.AVAILABLE_REACHABLE -> FullPass
+        CandidatePortState.RESERVED -> FullAccent
+        CandidatePortState.OPEN_UNKNOWN, CandidatePortState.UNSTABLE -> FullWarn
+        CandidatePortState.UNREACHABLE -> FullFail
+    }
+    val label = when (result.state) {
+        CandidatePortState.AVAILABLE_REACHABLE -> "CANDIDATA"
+        CandidatePortState.RESERVED -> "RESERVADA"
+        CandidatePortState.OPEN_UNKNOWN -> "CONFLITO?"
+        CandidatePortState.UNSTABLE -> "INSTÁVEL"
+        CandidatePortState.UNREACHABLE -> "SEM ALCANCE"
+    }
+
+    FullCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("TCP ${result.port}", color = FullText, fontWeight = FontWeight.Bold)
+                Text(result.host, color = FullDim, fontSize = 11.sp)
+            }
+            Text(label, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(result.detail, color = FullDim, fontSize = 11.sp, lineHeight = 16.sp)
     }
 }
 
