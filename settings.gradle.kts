@@ -18,3 +18,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AutomBotClient"
 include(":app")
+include(":networkprobe")
