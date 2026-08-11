@@ -3,6 +3,7 @@ package com.autombot.client.protocols.vless
 import android.content.Context
 import com.autombot.client.core.AutomBotVpnService
 import com.autombot.client.protocols.ssh.Socks5Server
+import com.autombot.client.protocols.vmess.VmessUnderlyingNetworkDns
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +18,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.Inet4Address
 import java.net.ServerSocket
 
 enum class VlessStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
@@ -37,8 +39,10 @@ data class ManagedVlessConnection(
  * especificacao, nao testado contra servidor real ainda.
  */
 class VlessTunnelManager(context: Context) {
-    private val prefs = context.getSharedPreferences("autombot_vless", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences("autombot_vless", Context.MODE_PRIVATE)
     private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val underlyingDns = VmessUnderlyingNetworkDns(appContext)
 
     private val _connections = MutableStateFlow<List<ManagedVlessConnection>>(emptyList())
     val connections: StateFlow<List<ManagedVlessConnection>> = _connections
@@ -90,6 +94,16 @@ class VlessTunnelManager(context: Context) {
 
         withContext(Dispatchers.IO) {
             try {
+                // Resolve o endpoint ANTES de expor o SOCKS local como conectado. A
+                // consulta é feita na rede física e fica em cache curto no resolver;
+                // depois que o TUN subir, OkHttp continua usando esse mesmo resolver
+                // fora da VPN sem alterar hostname, TLS/SNI ou Host WebSocket.
+                val endpointAddress = preResolveServer(config.server)
+                AppLog.log(
+                    "VLESS \"$connectionName\": endpoint pré-resolvido ${config.server} -> $endpointAddress pela rede física",
+                    AppLog.Level.SUCCESS
+                )
+
                 val socksPort = findFreePort()
                 val socksServer = Socks5Server(
                     socksPort,
@@ -142,7 +156,8 @@ class VlessTunnelManager(context: Context) {
                 config = config,
                 destHost = destHost,
                 destPort = destPort,
-                protectSocket = { socket -> AutomBotVpnService.protectSocket(socket) }
+                protectSocket = { socket -> AutomBotVpnService.protectSocket(socket) },
+                dns = underlyingDns
             )
         } catch (e: Exception) {
             val detail = "${e.javaClass.simpleName}: ${e.message}"
@@ -167,12 +182,43 @@ class VlessTunnelManager(context: Context) {
                 destHost = destHost,
                 destPort = destPort,
                 protectSocket = { socket -> AutomBotVpnService.protectSocket(socket) },
-                onIncoming = onIncoming
+                onIncoming = onIncoming,
+                dns = underlyingDns
             )
         } catch (e: Exception) {
             val detail = "${e.javaClass.simpleName}: ${e.message}"
             AppLog.log("VLESS \"$connectionName\": falha ao abrir UDP para $destHost:$destPort — $detail", AppLog.Level.ERROR)
             null
+        }
+    }
+
+    private fun preResolveServer(server: String): String {
+        require(server.isNotBlank()) { "Servidor VLESS vazio" }
+
+        if (isIpLiteral(server)) return server
+
+        val addresses = underlyingDns.lookup(server)
+        val selected = addresses.firstOrNull { it is Inet4Address }
+            ?: addresses.firstOrNull()
+            ?: throw java.net.UnknownHostException(
+                "Nenhum endereço retornado para o servidor VLESS $server"
+            )
+
+        return selected.hostAddress
+            ?: throw java.net.UnknownHostException(
+                "Endereço inválido retornado para o servidor VLESS $server"
+            )
+    }
+
+    private fun isIpLiteral(host: String): Boolean {
+        if (host.contains(':')) return true
+        val parts = host.split('.')
+        if (parts.size != 4) return false
+        return parts.all { part ->
+            part.isNotEmpty() &&
+                part.length <= 3 &&
+                part.all { it.isDigit() } &&
+                part.toIntOrNull()?.let { it in 0..255 } == true
         }
     }
 
