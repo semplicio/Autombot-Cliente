@@ -52,19 +52,17 @@ class MainActivity : ComponentActivity() {
             AutomBotProbeTheme {
                 ProbeScreen(
                     engine = engine,
-                    onShare = { report -> shareReport(report) }
+                    onShare = { report -> shareReport(report) },
+                    onOpenProxyAnalyzer = {
+                        startActivity(Intent(this, ProxyAnalyzerActivity::class.java))
+                    }
                 )
             }
         }
     }
 
     private fun shareReport(report: ProbeReport) {
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/json"
-            putExtra(Intent.EXTRA_SUBJECT, "AutomBot Network Probe")
-            putExtra(Intent.EXTRA_TEXT, report.toJson())
-        }
-        startActivity(Intent.createChooser(intent, "Compartilhar diagnóstico"))
+        ReportShare.share(this, report.toJson())
     }
 }
 
@@ -85,7 +83,8 @@ private fun AutomBotProbeTheme(content: @Composable () -> Unit) {
 @Composable
 private fun ProbeScreen(
     engine: NetworkProbeEngine,
-    onShare: (ProbeReport) -> Unit
+    onShare: (ProbeReport) -> Unit,
+    onOpenProxyAnalyzer: () -> Unit
 ) {
     var host by remember { mutableStateOf("core.infinitenet.net") }
     var tcpPort by remember { mutableStateOf("443") }
@@ -130,6 +129,17 @@ private fun ProbeScreen(
             }
 
             item { ToolsCard() }
+
+            item {
+                Button(
+                    onClick = onOpenProxyAnalyzer,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = SurfaceAlt)
+                ) {
+                    Text("Abrir Proxy Analyzer", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                }
+            }
 
             validationError?.let { error ->
                 item { Text(error, color = Fail, fontSize = 12.sp) }
@@ -206,7 +216,7 @@ private fun ProbeScreen(
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = SurfaceAlt)
                     ) {
-                        Text("Exportar diagnóstico JSON", color = TextPrimary)
+                        Text("Compartilhar diagnóstico JSON", color = TextPrimary)
                     }
                 }
             }
@@ -334,6 +344,7 @@ private fun ToolsCard() {
                 "• TLS/SNI, validade do certificado e ALPN\n" +
                 "• HTTPS e WebSocket TLS\n" +
                 "• Matriz UDP para Hysteria2, TUIC, WireGuard e portas personalizadas\n" +
+                "• Proxy Analyzer para HTTP CONNECT e SOCKS5\n" +
                 "• Pontuação de capacidade e candidatos de transporte",
             color = TextDim,
             fontSize = 11.sp,
