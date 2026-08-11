@@ -3,6 +3,7 @@ package com.autombot.networkprobe
 import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
+import android.net.Uri
 import androidx.core.content.FileProvider
 import java.io.File
 import java.text.SimpleDateFormat
@@ -16,25 +17,37 @@ object ReportShare {
 
         val dir = File(activity.cacheDir, "shared_reports").apply { mkdirs() }
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-        val file = File(dir, "autombot-network-probe-$stamp.json")
-        file.writeText(enrichedJson, Charsets.UTF_8)
+        val jsonFile = File(dir, "autombot-network-probe-$stamp.json")
+        val textFile = File(dir, "autombot-network-probe-$stamp.txt")
+        jsonFile.writeText(enrichedJson, Charsets.UTF_8)
+        textFile.writeText(readableText, Charsets.UTF_8)
 
-        val uri = FileProvider.getUriForFile(
+        val jsonUri = FileProvider.getUriForFile(
             activity,
             "${activity.packageName}.fileprovider",
-            file
+            jsonFile
+        )
+        val textUri = FileProvider.getUriForFile(
+            activity,
+            "${activity.packageName}.fileprovider",
+            textFile
         )
 
-        val sendFile = Intent(Intent.ACTION_SEND).apply {
-            type = "application/json"
+        val streams = arrayListOf<Uri>(textUri, jsonUri)
+        val clip = ClipData.newRawUri("AutomBot Network Probe TXT", textUri).apply {
+            addItem(ClipData.Item(jsonUri))
+        }
+
+        val sendFiles = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "*/*"
             putExtra(Intent.EXTRA_SUBJECT, "AutomBot Network Probe")
             putExtra(Intent.EXTRA_TEXT, readableText)
-            putExtra(Intent.EXTRA_STREAM, uri)
-            clipData = ClipData.newRawUri("AutomBot Network Probe JSON", uri)
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, streams)
+            clipData = clip
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        val chooser = Intent.createChooser(sendFile, "Compartilhar diagnóstico")
+        val chooser = Intent.createChooser(sendFiles, "Compartilhar diagnóstico")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
         activity.startActivity(chooser)
