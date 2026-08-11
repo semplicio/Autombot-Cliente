@@ -8,6 +8,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
@@ -15,37 +16,67 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/**
- * Cliente HTTP pro painel AutomBot Core — fluxo "Já tenho um domínio"
- * (modo gerenciado, ver SPEC.md secao 3/4/7).
- *
- * Corresponde aos endpoints novos do painel (api/v1/teste.php e
- * api/v1/configs.php — ver arquivos entregues do lado do painel):
- *  1. createTrial(): cria a conta de teste de verdade na VPS (via automcore)
- *  2. fetchConfigs(): busca de volta a config PRONTA de cada protocolo
- *     (vmess://, vless://, trojan://, ss://, .conf do WireGuard, dados de
- *     acesso SSH) — o app so precisa importar cada uma no manager certo.
- *
- * CORRECAO: a versao anterior desse arquivo era só TODO() — nunca tinha
- * implementação nenhuma, então a tela "Já tenho um domínio" nunca fazia
- * chamada real nenhuma (só uma animação de progresso fake, ver
- * ProgressStepsScreen.kt).
- */
+/** Cliente HTTP pro painel AutomBot Core — fluxo de modo gerenciado. */
 class PanelException(message: String) : Exception(message)
+
+/**
+ * Uma rota alternativa da mesma credencial/protocolo.
+ *
+ * Exemplo Xray v2:
+ * - direct-http80: core.example:80, WS sem TLS
+ * - cdn-443: distribuição CDN:443, WS+TLS
+ * - origin-tls: domínio da origem:8081, WS+TLS
+ */
+data class ProtocolRoute(
+    val id: String,
+    val label: String,
+    val uri: String?,
+    val host: String?,
+    val port: Int?,
+    val transport: String?,
+    val tls: Boolean,
+    val path: String?,
+    val priority: Int,
+    val recommended: Boolean
+)
 
 data class ProtocolPackage(
     val protocol: String,
     val success: Boolean,
     val error: String? = null,
-    /** Item cru inteiro devolvido pelo painel pra esse protocolo — usar pra
-     *  protocolos sem formato padronizado ainda (ex: ssh, ver ressalva no
-     *  configs.php do painel). */
+    /** Item cru inteiro devolvido pelo painel pra esse protocolo. */
     val raw: JSONObject? = null,
-    /** Atalho: presente quando o protocolo é baseado em URI (vmess/vless/trojan/ss). */
+    /** URI legada. Continua sendo aceita quando o painel ainda não repassa rotas. */
     val uri: String? = null,
     /** Atalho: presente só pro WireGuard (.conf cru). */
-    val wireGuardConf: String? = null
-)
+    val wireGuardConf: String? = null,
+    val configVersion: Int = 1,
+    val preferredRoute: String? = null,
+    val routes: List<ProtocolRoute> = emptyList()
+) {
+    /**
+     * Escolhe a URI indicada pelo Core, sem codificar operadora/domínio no APK.
+     * Se o painel ainda estiver no contrato antigo, cai na URI legada.
+     */
+    fun effectiveUri(): String? {
+        val preferred = preferredRoute?.let { wanted -> routes.firstOrNull { it.id == wanted } }
+        val recommendedRoute = routes
+            .filter { it.recommended && !it.uri.isNullOrBlank() }
+            .minByOrNull { it.priority }
+        val firstUsable = routes
+            .filter { !it.uri.isNullOrBlank() }
+            .minByOrNull { it.priority }
+        return preferred?.uri?.takeIf { it.isNotBlank() }
+            ?: recommendedRoute?.uri
+            ?: firstUsable?.uri
+            ?: uri
+    }
+
+    fun selectedRoute(): ProtocolRoute? {
+        val effective = effectiveUri() ?: return null
+        return routes.firstOrNull { it.uri == effective }
+    }
+}
 
 data class PanelConfigsResponse(
     val usuario: String,
@@ -90,7 +121,6 @@ class PanelWebhookClient(
         .writeTimeout(20, TimeUnit.SECONDS)
         .build()
 
-    /** Checagem simples de que o domínio responde — não exige API key nem conta. */
     suspend fun ping(): Boolean {
         return try {
             val request = Request.Builder().url(base).head().build()
@@ -101,14 +131,6 @@ class PanelWebhookClient(
         }
     }
 
-    /**
-     * Confirma que a API key do app é aceita por esse painel, sem precisar de uma
-     * conta existente pra testar. Não existe (ainda) um endpoint dedicado só pra
-     * isso — reaproveita validade.php com um usuário que não deve existir de
-     * verdade: um 401 aqui é SEMPRE "key errada/ausente" (checado antes de olhar
-     * o usuário, ver api/bootstrap.php::exigirApiKey()); qualquer outra resposta
-     * (404 "conta não encontrada" incluso) já confirma que a key foi aceita.
-     */
     suspend fun checkApiKeyAccepted(): Boolean {
         val url = "$base/api/v1/validade.php?usuario=" + URLEncoder.encode("__ping_check__", "UTF-8")
         val request = Request.Builder().url(url).addHeader("X-API-Key", apiKey).get().build()
@@ -116,7 +138,6 @@ class PanelWebhookClient(
         return response.code != 401
     }
 
-    /** POST /api/v1/teste.php — cria a conta de teste de verdade. */
     suspend fun createTrial(
         deviceId: String,
         usuario: String,
@@ -141,14 +162,18 @@ class PanelWebhookClient(
         )
     }
 
-    /** GET /api/v1/configs_versao.php?usuario=X — checagem leve (só o hash, sem montar o pacote inteiro). */
     suspend fun fetchConfigVersion(usuario: String): String {
         val url = "$base/api/v1/configs_versao.php?usuario=" + URLEncoder.encode(usuario, "UTF-8")
         val json = requestJson("GET", url, null)
         return json.optString("versao")
     }
 
-    /** GET /api/v1/configs.php?usuario=X — busca as configs prontas de cada protocolo. */
+    /**
+     * Busca as configs prontas. Aceita tanto o contrato legado (URI única)
+     * quanto o contrato route-aware do Core. Também aceita ``pacote`` como
+     * objeto aninhado caso o painel opte por repassar a resposta do Core sem
+     * achatar todos os campos.
+     */
     suspend fun fetchConfigs(usuario: String): PanelConfigsResponse {
         val url = "$base/api/v1/configs.php?usuario=" + URLEncoder.encode(usuario, "UTF-8")
         val json = requestJson("GET", url, null)
@@ -157,16 +182,24 @@ class PanelWebhookClient(
         val protocols = mutableMapOf<String, ProtocolPackage>()
         protocolosJson.keys().forEach { chave ->
             val item = protocolosJson.optJSONObject(chave) ?: return@forEach
-            val sucesso = item.optBoolean("sucesso", false)
+            val pacote = item.optJSONObject("pacote") ?: item
+            val sucesso = item.optBoolean("sucesso", pacote.optBoolean("sucesso", false))
+            val rotasJson = pacote.optJSONArray("routes") ?: pacote.optJSONArray("rotas")
+            val routes = rotasJson.toProtocolRoutes()
+            val preferredRoute = pacote.optString("preferred_route")
+                .ifBlank { pacote.optString("rota_preferida") }
+                .takeIf { it.isNotBlank() }
+
             protocols[chave] = ProtocolPackage(
                 protocol = chave,
                 success = sucesso,
                 error = item.optString("erro").takeIf { it.isNotBlank() },
                 raw = item,
-                uri = item.optString("uri").takeIf { it.isNotBlank() },
-                // CORRECAO: assumi "conf" antes de ter uma resposta real do
-                // automcore pra conferir — o formato de verdade usa "config".
-                wireGuardConf = item.optString("config").takeIf { it.isNotBlank() }
+                uri = pacote.optString("uri").takeIf { it.isNotBlank() },
+                wireGuardConf = pacote.optString("config").takeIf { it.isNotBlank() },
+                configVersion = pacote.optInt("config_version", pacote.optInt("versao_config", 1)),
+                preferredRoute = preferredRoute,
+                routes = routes
             )
         }
 
@@ -180,7 +213,6 @@ class PanelWebhookClient(
         )
     }
 
-    /** Feed público de divulgações exibido no Dashboard do modo gerenciado. */
     suspend fun fetchPromotions(): List<PanelPromotion> {
         var lastError: Exception? = null
         val endpoints = listOf("$base/v1/divulgacoes/publicas", "$base/api/v1/divulgacoes.php")
@@ -208,9 +240,31 @@ class PanelWebhookClient(
         throw PanelException(lastError?.message ?: "O painel não possui o feed de divulgações")
     }
 
-    private fun org.json.JSONArray?.toStringList(): List<String> {
+    private fun JSONArray?.toStringList(): List<String> {
         if (this == null) return emptyList()
         return (0 until length()).map { optString(it) }
+    }
+
+    private fun JSONArray?.toProtocolRoutes(): List<ProtocolRoute> {
+        if (this == null) return emptyList()
+        return (0 until length()).mapNotNull { index ->
+            val route = optJSONObject(index) ?: return@mapNotNull null
+            val id = route.optString("id").ifBlank { "route-$index" }
+            val uri = route.optString("uri").takeIf { it.isNotBlank() }
+            val rawPort = route.optInt("port", route.optInt("porta", -1))
+            ProtocolRoute(
+                id = id,
+                label = route.optString("label").ifBlank { route.optString("nome") }.ifBlank { id },
+                uri = uri,
+                host = route.optString("host").takeIf { it.isNotBlank() },
+                port = rawPort.takeIf { it in 1..65535 },
+                transport = route.optString("transport").ifBlank { route.optString("transporte") }.takeIf { it.isNotBlank() },
+                tls = route.optBoolean("tls", false),
+                path = route.optString("path").takeIf { it.isNotBlank() && it != "null" },
+                priority = route.optInt("priority", route.optInt("prioridade", (index + 1) * 10)),
+                recommended = route.optBoolean("recommended", route.optBoolean("recomendada", false))
+            )
+        }
     }
 
     private suspend fun requestJson(metodo: String, url: String, corpo: JSONObject?): JSONObject {
@@ -251,11 +305,6 @@ class PanelWebhookClient(
     }
 
     companion object {
-        // CORRECAO: ficava só um placeholder de texto aqui — eu pedia pro
-        // usuário trocar manualmente, mas nunca coloquei o valor real,
-        // e cada entrega nova desse arquivo arriscava sobrescrever uma
-        // edição manual feita no Android Studio. Chave real do painel
-        // (vpn.infinitenet.net) direto aqui agora.
         const val DEFAULT_API_KEY = "yXWpHdzagaa3LD4ZxlOxwjOyZUGv89a9"
     }
 }
