@@ -25,7 +25,7 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
 
-internal enum class CoreCaseStatus { PASS, WARN, FAIL }
+enum class CoreCaseStatus { PASS, WARN, FAIL }
 
 data class CoreLayerResult(
     val name: String,
