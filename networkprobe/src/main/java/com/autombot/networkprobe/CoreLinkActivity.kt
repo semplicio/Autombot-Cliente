@@ -56,6 +56,9 @@ class CoreLinkActivity : ComponentActivity() {
                             Intent(this, MainActivity::class.java)
                                 .putExtra(EXTRA_USE_SAVED_CORE_PROFILE, true)
                         )
+                    },
+                    onTestAll = {
+                        startActivity(Intent(this, CoreFullProbeActivity::class.java))
                     }
                 )
             }
@@ -68,7 +71,8 @@ private fun CoreLinkScreen(
     profileStore: CoreProfileStore,
     tokenStore: SecureProbeTokenStore,
     syncClient: AutomCoreSyncClient,
-    onTestSaved: () -> Unit
+    onTestSaved: () -> Unit,
+    onTestAll: () -> Unit
 ) {
     var managerUrl by remember {
         mutableStateOf(profileStore.managerUrl().ifBlank { "manager.infinitenet.net" })
@@ -226,7 +230,26 @@ private fun CoreLinkScreen(
                                 fontSize = 11.sp,
                                 lineHeight = 16.sp
                             )
+                            if (!protocol.originHost.isNullOrBlank() && protocol.originPort != null) {
+                                Text(
+                                    "  origem: ${protocol.originHost}:${protocol.originPort}",
+                                    color = LinkDim,
+                                    fontSize = 10.sp
+                                )
+                            }
                         }
+                    }
+                }
+
+                item {
+                    Button(
+                        onClick = onTestAll,
+                        enabled = !running,
+                        modifier = Modifier.fillMaxWidth().height(54.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = LinkAccent)
+                    ) {
+                        Text("Executar teste completo do Core", fontWeight = FontWeight.SemiBold)
                     }
                 }
 
@@ -234,11 +257,11 @@ private fun CoreLinkScreen(
                     Button(
                         onClick = onTestSaved,
                         enabled = !running,
-                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
                         shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = LinkAccent)
+                        colors = ButtonDefaults.buttonColors(containerColor = LinkSurfaceAlt)
                     ) {
-                        Text("Testar configuração salva nesta rede", fontWeight = FontWeight.SemiBold)
+                        Text("Abrir teste manual com perfil carregado", color = LinkText)
                     }
                 }
 
