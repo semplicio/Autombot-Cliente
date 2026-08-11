@@ -14,8 +14,11 @@ import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
 
 enum class ProxyKind { AUTO, HTTP, SOCKS5 }
 
@@ -26,7 +29,13 @@ data class ProxyAnalyzerConfig(
     val username: String = "",
     val password: String = "",
     val targetHost: String = "core.infinitenet.net",
-    val targetPort: Int = 443
+    val targetPort: Int = 443,
+    val webSocketPath: String = "/"
+)
+
+data class ProxyPortCandidate(
+    val port: Int,
+    val latencyMs: Long
 )
 
 data class ProxyAnalyzerReport(
@@ -36,12 +45,13 @@ data class ProxyAnalyzerReport(
     val results: List<ProbeResult>,
     val capabilities: List<String>,
     val recommendation: String,
+    val manual: String,
     val startedAtMs: Long,
     val finishedAtMs: Long
 ) {
     fun toJson(): String = JSONObject().apply {
         put("tool", "AutomBot Proxy Analyzer")
-        put("version", "0.1.0")
+        put("version", "0.2.0")
         put("started_at_ms", startedAtMs)
         put("finished_at_ms", finishedAtMs)
         put("network", networkLabel)
@@ -54,6 +64,7 @@ data class ProxyAnalyzerReport(
         put("target", JSONObject().apply {
             put("host", config.targetHost)
             put("port", config.targetPort)
+            put("websocket_path", config.webSocketPath)
         })
         put("results", JSONArray().apply {
             results.forEach { result ->
@@ -66,6 +77,7 @@ data class ProxyAnalyzerReport(
         })
         put("capabilities", JSONArray(capabilities))
         put("recommendation", recommendation)
+        put("connection_manual", manual)
     }.toString(2)
 }
 
@@ -73,6 +85,28 @@ class ProxyAnalyzerEngine(context: Context) {
     private val appContext = context.applicationContext
     private val connectivityManager =
         appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    suspend fun detectCommonPorts(proxyHost: String): List<ProxyPortCandidate> = withContext(Dispatchers.IO) {
+        if (proxyHost.isBlank()) return@withContext emptyList()
+        val network = selectPhysicalNetwork() ?: return@withContext emptyList()
+        val addresses = runCatching { network.getAllByName(proxyHost).toList() }.getOrDefault(emptyList())
+        if (addresses.isEmpty()) return@withContext emptyList()
+        val address = addresses.firstOrNull { it is Inet4Address } ?: addresses.first()
+        val found = mutableListOf<ProxyPortCandidate>()
+
+        for (port in COMMON_PROXY_PORTS) {
+            val started = System.nanoTime()
+            val opened = runCatching {
+                network.socketFactory.createSocket().use { socket ->
+                    socket.connect(InetSocketAddress(address, port), PORT_DETECT_TIMEOUT_MS)
+                }
+            }.isSuccess
+            if (opened) {
+                found += ProxyPortCandidate(port, elapsedMs(started))
+            }
+        }
+        found.sortedBy { it.latencyMs }
+    }
 
     suspend fun analyze(config: ProxyAnalyzerConfig): ProxyAnalyzerReport = withContext(Dispatchers.IO) {
         val startedAt = System.currentTimeMillis()
@@ -84,6 +118,7 @@ class ProxyAnalyzerEngine(context: Context) {
                 results = listOf(ProbeResult("Rede física", ProbeStatus.FAIL, "Nenhuma rede física disponível")),
                 capabilities = emptyList(),
                 recommendation = "Conecte o aparelho a uma rede antes de testar o proxy.",
+                manual = "Nenhum manual foi gerado porque não existe uma rede física disponível.",
                 startedAtMs = startedAt,
                 finishedAtMs = System.currentTimeMillis()
             )
@@ -118,10 +153,21 @@ class ProxyAnalyzerEngine(context: Context) {
         results += tcpProxyProbe(network, address, config.proxyPort)
 
         if (config.kind == ProxyKind.AUTO || config.kind == ProxyKind.HTTP) {
-            results += httpConnectProbe(network, address, config)
+            val connect = httpConnectProbe(network, address, config)
+            results += connect
+            if (connect.status == ProbeStatus.PASS) {
+                results += tlsViaHttpConnectProbe(network, address, config)
+                results += wssViaHttpConnectProbe(network, address, config)
+            }
         }
+
         if (config.kind == ProxyKind.AUTO || config.kind == ProxyKind.SOCKS5) {
-            results += socks5ConnectProbe(network, address, config)
+            val connect = socks5ConnectProbe(network, address, config)
+            results += connect
+            if (connect.status == ProbeStatus.PASS) {
+                results += tlsViaSocks5Probe(network, address, config)
+                results += wssViaSocks5Probe(network, address, config)
+            }
             results += socks5UdpAssociateProbe(network, address, config)
         }
 
@@ -141,43 +187,68 @@ class ProxyAnalyzerEngine(context: Context) {
         results: List<ProbeResult>,
         startedAt: Long
     ): ProxyAnalyzerReport {
-        val httpConnect = results.firstOrNull { it.name == "HTTP CONNECT" }?.status == ProbeStatus.PASS
-        val socksConnect = results.firstOrNull { it.name == "SOCKS5 CONNECT" }?.status == ProbeStatus.PASS
-        val socksUdp = results.firstOrNull { it.name == "SOCKS5 UDP ASSOCIATE" }?.status == ProbeStatus.PASS
+        val httpConnect = passed(results, "HTTP CONNECT")
+        val httpTls = passed(results, "TLS via HTTP CONNECT")
+        val httpWss = passed(results, "WSS via HTTP CONNECT")
+        val socksConnect = passed(results, "SOCKS5 CONNECT")
+        val socksTls = passed(results, "TLS via SOCKS5")
+        val socksWss = passed(results, "WSS via SOCKS5")
+        val socksUdp = passed(results, "SOCKS5 UDP ASSOCIATE")
         val tcp = results.firstOrNull { it.name.startsWith("TCP do proxy") }?.status == ProbeStatus.PASS
 
-        val capabilities = buildList {
-            if (httpConnect) {
-                add("HTTP CONNECT: túnel TCP genérico confirmado até ${config.targetHost}:${config.targetPort}")
-                add("Candidato para SSH via HTTP CONNECT e OpenVPN TCP quando o cliente suporta proxy HTTP")
-                add("Candidato para TLS/WebSocket/VMess/VLESS somente quando o cliente suporta encadeamento por HTTP CONNECT")
-            }
-            if (socksConnect) {
-                add("SOCKS5 CONNECT: túnel TCP genérico confirmado até ${config.targetHost}:${config.targetPort}")
-                add("Candidato para SSH/TCP, OpenVPN TCP e transportes TLS/WS quando o cliente suporta upstream SOCKS5")
-            }
-            if (socksUdp) {
-                add("SOCKS5 UDP ASSOCIATE anunciado pelo proxy; tráfego UDP real exige suporte explícito no cliente e teste de dados")
-            }
-            if (tcp && !httpConnect && !socksConnect) {
-                add("A porta do proxy está acessível, mas nenhum método HTTP CONNECT/SOCKS5 testado foi confirmado")
-            }
+        val capabilities = mutableListOf<String>()
+        if (httpConnect) {
+            capabilities += "HTTP CONNECT: túnel TCP confirmado até ${config.targetHost}:${config.targetPort}"
+            capabilities += "SSH/OpenVPN TCP são candidatos quando a porta final corresponde ao serviço e o cliente suporta proxy HTTP"
+        }
+        if (httpTls) {
+            capabilities += "TLS válido através do HTTP CONNECT: HTTPS e transportes TLS podem usar esse caminho"
+        }
+        if (httpWss) {
+            capabilities += "WebSocket Seguro (WSS) confirmado através do HTTP CONNECT no path ${normalizedPath(config.webSocketPath)}"
+            capabilities += "VMess/VLESS sobre WSS são candidatos quando configurados nesse endpoint e o cliente suporta upstream HTTP CONNECT"
+        }
+        if (socksConnect) {
+            capabilities += "SOCKS5 CONNECT: túnel TCP confirmado até ${config.targetHost}:${config.targetPort}"
+            capabilities += "SSH/TCP e OpenVPN TCP são candidatos quando o cliente suporta upstream SOCKS5"
+        }
+        if (socksTls) {
+            capabilities += "TLS válido através do SOCKS5: transportes TLS podem usar esse upstream"
+        }
+        if (socksWss) {
+            capabilities += "WSS confirmado através do SOCKS5 no path ${normalizedPath(config.webSocketPath)}"
+        }
+        if (socksUdp) {
+            capabilities += "SOCKS5 UDP ASSOCIATE aceito; relay UDP real ainda precisa de teste fim a fim e suporte explícito do cliente"
+        }
+        if (tcp && !httpConnect && !socksConnect) {
+            capabilities += "A porta do proxy está acessível, mas HTTP CONNECT e SOCKS5 não foram confirmados"
         }
 
         val recommendation = when {
+            httpWss ->
+                "HTTP CONNECT + TLS + WSS foram confirmados. Este é o caminho mais completo observado e o manual abaixo mostra como reproduzir a configuração com o endpoint testado."
+            socksWss ->
+                "SOCKS5 + TLS + WSS foram confirmados. Use upstream SOCKS5 apenas nos protocolos do AutomBot que suportem esse encadeamento."
+            httpTls ->
+                "HTTP CONNECT e TLS foram confirmados. Priorize transportes TCP/TLS compatíveis com proxy HTTP."
+            socksTls ->
+                "SOCKS5 CONNECT e TLS foram confirmados. Priorize transportes TCP/TLS com suporte a upstream SOCKS5."
             httpConnect && socksConnect ->
-                "O endpoint aceita HTTP CONNECT e SOCKS5. Para maior compatibilidade com o AutomBot, priorize o método que o protocolo/cliente suporta nativamente e valide o transporte real antes de usar em produção."
+                "O endpoint aceita HTTP CONNECT e SOCKS5. Compare o suporte de cada protocolo do AutomBot antes de escolher o upstream."
             httpConnect ->
-                "Proxy HTTP CONNECT funcional. Use-o apenas em transportes TCP que tenham suporte explícito a proxy HTTP/CONNECT no cliente."
+                "Proxy HTTP CONNECT funcional. SSH/OpenVPN TCP e outros transportes TCP são candidatos quando a porta final corresponde ao serviço."
             socksConnect && socksUdp ->
-                "SOCKS5 funcional para TCP e com UDP ASSOCIATE disponível. O uso com protocolos UDP depende de suporte explícito ao relay SOCKS5 UDP no cliente."
+                "SOCKS5 funcional para TCP e com UDP ASSOCIATE disponível. UDP fim a fim ainda precisa ser validado."
             socksConnect ->
-                "SOCKS5 CONNECT funcional para TCP. Transportes TCP podem ser encadeados quando o cliente oferece suporte a upstream SOCKS5."
+                "SOCKS5 CONNECT funcional para TCP. Use somente em protocolos que suportem upstream SOCKS5."
             tcp ->
-                "A rede alcança o proxy, mas o tipo de proxy não foi confirmado. Verifique autenticação, tipo e política de CONNECT do servidor."
+                "A rede alcança a porta do proxy, mas o tipo de proxy não foi confirmado. Verifique autenticação, tipo do servidor ou outra porta comum."
             else ->
-                "O proxy não está alcançável nesta rede. Compare o mesmo proxy no Wi-Fi e na rede móvel para separar bloqueio de rota/porta de configuração do proxy."
+                "O proxy não está alcançável nesta rede. Use a detecção de portas comuns ou compare o mesmo proxy no Wi-Fi e na rede móvel."
         }
+
+        val manual = buildProxyConnectionManual(config, networkLabel, results)
 
         return ProxyAnalyzerReport(
             config = config,
@@ -186,6 +257,7 @@ class ProxyAnalyzerEngine(context: Context) {
             results = results,
             capabilities = capabilities,
             recommendation = recommendation,
+            manual = manual,
             startedAtMs = startedAt,
             finishedAtMs = System.currentTimeMillis()
         )
@@ -217,55 +289,62 @@ class ProxyAnalyzerEngine(context: Context) {
         config: ProxyAnalyzerConfig
     ): ProbeResult {
         val started = System.nanoTime()
+        var tunnel: HttpTunnel? = null
         return try {
-            openProxySocket(network, address, config.proxyPort).use { socket ->
-                val output = BufferedOutputStream(socket.getOutputStream())
-                val input = BufferedInputStream(socket.getInputStream())
-                val auth = if (config.username.isNotBlank()) {
-                    val token = Base64.getEncoder().encodeToString(
-                        "${config.username}:${config.password}".toByteArray(Charsets.ISO_8859_1)
-                    )
-                    "Proxy-Authorization: Basic $token\r\n"
-                } else ""
-
-                val request = buildString {
-                    append("CONNECT ${config.targetHost}:${config.targetPort} HTTP/1.1\r\n")
-                    append("Host: ${config.targetHost}:${config.targetPort}\r\n")
-                    append("Proxy-Connection: keep-alive\r\n")
-                    append(auth)
-                    append("\r\n")
-                }
-                output.write(request.toByteArray(Charsets.ISO_8859_1))
-                output.flush()
-
-                val statusLine = readHttpLine(input)
-                val code = statusLine.split(' ').getOrNull(1)?.toIntOrNull()
-                when {
-                    code in 200..299 -> ProbeResult(
-                        "HTTP CONNECT",
-                        ProbeStatus.PASS,
-                        "$statusLine · túnel até ${config.targetHost}:${config.targetPort} em ${elapsedMs(started)} ms"
-                    )
-                    code == 407 -> ProbeResult(
-                        "HTTP CONNECT",
-                        ProbeStatus.WARN,
-                        "$statusLine · autenticação do proxy necessária ou credencial rejeitada"
-                    )
-                    code != null -> ProbeResult(
-                        "HTTP CONNECT",
-                        ProbeStatus.FAIL,
-                        "$statusLine · CONNECT não autorizado para o destino informado"
-                    )
-                    else -> ProbeResult(
-                        "HTTP CONNECT",
-                        ProbeStatus.FAIL,
-                        "Resposta não reconhecida: ${statusLine.take(120)}"
-                    )
-                }
+            tunnel = establishHttpTunnel(network, address, config)
+            when {
+                tunnel.code in 200..299 -> ProbeResult(
+                    "HTTP CONNECT",
+                    ProbeStatus.PASS,
+                    "${tunnel.statusLine} · túnel até ${config.targetHost}:${config.targetPort} em ${elapsedMs(started)} ms"
+                )
+                tunnel.code == 407 -> ProbeResult(
+                    "HTTP CONNECT",
+                    ProbeStatus.WARN,
+                    "${tunnel.statusLine} · autenticação do proxy necessária ou credencial rejeitada"
+                )
+                tunnel.code != null -> ProbeResult(
+                    "HTTP CONNECT",
+                    ProbeStatus.FAIL,
+                    "${tunnel.statusLine} · CONNECT não autorizado para o destino informado"
+                )
+                else -> ProbeResult(
+                    "HTTP CONNECT",
+                    ProbeStatus.FAIL,
+                    "Resposta não reconhecida: ${tunnel.statusLine.take(120)}"
+                )
             }
         } catch (error: Exception) {
             ProbeResult("HTTP CONNECT", ProbeStatus.FAIL, error.message ?: error.javaClass.simpleName)
+        } finally {
+            runCatching { tunnel?.socket?.close() }
         }
+    }
+
+    private fun tlsViaHttpConnectProbe(
+        network: Network,
+        address: InetAddress,
+        config: ProxyAnalyzerConfig
+    ): ProbeResult = tlsThroughTunnel("TLS via HTTP CONNECT", config) {
+        val tunnel = establishHttpTunnel(network, address, config)
+        if (tunnel.code !in 200..299) {
+            tunnel.socket.close()
+            error("HTTP CONNECT respondeu ${tunnel.statusLine}")
+        }
+        tunnel.socket
+    }
+
+    private fun wssViaHttpConnectProbe(
+        network: Network,
+        address: InetAddress,
+        config: ProxyAnalyzerConfig
+    ): ProbeResult = wssThroughTunnel("WSS via HTTP CONNECT", config) {
+        val tunnel = establishHttpTunnel(network, address, config)
+        if (tunnel.code !in 200..299) {
+            tunnel.socket.close()
+            error("HTTP CONNECT respondeu ${tunnel.statusLine}")
+        }
+        tunnel.socket
     }
 
     private fun socks5ConnectProbe(
@@ -275,24 +354,32 @@ class ProxyAnalyzerEngine(context: Context) {
     ): ProbeResult {
         val started = System.nanoTime()
         return try {
-            openProxySocket(network, address, config.proxyPort).use { socket ->
-                val input = BufferedInputStream(socket.getInputStream())
-                val output = BufferedOutputStream(socket.getOutputStream())
-                socks5Negotiate(input, output, config)
-                val reply = socks5Command(input, output, 0x01, config.targetHost, config.targetPort)
-                if (reply == 0x00) {
-                    ProbeResult(
-                        "SOCKS5 CONNECT",
-                        ProbeStatus.PASS,
-                        "SOCKS5 abriu ${config.targetHost}:${config.targetPort} em ${elapsedMs(started)} ms"
-                    )
-                } else {
-                    ProbeResult("SOCKS5 CONNECT", ProbeStatus.FAIL, "SOCKS5 reply=0x${reply.toString(16)}")
-                }
+            establishSocks5Tunnel(network, address, config).use {
+                ProbeResult(
+                    "SOCKS5 CONNECT",
+                    ProbeStatus.PASS,
+                    "SOCKS5 abriu ${config.targetHost}:${config.targetPort} em ${elapsedMs(started)} ms"
+                )
             }
         } catch (error: Exception) {
             ProbeResult("SOCKS5 CONNECT", ProbeStatus.FAIL, error.message ?: error.javaClass.simpleName)
         }
+    }
+
+    private fun tlsViaSocks5Probe(
+        network: Network,
+        address: InetAddress,
+        config: ProxyAnalyzerConfig
+    ): ProbeResult = tlsThroughTunnel("TLS via SOCKS5", config) {
+        establishSocks5Tunnel(network, address, config)
+    }
+
+    private fun wssViaSocks5Probe(
+        network: Network,
+        address: InetAddress,
+        config: ProxyAnalyzerConfig
+    ): ProbeResult = wssThroughTunnel("WSS via SOCKS5", config) {
+        establishSocks5Tunnel(network, address, config)
     }
 
     private fun socks5UdpAssociateProbe(
@@ -322,6 +409,151 @@ class ProxyAnalyzerEngine(context: Context) {
             }
         } catch (error: Exception) {
             ProbeResult("SOCKS5 UDP ASSOCIATE", ProbeStatus.WARN, error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    private fun tlsThroughTunnel(
+        label: String,
+        config: ProxyAnalyzerConfig,
+        tunnelFactory: () -> Socket
+    ): ProbeResult {
+        val started = System.nanoTime()
+        var raw: Socket? = null
+        var ssl: SSLSocket? = null
+        return try {
+            raw = tunnelFactory()
+            val context = SSLContext.getInstance("TLS").apply { init(null, null, SecureRandom()) }
+            ssl = context.socketFactory.createSocket(raw, config.targetHost, config.targetPort, true) as SSLSocket
+            ssl.soTimeout = TIMEOUT_MS
+            val parameters = ssl.sslParameters
+            parameters.endpointIdentificationAlgorithm = "HTTPS"
+            ssl.sslParameters = parameters
+            ssl.startHandshake()
+            ProbeResult(
+                label,
+                ProbeStatus.PASS,
+                "${ssl.session.protocol} válido para ${config.targetHost} em ${elapsedMs(started)} ms"
+            )
+        } catch (error: Exception) {
+            ProbeResult(label, ProbeStatus.FAIL, error.message ?: error.javaClass.simpleName)
+        } finally {
+            runCatching { ssl?.close() }
+            runCatching { raw?.close() }
+        }
+    }
+
+    private fun wssThroughTunnel(
+        label: String,
+        config: ProxyAnalyzerConfig,
+        tunnelFactory: () -> Socket
+    ): ProbeResult {
+        val started = System.nanoTime()
+        var raw: Socket? = null
+        var ssl: SSLSocket? = null
+        return try {
+            raw = tunnelFactory()
+            val context = SSLContext.getInstance("TLS").apply { init(null, null, SecureRandom()) }
+            ssl = context.socketFactory.createSocket(raw, config.targetHost, config.targetPort, true) as SSLSocket
+            ssl.soTimeout = TIMEOUT_MS
+            val parameters = ssl.sslParameters
+            parameters.endpointIdentificationAlgorithm = "HTTPS"
+            ssl.sslParameters = parameters
+            ssl.startHandshake()
+
+            val output = BufferedOutputStream(ssl.getOutputStream())
+            val input = BufferedInputStream(ssl.getInputStream())
+            val keyBytes = ByteArray(16).also { SecureRandom().nextBytes(it) }
+            val key = Base64.getEncoder().encodeToString(keyBytes)
+            val path = normalizedPath(config.webSocketPath)
+            val hostHeader = if (config.targetPort == 443) config.targetHost else "${config.targetHost}:${config.targetPort}"
+            val request = buildString {
+                append("GET $path HTTP/1.1\r\n")
+                append("Host: $hostHeader\r\n")
+                append("Upgrade: websocket\r\n")
+                append("Connection: Upgrade\r\n")
+                append("Sec-WebSocket-Key: $key\r\n")
+                append("Sec-WebSocket-Version: 13\r\n")
+                append("\r\n")
+            }
+            output.write(request.toByteArray(Charsets.ISO_8859_1))
+            output.flush()
+
+            val statusLine = readHttpLine(input)
+            val code = statusLine.split(' ').getOrNull(1)?.toIntOrNull()
+            consumeHttpHeaders(input)
+            when (code) {
+                101 -> ProbeResult(
+                    label,
+                    ProbeStatus.PASS,
+                    "Upgrade WebSocket 101 confirmado em $path em ${elapsedMs(started)} ms"
+                )
+                null -> ProbeResult(label, ProbeStatus.FAIL, "Resposta WSS inválida: ${statusLine.take(120)}")
+                else -> ProbeResult(
+                    label,
+                    ProbeStatus.WARN,
+                    "TLS chegou ao servidor, mas o path $path respondeu HTTP $code em vez de 101"
+                )
+            }
+        } catch (error: Exception) {
+            ProbeResult(label, ProbeStatus.FAIL, error.message ?: error.javaClass.simpleName)
+        } finally {
+            runCatching { ssl?.close() }
+            runCatching { raw?.close() }
+        }
+    }
+
+    private fun establishHttpTunnel(
+        network: Network,
+        address: InetAddress,
+        config: ProxyAnalyzerConfig
+    ): HttpTunnel {
+        val socket = openProxySocket(network, address, config.proxyPort)
+        try {
+            val output = BufferedOutputStream(socket.getOutputStream())
+            val input = BufferedInputStream(socket.getInputStream())
+            val auth = if (config.username.isNotBlank()) {
+                val token = Base64.getEncoder().encodeToString(
+                    "${config.username}:${config.password}".toByteArray(Charsets.ISO_8859_1)
+                )
+                "Proxy-Authorization: Basic $token\r\n"
+            } else ""
+
+            val request = buildString {
+                append("CONNECT ${config.targetHost}:${config.targetPort} HTTP/1.1\r\n")
+                append("Host: ${config.targetHost}:${config.targetPort}\r\n")
+                append("Proxy-Connection: keep-alive\r\n")
+                append(auth)
+                append("\r\n")
+            }
+            output.write(request.toByteArray(Charsets.ISO_8859_1))
+            output.flush()
+
+            val statusLine = readHttpLine(input)
+            val code = statusLine.split(' ').getOrNull(1)?.toIntOrNull()
+            consumeHttpHeaders(input)
+            return HttpTunnel(socket, statusLine, code)
+        } catch (error: Exception) {
+            runCatching { socket.close() }
+            throw error
+        }
+    }
+
+    private fun establishSocks5Tunnel(
+        network: Network,
+        address: InetAddress,
+        config: ProxyAnalyzerConfig
+    ): Socket {
+        val socket = openProxySocket(network, address, config.proxyPort)
+        try {
+            val input = BufferedInputStream(socket.getInputStream())
+            val output = BufferedOutputStream(socket.getOutputStream())
+            socks5Negotiate(input, output, config)
+            val reply = socks5Command(input, output, 0x01, config.targetHost, config.targetPort)
+            if (reply != 0x00) error("SOCKS5 reply=0x${reply.toString(16)}")
+            return socket
+        } catch (error: Exception) {
+            runCatching { socket.close() }
+            throw error
         }
     }
 
@@ -392,13 +624,19 @@ class ProxyAnalyzerEngine(context: Context) {
 
     private fun readHttpLine(input: BufferedInputStream): String {
         val bytes = ArrayList<Byte>()
-        while (bytes.size < 1024) {
+        while (bytes.size < 4096) {
             val value = input.read()
             if (value < 0) break
             if (value == '\n'.code) break
             if (value != '\r'.code) bytes += value.toByte()
         }
         return bytes.toByteArray().toString(Charsets.ISO_8859_1)
+    }
+
+    private fun consumeHttpHeaders(input: BufferedInputStream) {
+        repeat(100) {
+            if (readHttpLine(input).isBlank()) return
+        }
     }
 
     private fun readExact(input: BufferedInputStream, count: Int): ByteArray {
@@ -431,10 +669,27 @@ class ProxyAnalyzerEngine(context: Context) {
         ).firstOrNull()?.first
     }
 
+    private fun passed(results: List<ProbeResult>, name: String): Boolean =
+        results.firstOrNull { it.name == name }?.status == ProbeStatus.PASS
+
+    private fun normalizedPath(path: String): String = when {
+        path.isBlank() -> "/"
+        path.startsWith('/') -> path
+        else -> "/$path"
+    }
+
     private fun elapsedMs(startNs: Long): Long =
         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
 
+    private data class HttpTunnel(
+        val socket: Socket,
+        val statusLine: String,
+        val code: Int?
+    )
+
     private companion object {
         const val TIMEOUT_MS = 5_000
+        const val PORT_DETECT_TIMEOUT_MS = 1_200
+        val COMMON_PROXY_PORTS = intArrayOf(80, 443, 1080, 3128, 8080, 8000, 8118, 8888, 8889, 9090)
     }
 }
