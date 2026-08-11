@@ -1,5 +1,6 @@
 package com.autombot.client.protocols.vless
 
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -32,6 +33,7 @@ object VlessTransport {
         destHost: String,
         destPort: Int,
         protectSocket: (java.net.Socket) -> Boolean,
+        dns: Dns = Dns.SYSTEM,
         timeoutMs: Int = 10_000
     ): Pair<InputStream, OutputStream> {
         val pipedOut = PipedOutputStream()
@@ -42,6 +44,10 @@ object VlessTransport {
         val clientBuilder = OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
+            // A resolução do endpoint é fornecida pelo manager através de um Dns
+            // amarrado à rede física. O URL continua usando o hostname original,
+            // portanto TLS/SNI, certificado e Host não são trocados pelo IP.
+            .dns(dns)
             // Mantem NAT/proxy/CDN cientes de que a conexao continua viva. Sem ping,
             // conexoes WebSocket ociosas podem ser descartadas silenciosamente.
             .pingInterval(20, TimeUnit.SECONDS)
