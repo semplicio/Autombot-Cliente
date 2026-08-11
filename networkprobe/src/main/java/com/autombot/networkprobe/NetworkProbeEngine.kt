@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.Build
 import android.telephony.TelephonyManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -15,6 +16,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.ConnectException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
@@ -28,14 +30,15 @@ import java.security.cert.X509Certificate
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
 
 /**
- * Diagnóstico de capacidade de rede para endpoints controlados pelo usuário.
+ * Diagnóstico de capacidade da rede para endpoints controlados pelo operador.
  *
- * O módulo não procura domínios de terceiros nem tenta descobrir exceções de cobrança
- * ou zero-rating. Todos os testes são realizados exclusivamente contra o host/portas
- * informados na tela.
+ * O módulo mede disponibilidade de transporte e ajuda a separar DNS, caminho IP,
+ * porta, TLS, HTTP, WebSocket e UDP. Ele não procura domínios de terceiros,
+ * zero-rating ou exceções de cobrança.
  */
 class NetworkProbeEngine(context: Context) {
     private val appContext = context.applicationContext
@@ -49,20 +52,45 @@ class NetworkProbeEngine(context: Context) {
                 config = config,
                 networkLabel = "Sem rede física disponível",
                 carrier = null,
+                networkInfo = NetworkInfo(),
                 localAddresses = emptyList(),
                 results = listOf(
-                    ProbeResult("Rede física", ProbeStatus.FAIL, "Nenhuma rede Wi‑Fi/dados móveis com acesso à Internet foi encontrada")
+                    ProbeResult(
+                        "Rede física",
+                        ProbeStatus.FAIL,
+                        "Nenhuma rede Wi-Fi/dados móveis com acesso à Internet foi encontrada"
+                    )
                 ),
+                score = 0,
+                transportHints = emptyList(),
                 recommendation = "Conecte o aparelho a uma rede e execute novamente.",
                 startedAtMs = startedAt,
                 finishedAtMs = System.currentTimeMillis()
             )
 
         val caps = connectivityManager.getNetworkCapabilities(network)
+        val link = connectivityManager.getLinkProperties(network)
         val label = describeNetwork(caps)
         val carrier = carrierName(caps)
-        val localAddresses = linkAddresses(network)
+        val localAddresses = link?.linkAddresses
+            ?.map { it.address.hostAddress.orEmpty().substringBefore('%') }
+            .orEmpty()
+
+        val networkInfo = NetworkInfo(
+            validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true,
+            metered = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) != true,
+            interfaceName = link?.interfaceName,
+            mtu = link?.mtu?.takeIf { it > 0 },
+            dnsServers = link?.dnsServers
+                ?.mapNotNull { it.hostAddress?.substringBefore('%') }
+                .orEmpty(),
+            hasIpv4 = link?.linkAddresses?.any { it.address is Inet4Address } == true,
+            hasIpv6 = link?.linkAddresses?.any { it.address is Inet6Address } == true,
+            natHint = detectNatHint(link?.linkAddresses?.map { it.address }.orEmpty())
+        )
+
         val results = mutableListOf<ProbeResult>()
+        results += networkStateResult(networkInfo)
 
         val resolved = runCatching { network.getAllByName(config.host).toList() }
             .onSuccess { addresses ->
@@ -86,33 +114,84 @@ class NetworkProbeEngine(context: Context) {
             .getOrDefault(emptyList())
 
         if (resolved.isEmpty()) {
-            return@withContext ProbeReport(
+            return@withContext buildReport(
                 config = config,
-                networkLabel = label,
+                label = label,
                 carrier = carrier,
+                networkInfo = networkInfo,
                 localAddresses = localAddresses,
                 results = results,
-                recommendation = "O endpoint não foi resolvido pela rede física; corrija DNS/host antes de testar transportes.",
-                startedAtMs = startedAt,
-                finishedAtMs = System.currentTimeMillis()
+                startedAt = startedAt
             )
         }
 
-        val preferred = preferredAddress(resolved)
-        results += tcpProbe(network, preferred, config.tcpPort)
+        val ipv4 = resolved.filterIsInstance<Inet4Address>().firstOrNull()
+        val ipv6 = resolved.filterIsInstance<Inet6Address>().firstOrNull()
+        val preferred = ipv4 ?: ipv6 ?: resolved.first()
+
+        val tcpPorts = (listOf(config.tcpPort) + config.extraTcpPorts)
+            .filter { it in 1..65535 }
+            .distinct()
+            .take(MAX_PORTS_PER_FAMILY)
+
+        tcpPorts.forEach { port ->
+            results += tcpProbe(network, preferred, port)
+        }
+
+        if (ipv4 != null && ipv6 != null) {
+            results += tcpProbe(
+                network = network,
+                address = ipv6,
+                port = config.tcpPort,
+                suffix = " IPv6"
+            )
+        }
+
         results += tlsProbe(network, preferred, config.host, config.tcpPort)
         results += httpsProbe(network, config.host, config.tcpPort)
         results += websocketProbe(network, config.host, config.tcpPort, config.webSocketPath)
-        results += udpEchoProbe(network, preferred, config.udpPort)
 
-        val recommendation = recommend(results)
-        ProbeReport(
+        val udpPorts = (listOf(config.udpPort) + config.extraUdpPorts)
+            .filter { it in 1..65535 }
+            .distinct()
+            .take(MAX_PORTS_PER_FAMILY)
+
+        udpPorts.forEach { port ->
+            results += udpResponseProbe(network, preferred, port)
+        }
+
+        buildReport(
+            config = config,
+            label = label,
+            carrier = carrier,
+            networkInfo = networkInfo,
+            localAddresses = localAddresses,
+            results = results,
+            startedAt = startedAt
+        )
+    }
+
+    private fun buildReport(
+        config: ProbeConfig,
+        label: String,
+        carrier: String?,
+        networkInfo: NetworkInfo,
+        localAddresses: List<String>,
+        results: List<ProbeResult>,
+        startedAt: Long
+    ): ProbeReport {
+        val score = calculateScore(results)
+        val transportHints = transportHints(config, results)
+        return ProbeReport(
             config = config,
             networkLabel = label,
             carrier = carrier,
+            networkInfo = networkInfo,
             localAddresses = localAddresses,
             results = results,
-            recommendation = recommendation,
+            score = score,
+            transportHints = transportHints,
+            recommendation = recommend(config, results, networkInfo),
             startedAtMs = startedAt,
             finishedAtMs = System.currentTimeMillis()
         )
@@ -125,20 +204,27 @@ class NetworkProbeEngine(context: Context) {
 
         return candidates
             .mapNotNull { network ->
-                val caps = connectivityManager.getNetworkCapabilities(network) ?: return@mapNotNull null
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
-                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return@mapNotNull null
+                val caps = connectivityManager.getNetworkCapabilities(network)
+                    ?: return@mapNotNull null
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    return@mapNotNull null
+                }
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    return@mapNotNull null
+                }
+
                 CandidateNetwork(
                     network = network,
                     validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+                    active = network == connectivityManager.activeNetwork,
                     wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
                     cellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
                 )
             }
             .sortedWith(
-                compareByDescending<CandidateNetwork> { it.validated }
-                    .thenByDescending { it.wifi }
-                    .thenByDescending { it.cellular }
+                compareByDescending<CandidateNetwork> { it.active }
+                    .thenByDescending { it.validated }
+                    .thenByDescending { it.cellular || it.wifi }
             )
             .firstOrNull()
             ?.network
@@ -146,7 +232,7 @@ class NetworkProbeEngine(context: Context) {
 
     private fun describeNetwork(caps: NetworkCapabilities?): String = when {
         caps == null -> "Rede desconhecida"
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi‑Fi"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
         caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Rede móvel"
         caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
         else -> "Outra rede"
@@ -155,67 +241,142 @@ class NetworkProbeEngine(context: Context) {
     private fun carrierName(caps: NetworkCapabilities?): String? {
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) != true) return null
         return runCatching {
-            val telephony = appContext.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            val telephony =
+                appContext.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
             telephony.networkOperatorName.takeIf { it.isNotBlank() }
         }.getOrNull()
     }
 
-    private fun linkAddresses(network: Network): List<String> =
-        connectivityManager.getLinkProperties(network)
-            ?.linkAddresses
-            ?.map { it.address.hostAddress.orEmpty().substringBefore('%') }
-            .orEmpty()
+    private fun networkStateResult(info: NetworkInfo): ProbeResult {
+        val status = if (info.validated) ProbeStatus.PASS else ProbeStatus.WARN
+        val detail = buildString {
+            append(if (info.validated) "Internet validada" else "Internet não validada pelo Android")
+            append(" | ")
+            append(if (info.metered) "rede medida" else "rede não medida")
+            info.mtu?.let { append(" | MTU=").append(it) }
+            if (info.dnsServers.isNotEmpty()) {
+                append(" | DNS=").append(info.dnsServers.joinToString())
+            }
+            info.natHint?.let { append(" | ").append(it) }
+        }
+        return ProbeResult("Estado da rede", status, detail)
+    }
 
-    private fun preferredAddress(addresses: List<InetAddress>): InetAddress =
-        addresses.firstOrNull { it is Inet4Address }
-            ?: addresses.firstOrNull()
-            ?: throw IllegalStateException("Nenhum IP resolvido")
-
-    private fun tcpProbe(network: Network, address: InetAddress, port: Int): ProbeResult {
+    private fun tcpProbe(
+        network: Network,
+        address: InetAddress,
+        port: Int,
+        suffix: String = ""
+    ): ProbeResult {
         val started = System.nanoTime()
         return try {
             network.socketFactory.createSocket().use { socket ->
                 socket.connect(InetSocketAddress(address, port), TCP_TIMEOUT_MS)
             }
             ProbeResult(
-                "TCP $port",
+                "TCP $port$suffix",
                 ProbeStatus.PASS,
-                "Conexão estabelecida com ${address.hostAddress}:$port em ${elapsedMs(started)} ms"
+                "Conexão estabelecida com ${displayAddress(address)}:$port em ${elapsedMs(started)} ms"
+            )
+        } catch (error: ConnectException) {
+            val detail = error.message.orEmpty()
+            if (isConnectionRefused(detail)) {
+                ProbeResult(
+                    "TCP $port$suffix",
+                    ProbeStatus.WARN,
+                    "${displayAddress(address)}:$port recusou a conexão. O caminho até o host respondeu, mas não há serviço TCP aceitando nessa porta."
+                )
+            } else {
+                ProbeResult(
+                    "TCP $port$suffix",
+                    ProbeStatus.FAIL,
+                    "${displayAddress(address)}:$port — ${detail.ifBlank { error.javaClass.simpleName }}"
+                )
+            }
+        } catch (_: SocketTimeoutException) {
+            ProbeResult(
+                "TCP $port$suffix",
+                ProbeStatus.FAIL,
+                "${displayAddress(address)}:$port — timeout após ${TCP_TIMEOUT_MS} ms; possível filtragem, rota indisponível ou servidor sem resposta."
             )
         } catch (error: Exception) {
             ProbeResult(
-                "TCP $port",
+                "TCP $port$suffix",
                 ProbeStatus.FAIL,
-                "${address.hostAddress}:$port — ${error.message ?: error.javaClass.simpleName}"
+                "${displayAddress(address)}:$port — ${error.message ?: error.javaClass.simpleName}"
             )
         }
     }
 
-    private fun tlsProbe(network: Network, address: InetAddress, host: String, port: Int): ProbeResult {
+    private fun tlsProbe(
+        network: Network,
+        address: InetAddress,
+        host: String,
+        port: Int
+    ): ProbeResult {
         val started = System.nanoTime()
         var raw: Socket? = null
         var ssl: SSLSocket? = null
+
         return try {
             raw = network.socketFactory.createSocket().apply {
                 connect(InetSocketAddress(address, port), TLS_TIMEOUT_MS)
                 soTimeout = TLS_TIMEOUT_MS
             }
 
-            val context = SSLContext.getInstance("TLS").apply { init(null, null, SecureRandom()) }
+            val context = SSLContext.getInstance("TLS").apply {
+                init(null, null, SecureRandom())
+            }
             ssl = context.socketFactory.createSocket(raw, host, port, true) as SSLSocket
             val params = ssl.sslParameters
             params.endpointIdentificationAlgorithm = "HTTPS"
             ssl.sslParameters = params
             ssl.startHandshake()
 
-            val peer = ssl.session.peerCertificates
-                .firstOrNull() as? X509Certificate
-            val subject = peer?.subjectX500Principal?.name ?: "certificado válido"
+            val certificate = ssl.session.peerCertificates.firstOrNull() as? X509Certificate
+            val certDetail = certificate?.let {
+                val days = TimeUnit.MILLISECONDS.toDays(it.notAfter.time - System.currentTimeMillis())
+                "cert expira em ${days}d"
+            } ?: "certificado válido"
+            val alpn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ssl.applicationProtocol.takeIf { it.isNotBlank() }
+            } else {
+                null
+            }
 
             ProbeResult(
                 "TLS/SNI $port",
                 ProbeStatus.PASS,
-                "Handshake válido para $host em ${elapsedMs(started)} ms | $subject"
+                buildString {
+                    append("TLS ")
+                    append(ssl.session.protocol)
+                    append(" válido para ")
+                    append(host)
+                    append(" em ")
+                    append(elapsedMs(started))
+                    append(" ms | ")
+                    append(certDetail)
+                    alpn?.let { append(" | ALPN=").append(it) }
+                }
+            )
+        } catch (_: SocketTimeoutException) {
+            ProbeResult(
+                "TLS/SNI $port",
+                ProbeStatus.WARN,
+                "TCP iniciou, mas não houve resposta TLS em ${TLS_TIMEOUT_MS} ms. A porta pode usar outro protocolo ou o handshake pode estar sendo filtrado."
+            )
+        } catch (error: SSLException) {
+            ProbeResult(
+                "TLS/SNI $port",
+                ProbeStatus.WARN,
+                "O servidor foi alcançado, mas o handshake TLS falhou: ${error.message ?: error.javaClass.simpleName}"
+            )
+        } catch (error: ConnectException) {
+            val detail = error.message.orEmpty()
+            ProbeResult(
+                "TLS/SNI $port",
+                if (isConnectionRefused(detail)) ProbeStatus.WARN else ProbeStatus.FAIL,
+                detail.ifBlank { error.javaClass.simpleName }
             )
         } catch (error: Exception) {
             ProbeResult(
@@ -242,15 +403,24 @@ class NetworkProbeEngine(context: Context) {
                 ProbeResult(
                     "HTTPS",
                     ProbeStatus.PASS,
-                    "Resposta HTTP ${response.code} em ${elapsedMs(started)} ms"
+                    "HTTP ${response.code} via ${response.protocol} em ${elapsedMs(started)} ms"
                 )
             }
+        } catch (_: SocketTimeoutException) {
+            ProbeResult(
+                "HTTPS",
+                ProbeStatus.WARN,
+                "Timeout HTTPS. A porta pode não oferecer HTTP/TLS mesmo que o TCP esteja alcançável."
+            )
         } catch (error: Exception) {
             ProbeResult(
                 "HTTPS",
-                ProbeStatus.FAIL,
-                error.message ?: error.javaClass.simpleName
+                ProbeStatus.WARN,
+                "HTTPS não confirmado: ${error.message ?: error.javaClass.simpleName}"
             )
+        } finally {
+            client.dispatcher.executorService.shutdown()
+            client.connectionPool.evictAll()
         }
     }
 
@@ -289,40 +459,42 @@ class NetworkProbeEngine(context: Context) {
         latch.await(WS_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
         socket.cancel()
         client.dispatcher.executorService.shutdown()
+        client.connectionPool.evictAll()
 
         return when {
             opened -> ProbeResult(
                 "WebSocket TLS",
                 ProbeStatus.PASS,
-                "Upgrade WSS confirmado em ${elapsedMs(started)} ms"
+                "Upgrade WSS confirmado em ${elapsedMs(started)} ms no path $normalizedPath"
             )
             responseCode != null -> ProbeResult(
                 "WebSocket TLS",
                 ProbeStatus.WARN,
-                "A rede alcançou o servidor, mas o endpoint WS respondeu HTTP $responseCode. Verifique o path/Host configurado."
+                "O servidor respondeu HTTP $responseCode. O caminho TCP/TLS existe, mas o path/Host pode não ser um endpoint WebSocket."
             )
             failure != null -> ProbeResult(
                 "WebSocket TLS",
-                ProbeStatus.FAIL,
-                failure.orEmpty()
+                ProbeStatus.WARN,
+                "WSS não confirmado: ${failure.orEmpty()}"
             )
             else -> ProbeResult(
                 "WebSocket TLS",
-                ProbeStatus.FAIL,
-                "Timeout sem resposta durante o upgrade WSS"
+                ProbeStatus.WARN,
+                "Timeout no upgrade WSS; isso não prova bloqueio se a porta não for WebSocket."
             )
         }
     }
 
     /**
-     * Envia um nonce UDP e aguarda eco. PASS só significa UDP bidirecional confirmado
-     * quando o endpoint remoto executa um serviço de echo/probe compatível.
-     *
-     * Se o datagrama for enviado mas não houver resposta, WARN é intencional: UDP não
-     * possui handshake e a ausência de eco não distingue bloqueio de porta de um
-     * serviço que simplesmente ignora payloads desconhecidos (Hysteria/TUIC incluídos).
+     * Envia um pequeno datagrama de probe e aguarda qualquer resposta UDP do destino.
+     * Receber resposta confirma caminho bidirecional naquela porta. A ausência de
+     * resposta continua sendo WARN: serviços UDP podem ignorar payloads desconhecidos.
      */
-    private fun udpEchoProbe(network: Network, address: InetAddress, port: Int): ProbeResult {
+    private fun udpResponseProbe(
+        network: Network,
+        address: InetAddress,
+        port: Int
+    ): ProbeResult {
         val nonce = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val payload = "AUTOMBOT-PROBE:".toByteArray() + nonce
         val started = System.nanoTime()
@@ -335,20 +507,20 @@ class NetworkProbeEngine(context: Context) {
                 socket.soTimeout = UDP_TIMEOUT_MS
                 socket.send(DatagramPacket(payload, payload.size, address, port))
 
-                val buffer = ByteArray(256)
+                val buffer = ByteArray(512)
                 val reply = DatagramPacket(buffer, buffer.size)
                 try {
                     socket.receive(reply)
                     ProbeResult(
                         "UDP $port",
                         ProbeStatus.PASS,
-                        "Resposta UDP recebida de ${reply.address.hostAddress}:${reply.port} em ${elapsedMs(started)} ms"
+                        "Resposta UDP de ${displayAddress(reply.address)}:${reply.port} em ${elapsedMs(started)} ms. Caminho bidirecional confirmado."
                     )
                 } catch (_: SocketTimeoutException) {
                     ProbeResult(
                         "UDP $port",
                         ProbeStatus.WARN,
-                        "Datagrama enviado, mas sem eco em ${UDP_TIMEOUT_MS} ms. Para confirmação real use um endpoint AutomBot UDP echo/probe."
+                        "Datagrama enviado, mas sem resposta em ${UDP_TIMEOUT_MS} ms. Pode ser filtragem ou apenas um serviço que ignora probes genéricos."
                     )
                 }
             }
@@ -363,9 +535,10 @@ class NetworkProbeEngine(context: Context) {
 
     private fun baseHttpClient(network: Network, targetHost: String): OkHttpClient {
         val dns = Dns { hostname ->
-            when {
-                hostname.equals(targetHost, ignoreCase = true) -> network.getAllByName(targetHost).toList()
-                else -> network.getAllByName(hostname).toList()
+            if (hostname.equals(targetHost, ignoreCase = true)) {
+                network.getAllByName(targetHost).toList()
+            } else {
+                network.getAllByName(hostname).toList()
             }
         }
 
@@ -378,27 +551,126 @@ class NetworkProbeEngine(context: Context) {
             .build()
     }
 
-    private fun recommend(results: List<ProbeResult>): String {
-        fun status(prefix: String): ProbeStatus? =
-            results.firstOrNull { it.name.startsWith(prefix) }?.status
+    private fun calculateScore(results: List<ProbeResult>): Int {
+        if (results.isEmpty()) return 0
+        val points = results.sumOf {
+            when (it.status) {
+                ProbeStatus.PASS -> 100
+                ProbeStatus.WARN -> 50
+                ProbeStatus.FAIL -> 0
+            }
+        }
+        return points / results.size
+    }
 
-        return when {
-            status("WebSocket TLS") == ProbeStatus.PASS ->
-                "WSS/TLS foi confirmado. VLESS/VMess sobre WebSocket TLS é um candidato forte para esta rede."
+    private fun transportHints(
+        config: ProbeConfig,
+        results: List<ProbeResult>
+    ): List<String> {
+        fun pass(name: String): Boolean =
+            results.any { it.name == name && it.status == ProbeStatus.PASS }
 
-            status("TLS/SNI") == ProbeStatus.PASS && status("TCP") == ProbeStatus.PASS ->
-                "TCP/TLS está disponível. Priorize transportes TLS sobre TCP e valide o endpoint específico do protocolo."
+        val hints = mutableListOf<String>()
 
-            status("UDP") == ProbeStatus.PASS ->
-                "UDP bidirecional foi confirmado no endpoint de probe. Vale testar Hysteria2/TUIC/WireGuard nesse mesmo caminho."
+        if (pass("WebSocket TLS")) {
+            hints += "VLESS/VMess WSS: WebSocket TLS confirmado no endpoint principal."
+        }
+        if (pass("TLS/SNI ${config.tcpPort}")) {
+            hints += "TCP/TLS: handshake válido; transportes baseados em TLS podem usar este endpoint."
+        }
+        if (pass("TCP 22") || pass("TCP 109") || pass("TCP 2222")) {
+            hints += "SSH: pelo menos uma porta SSH comum da sua infraestrutura respondeu em TCP."
+        }
+        if (pass("UDP 36712")) {
+            hints += "Hysteria2: UDP 36712 respondeu; vale validar o handshake Hysteria2 real."
+        }
+        if (pass("UDP 44300")) {
+            hints += "TUIC: UDP 44300 respondeu; vale validar o handshake TUIC real."
+        }
+        if (pass("UDP 51820")) {
+            hints += "WireGuard: UDP 51820 respondeu ao probe; valide o handshake WireGuard real."
+        }
+        if (
+            pass("UDP ${config.udpPort}") &&
+            hints.none {
+                it.startsWith("Hysteria2") ||
+                    it.startsWith("TUIC") ||
+                    it.startsWith("WireGuard")
+            }
+        ) {
+            hints += "UDP: o endpoint principal respondeu; existe caminho UDP bidirecional confirmado."
+        }
 
-            status("TCP") == ProbeStatus.FAIL ->
-                "O endpoint TCP não está alcançável nesta rede. Teste outro endpoint/porta autorizados da sua própria infraestrutura."
+        if (hints.isEmpty()) {
+            hints += "Nenhum transporte foi confirmado completamente. Use a matriz de portas para separar timeout de porta recusada."
+        }
+        return hints
+    }
 
-            else ->
-                "Há conectividade parcial. Compare os resultados entre Wi‑Fi e rede móvel antes de escolher o transporte."
+    private fun recommend(
+        config: ProbeConfig,
+        results: List<ProbeResult>,
+        info: NetworkInfo
+    ): String {
+        fun status(name: String): ProbeStatus? =
+            results.firstOrNull { it.name == name }?.status
+
+        val tcpPrimary = status("TCP ${config.tcpPort}")
+        val tls = status("TLS/SNI ${config.tcpPort}")
+        val wss = status("WebSocket TLS")
+        val responsiveUdp = results.filter {
+            it.name.startsWith("UDP ") && it.status == ProbeStatus.PASS
+        }.map { it.name.removePrefix("UDP ") }
+
+        return buildString {
+            when {
+                wss == ProbeStatus.PASS -> {
+                    append("WSS/TLS está operacional. É o melhor candidato atual para VMess/VLESS sobre WebSocket.")
+                }
+                tls == ProbeStatus.PASS && tcpPrimary == ProbeStatus.PASS -> {
+                    append("TCP e TLS estão operacionais no endpoint principal. Teste o protocolo final usando esse mesmo caminho.")
+                }
+                responsiveUdp.isNotEmpty() -> {
+                    append("UDP bidirecional respondeu nas portas ")
+                    append(responsiveUdp.joinToString())
+                    append(". Priorize os protocolos configurados nessas portas.")
+                }
+                tcpPrimary == ProbeStatus.PASS -> {
+                    append("O TCP principal está alcançável, mas a camada TLS/HTTP/WSS não foi confirmada. Verifique se a porta realmente serve esse protocolo.")
+                }
+                else -> {
+                    append("O endpoint principal não foi confirmado. Portas com 'recusada' provam que o host foi alcançado; timeouts sugerem filtragem, rota ou ausência de resposta.")
+                }
+            }
+
+            if (info.natHint != null) {
+                append(" ")
+                append(info.natHint)
+                append(" foi detectado; isso é comum em redes móveis e deve ser considerado em testes de retorno/NAT.")
+            }
         }
     }
+
+    private fun detectNatHint(addresses: List<InetAddress>): String? {
+        val ipv4 = addresses.filterIsInstance<Inet4Address>().firstOrNull() ?: return null
+        val octets = ipv4.address.map { it.toInt() and 0xFF }
+
+        return when {
+            octets[0] == 100 && octets[1] in 64..127 -> "CGNAT 100.64.0.0/10"
+            octets[0] == 10 -> "IPv4 privado 10.0.0.0/8"
+            octets[0] == 172 && octets[1] in 16..31 -> "IPv4 privado 172.16.0.0/12"
+            octets[0] == 192 && octets[1] == 168 -> "IPv4 privado 192.168.0.0/16"
+            else -> null
+        }
+    }
+
+    private fun isConnectionRefused(message: String): Boolean {
+        val normalized = message.lowercase()
+        return normalized.contains("refused") || normalized.contains("econnrefused")
+    }
+
+    private fun displayAddress(address: InetAddress): String =
+        address.hostAddress.orEmpty().substringBefore('%')
 
     private fun elapsedMs(startNs: Long): Long =
         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
@@ -406,16 +678,18 @@ class NetworkProbeEngine(context: Context) {
     private data class CandidateNetwork(
         val network: Network,
         val validated: Boolean,
+        val active: Boolean,
         val wifi: Boolean,
         val cellular: Boolean
     )
 
     private companion object {
-        const val TCP_TIMEOUT_MS = 4_000
-        const val TLS_TIMEOUT_MS = 5_000
-        const val HTTP_TIMEOUT_MS = 6_000
-        const val WS_TIMEOUT_MS = 6_000
-        const val UDP_TIMEOUT_MS = 2_500
+        const val TCP_TIMEOUT_MS = 2_500
+        const val TLS_TIMEOUT_MS = 4_000
+        const val HTTP_TIMEOUT_MS = 4_500
+        const val WS_TIMEOUT_MS = 4_500
+        const val UDP_TIMEOUT_MS = 1_800
+        const val MAX_PORTS_PER_FAMILY = 8
     }
 }
 
@@ -423,7 +697,9 @@ data class ProbeConfig(
     val host: String,
     val tcpPort: Int = 443,
     val udpPort: Int = 443,
-    val webSocketPath: String = "/"
+    val webSocketPath: String = "/",
+    val extraTcpPorts: List<Int> = listOf(80, 109, 2222, 8080, 8443),
+    val extraUdpPorts: List<Int> = listOf(36712, 44300, 51820)
 )
 
 enum class ProbeStatus { PASS, WARN, FAIL }
@@ -434,29 +710,56 @@ data class ProbeResult(
     val detail: String
 )
 
+data class NetworkInfo(
+    val validated: Boolean = false,
+    val metered: Boolean = false,
+    val interfaceName: String? = null,
+    val mtu: Int? = null,
+    val dnsServers: List<String> = emptyList(),
+    val hasIpv4: Boolean = false,
+    val hasIpv6: Boolean = false,
+    val natHint: String? = null
+)
+
 data class ProbeReport(
     val config: ProbeConfig,
     val networkLabel: String,
     val carrier: String?,
+    val networkInfo: NetworkInfo,
     val localAddresses: List<String>,
     val results: List<ProbeResult>,
+    val score: Int,
+    val transportHints: List<String>,
     val recommendation: String,
     val startedAtMs: Long,
     val finishedAtMs: Long
 ) {
     fun toJson(): String = JSONObject().apply {
         put("tool", "AutomBot Network Probe")
-        put("version", "0.1.0")
+        put("version", "0.2.0")
         put("started_at_ms", startedAtMs)
         put("finished_at_ms", finishedAtMs)
+        put("score", score)
         put("network", networkLabel)
         put("carrier", carrier ?: JSONObject.NULL)
         put("local_addresses", JSONArray(localAddresses))
+        put("network_info", JSONObject().apply {
+            put("validated", networkInfo.validated)
+            put("metered", networkInfo.metered)
+            put("interface", networkInfo.interfaceName ?: JSONObject.NULL)
+            put("mtu", networkInfo.mtu ?: JSONObject.NULL)
+            put("dns_servers", JSONArray(networkInfo.dnsServers))
+            put("has_ipv4", networkInfo.hasIpv4)
+            put("has_ipv6", networkInfo.hasIpv6)
+            put("nat_hint", networkInfo.natHint ?: JSONObject.NULL)
+        })
         put("endpoint", JSONObject().apply {
             put("host", config.host)
             put("tcp_port", config.tcpPort)
             put("udp_port", config.udpPort)
             put("websocket_path", config.webSocketPath)
+            put("extra_tcp_ports", JSONArray(config.extraTcpPorts))
+            put("extra_udp_ports", JSONArray(config.extraUdpPorts))
         })
         put("results", JSONArray().apply {
             results.forEach { result ->
@@ -467,6 +770,7 @@ data class ProbeReport(
                 })
             }
         })
+        put("transport_hints", JSONArray(transportHints))
         put("recommendation", recommendation)
     }.toString(2)
 }
