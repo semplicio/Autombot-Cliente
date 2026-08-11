@@ -36,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -50,7 +51,14 @@ class ProxyAnalyzerActivity : ComponentActivity() {
             MaterialTheme {
                 ProxyAnalyzerScreen(
                     engine = engine,
-                    onShare = { report -> ReportShare.share(this, report.toJson()) }
+                    onShareJson = { report -> ReportShare.share(this, report.toJson()) },
+                    onShareManual = { report ->
+                        ReportShare.shareText(
+                            this,
+                            "Manual AutomBot Proxy Analyzer",
+                            report.manual
+                        )
+                    }
                 )
             }
         }
@@ -60,7 +68,8 @@ class ProxyAnalyzerActivity : ComponentActivity() {
 @Composable
 private fun ProxyAnalyzerScreen(
     engine: ProxyAnalyzerEngine,
-    onShare: (ProxyAnalyzerReport) -> Unit
+    onShareJson: (ProxyAnalyzerReport) -> Unit,
+    onShareManual: (ProxyAnalyzerReport) -> Unit
 ) {
     var proxyHost by remember { mutableStateOf("") }
     var proxyPort by remember { mutableStateOf("8080") }
@@ -69,7 +78,10 @@ private fun ProxyAnalyzerScreen(
     var password by remember { mutableStateOf("") }
     var targetHost by remember { mutableStateOf("core.infinitenet.net") }
     var targetPort by remember { mutableStateOf("443") }
+    var wsPath by remember { mutableStateOf("/") }
     var running by remember { mutableStateOf(false) }
+    var detectingPorts by remember { mutableStateOf(false) }
+    var portDetectionMessage by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var report by remember { mutableStateOf<ProxyAnalyzerReport?>(null) }
     val scope = rememberCoroutineScope()
@@ -95,7 +107,7 @@ private fun ProxyAnalyzerScreen(
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Testa um proxy informado por você na rede atual e indica quais tipos de transporte ele consegue encaminhar.",
+                        "Testa um proxy na rede atual, valida TCP/TLS/WSS pelo proxy e gera um manual de configuração baseado apenas no que respondeu.",
                         color = ProxyDim,
                         fontSize = 13.sp,
                         lineHeight = 18.sp
@@ -112,13 +124,68 @@ private fun ProxyAnalyzerScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text("Proxy para testar", color = ProxyText, fontWeight = FontWeight.SemiBold)
-                    ProxyField(proxyHost, { proxyHost = it; error = null }, "Domínio / IP do proxy")
+                    ProxyField(
+                        proxyHost,
+                        {
+                            proxyHost = it
+                            error = null
+                            portDetectionMessage = null
+                        },
+                        "Domínio / IP do proxy"
+                    )
                     ProxyField(
                         proxyPort,
-                        { proxyPort = it.filter(Char::isDigit); error = null },
+                        {
+                            proxyPort = it.filter(Char::isDigit)
+                            error = null
+                        },
                         "Porta do proxy",
                         KeyboardType.Number
                     )
+
+                    Button(
+                        onClick = {
+                            if (proxyHost.isBlank()) {
+                                error = "Informe o domínio ou IP do proxy antes de detectar a porta."
+                            } else {
+                                error = null
+                                detectingPorts = true
+                                portDetectionMessage = null
+                                scope.launch {
+                                    val ports = engine.detectCommonPorts(proxyHost.trim())
+                                    if (ports.isEmpty()) {
+                                        portDetectionMessage = "Nenhuma porta comum respondeu: 80, 443, 1080, 3128, 8080, 8000, 8118, 8888, 8889, 9090."
+                                    } else {
+                                        proxyPort = ports.first().port.toString()
+                                        portDetectionMessage = "Portas comuns acessíveis: " +
+                                            ports.joinToString { "${it.port} (${it.latencyMs} ms)" } +
+                                            ". A mais rápida foi preenchida automaticamente."
+                                    }
+                                    detectingPorts = false
+                                }
+                            }
+                        },
+                        enabled = !running && !detectingPorts,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = ProxySurfaceAlt)
+                    ) {
+                        if (detectingPorts) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = ProxyText
+                            )
+                            Spacer(Modifier.size(8.dp))
+                            Text("Detectando portas comuns…", color = ProxyText)
+                        } else {
+                            Text("Detectar porta comum do proxy", color = ProxyText)
+                        }
+                    }
+
+                    portDetectionMessage?.let {
+                        Text(it, color = ProxyDim, fontSize = 11.sp, lineHeight = 16.sp)
+                    }
 
                     Text("Tipo", color = ProxyDim, fontSize = 11.sp)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -159,16 +226,22 @@ private fun ProxyAnalyzerScreen(
                 ) {
                     Text("Destino de validação", color = ProxyText, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "O proxy será testado tentando alcançar um endpoint da sua infraestrutura.",
+                        "Informe um endpoint da sua infraestrutura. O analisador tentará abrir o destino através do proxy e, quando possível, validar TLS e WebSocket.",
                         color = ProxyDim,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp
                     )
-                    ProxyField(targetHost, { targetHost = it; error = null }, "Host de destino")
+                    ProxyField(targetHost, { targetHost = it; error = null }, "Host / IP da sua VPS")
                     ProxyField(
                         targetPort,
                         { targetPort = it.filter(Char::isDigit); error = null },
-                        "Porta de destino",
+                        "Porta do serviço na VPS",
                         KeyboardType.Number
+                    )
+                    ProxyField(
+                        wsPath,
+                        { wsPath = it; error = null },
+                        "WebSocket path (ex.: / ou /ws)"
                     )
                 }
             }
@@ -200,7 +273,8 @@ private fun ProxyAnalyzerScreen(
                                             username = username,
                                             password = password,
                                             targetHost = targetHost.trim(),
-                                            targetPort = targetPortNumber
+                                            targetPort = targetPortNumber,
+                                            webSocketPath = wsPath.ifBlank { "/" }
                                         )
                                     )
                                     running = false
@@ -208,7 +282,7 @@ private fun ProxyAnalyzerScreen(
                             }
                         }
                     },
-                    enabled = !running,
+                    enabled = !running && !detectingPorts,
                     modifier = Modifier.fillMaxWidth().height(54.dp),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = ProxyAccent)
@@ -220,9 +294,9 @@ private fun ProxyAnalyzerScreen(
                             color = Color.White
                         )
                         Spacer(Modifier.size(10.dp))
-                        Text("Analisando proxy…")
+                        Text("Analisando proxy e gerando manual…")
                     } else {
-                        Text("Analisar proxy", fontWeight = FontWeight.SemiBold)
+                        Text("Analisar proxy e gerar manual", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -238,7 +312,9 @@ private fun ProxyAnalyzerScreen(
                         Text("Resultado", color = ProxyText, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(5.dp))
                         Text(
-                            "Rede: ${current.networkLabel}\nProxy: ${current.config.proxyHost}:${current.config.proxyPort}",
+                            "Rede: ${current.networkLabel}\n" +
+                                "Proxy: ${current.config.proxyHost}:${current.config.proxyPort}\n" +
+                                "Destino: ${current.config.targetHost}:${current.config.targetPort}",
                             color = ProxyDim,
                             fontSize = 11.sp,
                             lineHeight = 17.sp
@@ -284,20 +360,50 @@ private fun ProxyAnalyzerScreen(
                 }
 
                 item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(ProxySurface, RoundedCornerShape(18.dp))
+                            .padding(16.dp)
+                    ) {
+                        Text("Manual de conexão", color = ProxyText, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            current.manual,
+                            color = ProxyDim,
+                            fontSize = 10.sp,
+                            lineHeight = 15.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                item {
                     Button(
-                        onClick = { onShare(current) },
+                        onClick = { onShareManual(current) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = ProxyAccent)
+                    ) {
+                        Text("Compartilhar manual de conexão", color = ProxyText)
+                    }
+                }
+
+                item {
+                    Button(
+                        onClick = { onShareJson(current) },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = ProxySurfaceAlt)
                     ) {
-                        Text("Compartilhar relatório do proxy", color = ProxyText)
+                        Text("Compartilhar relatório JSON", color = ProxyText)
                     }
                 }
             }
 
             item {
                 Text(
-                    "O analisador testa somente o proxy e o destino informados. Ele não procura proxies abertos, não varre redes de terceiros e não busca exceções de cobrança/zero-rating.",
+                    "A detecção automática verifica somente uma lista curta de portas comuns no proxy informado. O manual usa apenas o proxy e o destino testados; não procura proxies abertos, hosts de fachada de terceiros ou exceções de cobrança/zero-rating.",
                     color = ProxyDim,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
