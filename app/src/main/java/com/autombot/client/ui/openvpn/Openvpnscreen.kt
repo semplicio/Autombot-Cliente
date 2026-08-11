@@ -24,6 +24,10 @@ import com.autombot.client.protocols.openvpn.OpenVpnTunnelManager
 import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 
+/**
+ * Tela de OpenVPN — a conexão real roda dentro do AutomBotVpnService porque o
+ * OpenVPN assume a TUN Android diretamente.
+ */
 @Composable
 fun OpenVpnScreen(
     manager: OpenVpnTunnelManager,
@@ -34,35 +38,201 @@ fun OpenVpnScreen(
 ) {
     val connections by manager.connections.collectAsState()
     val managedMode = rememberManagedMode()
-    Column(Modifier.fillMaxSize().background(C.Background)) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick=onBack){Icon(Icons.Default.ArrowBack,"Voltar",tint=C.Text)}; Text("OpenVPN",color=C.Text,fontSize=17.sp,fontWeight=FontWeight.SemiBold) }
-        Column(Modifier.padding(horizontal=20.dp).clip(RoundedCornerShape(12.dp)).background(C.SurfaceAlt).padding(12.dp)) {
-            Text(if(managedMode) "Perfil .ovpn fornecido e atualizado pelo administrador do painel." else "Importe um arquivo .ovpn com certificados embutidos. O OpenVPN assume a VPN do sistema inteira.", color=C.TextDim,fontSize=11.sp)
+
+    Column(modifier = Modifier.fillMaxSize().background(C.Background)) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "Voltar", tint = C.Text)
+            }
+            Text("OpenVPN", color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        }
+
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 20.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(C.SurfaceAlt)
+                .padding(12.dp)
+        ) {
+            Text(
+                "Importe um arquivo .ovpn (com certificados embutidos). Diferente dos outros " +
+                    "protocolos, o OpenVPN assume a VPN do sistema inteira sozinho — só uma conexão " +
+                    "por vez, aqui ou nos outros protocolos.",
+                color = C.TextDim,
+                fontSize = 11.sp
+            )
         }
         Spacer(Modifier.height(12.dp))
-        if(connections.isEmpty()) Column(Modifier.fillMaxSize().padding(32.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.Center){
-            Text("Nenhuma conexão OpenVPN configurada",color=C.TextDim,fontSize=13.sp)
-            if(!managedMode){Spacer(Modifier.height(16.dp));Button(onClick=onAddProfile,colors=ButtonDefaults.buttonColors(containerColor=C.Accent,contentColor=C.OnPrimary)){Text("Importar .ovpn")}}
-        } else LazyColumn(contentPadding=PaddingValues(horizontal=20.dp,vertical=8.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
-            items(connections,key={it.config.connectionName}){conn-> OpenVpnCard(conn,!managedMode,onToggle={
-                if(conn.status==OpenVpnStatus.CONNECTED){manager.requestDisconnect(conn.config.connectionName);onDisconnect()}else onConnect(conn.config)
-            },onDelete={manager.removeProfile(conn.config.connectionName)})}
-            if(!managedMode)item{Button(onClick=onAddProfile,modifier=Modifier.fillMaxWidth(),colors=ButtonDefaults.buttonColors(containerColor=C.Accent,contentColor=C.OnPrimary)){Text("Importar .ovpn")};Spacer(Modifier.height(12.dp))}
+
+        if (connections.isEmpty()) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text("Nenhuma conexão OpenVPN configurada", color = C.TextDim, fontSize = 13.sp)
+                if (!managedMode) {
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = onAddProfile,
+                        colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                    ) { Text("Importar .ovpn") }
+                }
+            }
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(connections, key = { it.config.connectionName }) { conn ->
+                    OpenVpnConnectionCard(
+                        conn = conn,
+                        allowDelete = !managedMode,
+                        onToggle = {
+                            if (conn.status == OpenVpnStatus.CONNECTED) {
+                                // ACTION_STOP também é usado automaticamente pelo roteador
+                                // dos protocolos SOCKS. Marcamos antes que este STOP veio
+                                // explicitamente do botão do OpenVPN.
+                                manager.requestDisconnect(conn.config.connectionName)
+                                onDisconnect()
+                            } else {
+                                onConnect(conn.config)
+                            }
+                        },
+                        onDelete = { manager.removeProfile(conn.config.connectionName) }
+                    )
+                }
+                if (!managedMode) {
+                    item {
+                        Button(
+                            onClick = onAddProfile,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = C.Accent, contentColor = C.OnPrimary)
+                        ) { Text("Importar .ovpn") }
+                        Spacer(Modifier.height(12.dp))
+                    }
+                }
+            }
         }
     }
 }
 
-@Composable private fun OpenVpnCard(conn:ManagedOpenVpnConnection,allowDelete:Boolean,onToggle:()->Unit,onDelete:()->Unit){
-    var confirm by remember{mutableStateOf(false)};val busy=conn.status==OpenVpnStatus.CONNECTING
-    val(label,color)=when(conn.status){OpenVpnStatus.CONNECTED->"Conectado" to C.Green;OpenVpnStatus.CONNECTING->"Conectando…" to C.Accent;OpenVpnStatus.ERROR->"Erro" to C.Red;OpenVpnStatus.DISCONNECTED->"Desconectado" to C.TextDim}
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(C.Surface).border(1.dp,if(conn.status==OpenVpnStatus.CONNECTED)C.Green.copy(alpha=0.35f)else C.Line,RoundedCornerShape(16.dp)).padding(16.dp)){
-        Row(verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(conn.config.connectionName,color=C.Text,fontSize=15.sp,fontWeight=FontWeight.SemiBold);Text("Arquivo .ovpn importado",color=C.TextDim,fontSize=12.sp)};if(busy){CircularProgressIndicator(color=C.Accent,strokeWidth=2.dp,modifier=Modifier.size(22.dp));Spacer(Modifier.width(12.dp))};Switch(checked=conn.status==OpenVpnStatus.CONNECTED,onCheckedChange={onToggle()},enabled=!busy)}
-        Spacer(Modifier.height(10.dp));Row(verticalAlignment=Alignment.CenterVertically){Box(Modifier.size(7.dp).clip(CircleShape).background(color));Spacer(Modifier.width(6.dp));Text(label,color=color,fontSize=12.sp)}
-        if(conn.status==OpenVpnStatus.CONNECTED){Spacer(Modifier.height(8.dp));Row(horizontalArrangement=Arrangement.spacedBy(10.dp)){Chip("↓ Recebido",fmt(conn.rxBytes));Chip("↑ Enviado",fmt(conn.txBytes))}}
-        if(conn.status==OpenVpnStatus.ERROR&&conn.lastError!=null){Spacer(Modifier.height(8.dp));Text(conn.lastError,color=C.Red,fontSize=11.sp)}
-        if(allowDelete){Spacer(Modifier.height(10.dp));Text("Excluir",color=C.Red,fontSize=11.sp,fontWeight=FontWeight.Medium,modifier=Modifier.clickable{confirm=true})}
+@Composable
+private fun OpenVpnConnectionCard(
+    conn: ManagedOpenVpnConnection,
+    allowDelete: Boolean,
+    onToggle: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    val isBusy = conn.status == OpenVpnStatus.CONNECTING
+    val (statusLabel, statusColor) = when (conn.status) {
+        OpenVpnStatus.CONNECTED -> "Conectado" to C.Green
+        OpenVpnStatus.CONNECTING -> "Conectando…" to C.Accent
+        OpenVpnStatus.ERROR -> "Erro" to C.Red
+        OpenVpnStatus.DISCONNECTED -> "Desconectado" to C.TextDim
     }
-    if(allowDelete&&confirm)AlertDialog(onDismissRequest={confirm=false},title={Text("Excluir conexão?")},text={Text("\"${conn.config.connectionName}\" e o arquivo .ovpn serão removidos.")},confirmButton={TextButton(onClick={confirm=false;onDelete()}){Text("Excluir",color=C.Red)}},dismissButton={TextButton(onClick={confirm=false}){Text("Cancelar")}},containerColor=C.Surface,titleContentColor=C.Text,textContentColor=C.TextDim)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(C.Surface)
+            .border(1.dp, if (conn.status == OpenVpnStatus.CONNECTED) C.Green.copy(alpha = 0.35f) else C.Line, RoundedCornerShape(16.dp))
+            .padding(16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(conn.config.connectionName, color = C.Text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(2.dp))
+                Text("Arquivo .ovpn importado", color = C.TextDim, fontSize = 12.sp)
+            }
+            if (isBusy) {
+                CircularProgressIndicator(color = C.Accent, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(12.dp))
+            }
+            Switch(
+                checked = conn.status == OpenVpnStatus.CONNECTED,
+                onCheckedChange = { onToggle() },
+                enabled = !isBusy,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = C.Accent,
+                    checkedTrackColor = C.Accent.copy(alpha = 0.35f),
+                    uncheckedThumbColor = C.TextDim,
+                    uncheckedTrackColor = C.SurfaceAlt
+                )
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(statusColor))
+            Spacer(Modifier.width(6.dp))
+            Text(statusLabel, color = statusColor, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        }
+
+        if (conn.status == OpenVpnStatus.CONNECTED) {
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TrafficChip(label = "↓ Recebido", value = formatOpenVpnBytes(conn.rxBytes))
+                TrafficChip(label = "↑ Enviado", value = formatOpenVpnBytes(conn.txBytes))
+            }
+        }
+
+        if (conn.status == OpenVpnStatus.ERROR && conn.lastError != null) {
+            Spacer(Modifier.height(8.dp))
+            Text(conn.lastError, color = C.Red, fontSize = 11.sp)
+        }
+
+        if (allowDelete) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Excluir",
+                color = C.Red,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.clickable { showDeleteConfirm = true }
+            )
+        }
+    }
+
+    if (allowDelete && showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Excluir conexão?") },
+            text = { Text("\"${conn.config.connectionName}\" e o arquivo .ovpn dela vão ser removidos. Essa ação não pode ser desfeita.") },
+            confirmButton = {
+                TextButton(onClick = { showDeleteConfirm = false; onDelete() }) {
+                    Text("Excluir", color = C.Red)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancelar") }
+            },
+            containerColor = C.Surface,
+            titleContentColor = C.Text,
+            textContentColor = C.TextDim
+        )
+    }
 }
-@Composable private fun Chip(l:String,v:String){Column(Modifier.clip(RoundedCornerShape(10.dp)).background(C.SurfaceAlt).padding(horizontal=12.dp,vertical=8.dp)){Text(l,color=C.TextDim,fontSize=10.sp);Text(v,color=C.Accent,fontSize=13.sp,fontWeight=FontWeight.Medium)}}
-private fun fmt(b:Long):String{if(b<=0)return"0 B";val u=arrayOf("B","KB","MB","GB","TB");val g=(Math.log10(b.toDouble())/Math.log10(1024.0)).toInt().coerceIn(0,u.lastIndex);return String.format("%.1f %s",b/Math.pow(1024.0,g.toDouble()),u[g])}
+
+@Composable
+private fun TrafficChip(label: String, value: String) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(C.SurfaceAlt)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(label, color = C.TextDim, fontSize = 10.sp)
+        Spacer(Modifier.height(2.dp))
+        Text(value, color = C.Accent, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+private fun formatOpenVpnBytes(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceIn(0, units.size - 1)
+    return String.format("%.1f %s", bytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
+}
