@@ -341,7 +341,10 @@ class ModernProtocolTunnelManager(context: Context) {
         val parts = host.split('.')
         if (parts.size != 4) return null
         if (parts.any { part ->
-                part.isEmpty() || part.length > 3 || part.any { !it.isDigit() } || part.toIntOrNull() !in 0..255
+                part.isEmpty() ||
+                    part.length > 3 ||
+                    part.any { !it.isDigit() } ||
+                    part.toIntOrNull()?.let { it in 0..255 } != true
             }
         ) return null
         return host
