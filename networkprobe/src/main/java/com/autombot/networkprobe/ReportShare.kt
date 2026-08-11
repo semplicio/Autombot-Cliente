@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
+import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -13,7 +14,9 @@ import java.util.Locale
 object ReportShare {
     fun share(activity: Activity, json: String) {
         val enrichedJson = DiagnosticReportEnhancer.enrich(json)
-        val readableText = DiagnosticReportEnhancer.readableShareText(enrichedJson)
+        val readableText = runCatching {
+            JSONObject(enrichedJson).optString("manual").takeIf { it.isNotBlank() }
+        }.getOrNull() ?: DiagnosticReportEnhancer.readableShareText(enrichedJson)
 
         val dir = File(activity.cacheDir, "shared_reports").apply { mkdirs() }
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
