@@ -33,8 +33,8 @@ object VlessTransport {
         destHost: String,
         destPort: Int,
         protectSocket: (java.net.Socket) -> Boolean,
-        dns: Dns = Dns.SYSTEM,
-        timeoutMs: Int = 10_000
+        timeoutMs: Int = 10_000,
+        dns: Dns = Dns.SYSTEM
     ): Pair<InputStream, OutputStream> {
         val pipedOut = PipedOutputStream()
         val pipedIn = PipedInputStream(pipedOut, 256 * 1024)
