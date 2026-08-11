@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -32,6 +33,7 @@ object VlessUdpTransport {
         destPort: Int,
         protectSocket: (java.net.Socket) -> Boolean,
         onIncoming: (ByteArray) -> Unit,
+        dns: Dns = Dns.SYSTEM,
         timeoutMs: Int = 10_000
     ): UdpBackendSession? {
         val pipedOut = PipedOutputStream()
@@ -41,6 +43,9 @@ object VlessUdpTransport {
         val clientBuilder = OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
+            // Mantém o hostname no URL/TLS, mas força a resolução do endpoint pela
+            // rede física subjacente em vez do DNS capturado pelo TUN do AutomBot.
+            .dns(dns)
             .pingInterval(20, TimeUnit.SECONDS)
             .socketFactory(object : javax.net.SocketFactory() {
                 override fun createSocket(): java.net.Socket {
