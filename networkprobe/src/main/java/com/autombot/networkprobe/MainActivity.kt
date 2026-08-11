@@ -47,14 +47,23 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val engine = NetworkProbeEngine(applicationContext)
+        val initialPreset = if (intent.getBooleanExtra(EXTRA_USE_SAVED_CORE_PROFILE, false)) {
+            CoreProfileStore(applicationContext).loadProfile()?.toPreset()
+        } else {
+            null
+        }
 
         setContent {
             AutomBotProbeTheme {
                 ProbeScreen(
                     engine = engine,
+                    initialPreset = initialPreset,
                     onShare = { report -> shareReport(report) },
                     onOpenProxyAnalyzer = {
                         startActivity(Intent(this, ProxyAnalyzerActivity::class.java))
+                    },
+                    onOpenCoreLink = {
+                        startActivity(Intent(this, CoreLinkActivity::class.java))
                     }
                 )
             }
@@ -83,15 +92,21 @@ private fun AutomBotProbeTheme(content: @Composable () -> Unit) {
 @Composable
 private fun ProbeScreen(
     engine: NetworkProbeEngine,
+    initialPreset: CoreProbePreset?,
     onShare: (ProbeReport) -> Unit,
-    onOpenProxyAnalyzer: () -> Unit
+    onOpenProxyAnalyzer: () -> Unit,
+    onOpenCoreLink: () -> Unit
 ) {
-    var host by remember { mutableStateOf("core.infinitenet.net") }
-    var tcpPort by remember { mutableStateOf("443") }
-    var udpPort by remember { mutableStateOf("443") }
-    var wsPath by remember { mutableStateOf("/") }
-    var extraTcpPorts by remember { mutableStateOf("80,109,2222,8080,8443") }
-    var extraUdpPorts by remember { mutableStateOf("36712,44300,51820") }
+    var host by remember { mutableStateOf(initialPreset?.host ?: "core.infinitenet.net") }
+    var tcpPort by remember { mutableStateOf((initialPreset?.tcpPort ?: 443).toString()) }
+    var udpPort by remember { mutableStateOf((initialPreset?.udpPort ?: 443).toString()) }
+    var wsPath by remember { mutableStateOf(initialPreset?.webSocketPath ?: "/") }
+    var extraTcpPorts by remember {
+        mutableStateOf(initialPreset?.extraTcpPorts?.joinToString(",") ?: "80,109,2222,8080,8443")
+    }
+    var extraUdpPorts by remember {
+        mutableStateOf(initialPreset?.extraUdpPorts?.joinToString(",") ?: "36712,44300,51820")
+    }
     var running by remember { mutableStateOf(false) }
     var report by remember { mutableStateOf<ProbeReport?>(null) }
     var validationError by remember { mutableStateOf<String?>(null) }
@@ -104,6 +119,10 @@ private fun ProbeScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item { HeaderCard() }
+
+            initialPreset?.let { preset ->
+                item { SavedCoreProfileCard(preset) }
+            }
 
             item {
                 EndpointCard(
@@ -129,6 +148,17 @@ private fun ProbeScreen(
             }
 
             item { ToolsCard() }
+
+            item {
+                Button(
+                    onClick = onOpenCoreLink,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent.copy(alpha = 0.85f))
+                ) {
+                    Text("Vincular / Perfil AutomBot Core", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            }
 
             item {
                 Button(
@@ -223,7 +253,7 @@ private fun ProbeScreen(
 
             item {
                 Text(
-                    "O Network Probe testa somente o endpoint informado e as portas escolhidas. Ele diferencia timeout, porta recusada, TLS, WSS e resposta UDP; não procura domínios de terceiros, exceções de cobrança ou zero-rating.",
+                    "O modo manual continua disponível. Quando um perfil AutomBot Core é carregado, os campos são preenchidos pela cópia local salva no aparelho, permitindo repetir o teste em Wi‑Fi, 4G ou 5G sem depender do Manager.",
                     color = TextDim,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
@@ -254,6 +284,27 @@ private fun HeaderCard() {
             color = TextDim,
             fontSize = 13.sp,
             lineHeight = 18.sp
+        )
+    }
+}
+
+@Composable
+private fun SavedCoreProfileCard(preset: CoreProbePreset) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Pass.copy(alpha = 0.10f), RoundedCornerShape(18.dp))
+            .padding(16.dp)
+    ) {
+        Text("Perfil AutomBot Core carregado", color = Pass, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(5.dp))
+        Text(preset.profileName, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text("Versão ${preset.profileVersion} · ${preset.protocolCount} configurações", color = TextDim, fontSize = 11.sp)
+        Text(
+            "Os campos abaixo vieram do armazenamento local. Você pode desligar o Wi‑Fi e executar o mesmo perfil na rede móvel.",
+            color = TextDim,
+            fontSize = 11.sp,
+            lineHeight = 16.sp
         )
     }
 }
@@ -345,6 +396,7 @@ private fun ToolsCard() {
                 "• HTTPS e WebSocket TLS\n" +
                 "• Matriz UDP para Hysteria2, TUIC, WireGuard e portas personalizadas\n" +
                 "• Proxy Analyzer para HTTP CONNECT e SOCKS5\n" +
+                "• Vínculo AutomBot Core com perfil local para testes offline do Manager\n" +
                 "• Pontuação de capacidade e candidatos de transporte",
             color = TextDim,
             fontSize = 11.sp,
