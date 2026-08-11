@@ -1,6 +1,8 @@
 package com.autombot.networkprobe
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
@@ -9,8 +11,6 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 
 internal const val EXTRA_USE_SAVED_CORE_PROFILE = "use_saved_core_profile"
 
@@ -46,9 +46,13 @@ data class CoreProfileSnapshot(
             ?: publicIp?.takeIf { it.isNotBlank() }
             ?: return null
 
+        // Um mesmo perfil pode ter CDN para Xray e IP/domínio direto para SSH/UDP.
+        // A tela principal trabalha com um host por execução, então nunca mistura
+        // portas pertencentes a endpoints diferentes no mesmo teste.
+        val sameHostProtocols = protocols.filter { it.host.equals(host, ignoreCase = true) }
         val tcpPorts = LinkedHashSet<Int>()
         val udpPorts = LinkedHashSet<Int>()
-        protocols.forEach { protocol ->
+        sameHostProtocols.forEach { protocol ->
             protocol.ports.filter { it in 1..65535 }.forEach { port ->
                 when (protocol.transport.lowercase()) {
                     "udp" -> udpPorts += port
@@ -69,7 +73,7 @@ data class CoreProfileSnapshot(
             else -> 443
         }
 
-        val path = protocols.firstOrNull {
+        val path = sameHostProtocols.firstOrNull {
             it.transport.equals("websocket", ignoreCase = true) && !it.path.isNullOrBlank()
         }?.path ?: "/"
 
