@@ -1,6 +1,9 @@
 package com.autombot.client.protocols.modern
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import com.autombot.client.core.tun2socks.NativeTun2Socks
 import com.autombot.client.util.AppLog
 import kotlinx.coroutines.CoroutineScope
@@ -15,6 +18,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.util.concurrent.ConcurrentHashMap
 
@@ -166,10 +172,17 @@ class ModernProtocolTunnelManager(context: Context) {
                     )
                 }
 
+                // Solução A: resolve o endpoint do servidor ANTES de iniciar o core e
+                // antes de a sessão ser anunciada como conectada ao VpnService. O
+                // sing-box recebe um IP literal como server, portanto não depende de
+                // DNS depois que o TUN/HEV captura o tráfego. O hostname original fica
+                // preservado exclusivamente no TLS/SNI para validar o certificado.
+                val runtimeConfig = resolveEndpointBeforeTunnel(config)
+
                 val localPort = findFreePort()
                 val runtimeFile = runtimeConfigFile(key)
                 runtimeFile.parentFile?.mkdirs()
-                runtimeFile.writeText(SingBoxConfigFactory.build(config, localPort).toString(2))
+                runtimeFile.writeText(SingBoxConfigFactory.build(runtimeConfig, localPort).toString(2))
 
                 val check = runner.checkConfig(runtimeFile)
                 if (check.exitCode != 0) {
@@ -234,6 +247,105 @@ class ModernProtocolTunnelManager(context: Context) {
 
     fun activeConnection(): ManagedModernConnection? =
         _connections.value.firstOrNull { it.status == ModernProtocolStatus.CONNECTED && it.localSocksPort != null }
+
+    /**
+     * Resolve o hostname na rede física, preferindo IPv4, e cria uma cópia SOMENTE
+     * para execução. O perfil persistido continua guardando o domínio e será
+     * resolvido novamente a cada conexão, então mudança de IP da VPS não exige
+     * republicar perfis pelo painel.
+     */
+    private fun resolveEndpointBeforeTunnel(config: ModernProtocolConfig): ModernProtocolConfig {
+        val originalHost = config.server.trim().removePrefix("[").removeSuffix("]")
+        numericIpOrNull(originalHost)?.let { literal ->
+            return if (literal == config.server) config else config.copy(server = literal)
+        }
+
+        AppLog.log(
+            "${config.type.displayName} \"${config.connectionName}\": resolvendo $originalHost pela rede física antes de subir a VPN",
+            AppLog.Level.INFO
+        )
+
+        val resolvedIp = resolveOnPhysicalNetwork(originalHost)
+            ?: throw IllegalStateException(
+                "Não foi possível resolver $originalHost pela rede física antes de iniciar a VPN"
+            )
+
+        val tlsName = config.tlsServerName.ifBlank { originalHost }
+        AppLog.log(
+            "${config.type.displayName} \"${config.connectionName}\": endpoint pré-resolvido $originalHost -> $resolvedIp; TLS/SNI mantido em $tlsName",
+            AppLog.Level.SUCCESS
+        )
+
+        return config.copy(
+            server = resolvedIp,
+            tlsServerName = tlsName
+        )
+    }
+
+    /**
+     * Tenta explicitamente redes não-VPN com capacidade de Internet. Isso evita que
+     * uma TUN já existente (por troca/reconexão) seja usada para resolver justamente
+     * o endpoint necessário para reconstruir o túnel.
+     */
+    private fun resolveOnPhysicalNetwork(host: String): String? {
+        val connectivityManager =
+            appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+        val candidates = LinkedHashSet<Network>()
+        connectivityManager.activeNetwork?.let { candidates += it }
+        connectivityManager.allNetworks.forEach { candidates += it }
+
+        var fallbackAddress: InetAddress? = null
+
+        for (network in candidates) {
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: continue
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+            if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+
+            val addresses = runCatching { network.getAllByName(host) }.getOrNull() ?: continue
+            val preferred = preferredAddress(addresses) ?: continue
+
+            // Rede validada tem prioridade. Se o Android ainda não marcou VALIDATED
+            // (troca recente Wi-Fi/4G), guardamos a resposta como fallback.
+            if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                return normalizedHostAddress(preferred)
+            }
+            if (fallbackAddress == null) fallbackAddress = preferred
+        }
+
+        fallbackAddress?.let { return normalizedHostAddress(it) }
+
+        // Último recurso para aparelhos/ROMs que não expõem a rede subjacente em
+        // allNetworks. No fluxo normal esta chamada ainda ocorre antes de subir o TUN.
+        return runCatching { InetAddress.getAllByName(host) }
+            .getOrNull()
+            ?.let(::preferredAddress)
+            ?.let(::normalizedHostAddress)
+    }
+
+    private fun preferredAddress(addresses: Array<InetAddress>): InetAddress? =
+        addresses.firstOrNull { it is Inet4Address }
+            ?: addresses.firstOrNull { it is Inet6Address }
+            ?: addresses.firstOrNull()
+
+    private fun normalizedHostAddress(address: InetAddress): String =
+        address.hostAddress.orEmpty().substringBefore('%')
+
+    /** Reconhece IP literal sem disparar uma consulta DNS. */
+    private fun numericIpOrNull(host: String): String? {
+        if (host.contains(':')) {
+            // O campo server já chega sem porta; ':' aqui representa IPv6 literal.
+            return host.takeIf { it.matches(Regex("^[0-9A-Fa-f:.%]+$")) }?.substringBefore('%')
+        }
+
+        val parts = host.split('.')
+        if (parts.size != 4) return null
+        if (parts.any { part ->
+                part.isEmpty() || part.length > 3 || part.any { !it.isDigit() } || part.toIntOrNull() !in 0..255
+            }
+        ) return null
+        return host
+    }
 
     private fun stopProcessOnly(key: String) {
         activeProcesses.remove(key)?.stop()
