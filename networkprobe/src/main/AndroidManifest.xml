@@ -11,6 +11,11 @@
         android:theme="@android:style/Theme.Material.NoActionBar">
 
         <activity
+            android:name=".CoreFullProbeActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
             android:name=".CoreLinkActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
