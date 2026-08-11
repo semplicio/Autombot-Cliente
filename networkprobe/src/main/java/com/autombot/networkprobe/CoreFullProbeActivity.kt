@@ -96,7 +96,10 @@ private fun CoreFullProbeScreen(
                     }
                 }
             } else {
-                val planned = profile.protocols.sumOf { it.ports.distinct().size + if (!it.originHost.isNullOrBlank() && it.originPort != null) 1 else 0 }
+                val planned = profile.protocols.fold(0) { acc, protocol ->
+                    acc + protocol.ports.distinct().size +
+                        (if (!protocol.originHost.isNullOrBlank() && protocol.originPort != null) 1 else 0)
+                }
                 item {
                     FullCard {
                         Text(profile.profileName, color = FullText, fontSize = 17.sp, fontWeight = FontWeight.Bold)
