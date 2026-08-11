@@ -36,4 +36,13 @@ object ReportShare {
 
         activity.startActivity(chooser)
     }
+
+    fun shareText(activity: Activity, title: String, text: String) {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, title)
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        activity.startActivity(Intent.createChooser(intent, "Compartilhar manual"))
+    }
 }
