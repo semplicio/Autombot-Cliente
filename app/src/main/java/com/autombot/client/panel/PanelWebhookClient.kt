@@ -12,6 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -162,10 +163,32 @@ class PanelWebhookClient(
         )
     }
 
+    /**
+     * Retorna uma revisão derivada do CONTEÚDO completo de ``configs.php``.
+     *
+     * Antes o app dependia somente de ``configs_versao.php``. Se aquele endpoint
+     * fosse atualizado apenas por uma tela específica do painel (por exemplo SSH),
+     * mudanças de porta/path/host em VMess, VLESS, Shadowsocks, WireGuard, OpenVPN,
+     * Hysteria2, TUIC etc. poderiam passar despercebidas e o cliente continuaria
+     * usando uma configuração antiga até resetar o aplicativo.
+     *
+     * Agora a revisão é um SHA-256 estável do objeto ``protocolos`` mais o servidor.
+     * Assim qualquer mudança efetiva entregue ao app altera a revisão, sem exigir
+     * recriação de usuário e sem depender de cada módulo lembrar de incrementar um
+     * contador no painel.
+     */
     suspend fun fetchConfigVersion(usuario: String): String {
-        val url = "$base/api/v1/configs_versao.php?usuario=" + URLEncoder.encode(usuario, "UTF-8")
+        val url = "$base/api/v1/configs.php?usuario=" + URLEncoder.encode(usuario, "UTF-8")
         val json = requestJson("GET", url, null)
-        return json.optString("versao")
+        val revisionPayload = JSONObject().apply {
+            put("servidor", json.optString("servidor"))
+            put("protocolos", json.optJSONObject("protocolos") ?: JSONObject())
+        }
+        val canonical = canonicalJson(revisionPayload)
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(canonical.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        return "cfg-${digest.take(24)}"
     }
 
     /**
@@ -265,6 +288,24 @@ class PanelWebhookClient(
                 recommended = route.optBoolean("recommended", route.optBoolean("recomendada", false))
             )
         }
+    }
+
+    /** Canonicaliza JSON com chaves ordenadas para o hash não depender da ordem. */
+    private fun canonicalJson(value: Any?): String = when {
+        value == null || value == JSONObject.NULL -> "null"
+        value is JSONObject -> value.keys().asSequence().toList().sorted().joinToString(
+            prefix = "{",
+            postfix = "}",
+            separator = ","
+        ) { key -> "${JSONObject.quote(key)}:${canonicalJson(value.opt(key))}" }
+        value is JSONArray -> (0 until value.length()).joinToString(
+            prefix = "[",
+            postfix = "]",
+            separator = ","
+        ) { index -> canonicalJson(value.opt(index)) }
+        value is String -> JSONObject.quote(value)
+        value is Number || value is Boolean -> value.toString()
+        else -> JSONObject.quote(value.toString())
     }
 
     private suspend fun requestJson(metodo: String, url: String, corpo: JSONObject?): JSONObject {
