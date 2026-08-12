@@ -63,7 +63,7 @@ data class CoreAdvisorReport(
     fun toJson(): String {
         val root = JSONObject()
             .put("tool", "AutomBot Core Network Advisor")
-            .put("version", "0.7.0")
+            .put("version", "0.9.0")
             .put("profile_name", profileName)
             .put("profile_version", profileVersion)
             .put("network", networkLabel)
@@ -392,7 +392,6 @@ class CoreAdvisorEngine(context: Context) {
 
         val bestOpen = stats.maxByOrNull { it.opened }
         val chosen = bestOpen?.takeIf { it.opened > 0 }?.address
-        val totalOpened = stats.sumOf { it.opened }
         val totalRefused = stats.sumOf { it.refused }
         val totalTimeouts = stats.sumOf { it.timedOut }
         val detail = stats.joinToString(" | ") { item ->
@@ -735,15 +734,56 @@ class CoreAdvisorEngine(context: Context) {
                 append("Connection: Upgrade\r\n")
                 append("Sec-WebSocket-Version: 13\r\n")
                 append("Sec-WebSocket-Key: $wsKey\r\n")
-                append("User-Agent: AutomBot-Network-Probe/0.7\r\n\r\n")
+                append("Cache-Control: no-cache\r\n")
+                append("Pragma: no-cache\r\n")
+                append("User-Agent: AutomBot-Network-Probe/0.9\r\n\r\n")
             }
             active!!.getOutputStream().write(request.toByteArray(Charsets.US_ASCII))
             active!!.getOutputStream().flush()
-            val statusLine = BufferedReader(InputStreamReader(active!!.getInputStream(), Charsets.US_ASCII)).readLine().orEmpty()
+
+            val reader = BufferedReader(InputStreamReader(active!!.getInputStream(), Charsets.US_ASCII))
+            val statusLine = reader.readLine().orEmpty()
+            val headers = linkedMapOf<String, String>()
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (line.isBlank()) break
+                val separator = line.indexOf(':')
+                if (separator <= 0) continue
+                val name = line.substring(0, separator).trim().lowercase()
+                val value = line.substring(separator + 1).trim()
+                if (name.isNotBlank() && value.isNotBlank()) {
+                    headers[name] = headers[name]?.let { "$it, $value" } ?: value
+                }
+            }
+
+            val responseMeta = buildList {
+                add("endpoint=${address.hostAddress}:$port")
+                add("Host=$hostHeader")
+                add("path=$normalizedPath")
+                headers["server"]?.let { add("Server=$it") }
+                headers["location"]?.let { add("Location=$it") }
+                headers["via"]?.let { add("Via=$it") }
+                headers["connection"]?.let { add("Connection=$it") }
+                headers["upgrade"]?.let { add("Upgrade=$it") }
+                headers["x-cache"]?.let { add("X-Cache=$it") }
+            }.joinToString("; ")
+
             when {
-                statusLine.contains(" 101 ") -> CoreLayerResult(if (tls) "WebSocket WSS" else "WebSocket WS", CoreCaseStatus.PASS, statusLine)
-                statusLine.startsWith("HTTP/") -> CoreLayerResult(if (tls) "WebSocket WSS" else "WebSocket WS", CoreCaseStatus.WARN, "servidor HTTP respondeu, mas não fez upgrade: $statusLine")
-                else -> CoreLayerResult(if (tls) "WebSocket WSS" else "WebSocket WS", CoreCaseStatus.WARN, "sem resposta HTTP de upgrade")
+                statusLine.contains(" 101 ") -> CoreLayerResult(
+                    if (tls) "WebSocket WSS" else "WebSocket WS",
+                    CoreCaseStatus.PASS,
+                    "$statusLine; $responseMeta"
+                )
+                statusLine.startsWith("HTTP/") -> CoreLayerResult(
+                    if (tls) "WebSocket WSS" else "WebSocket WS",
+                    CoreCaseStatus.WARN,
+                    "servidor HTTP respondeu, mas não fez upgrade: $statusLine; $responseMeta"
+                )
+                else -> CoreLayerResult(
+                    if (tls) "WebSocket WSS" else "WebSocket WS",
+                    CoreCaseStatus.WARN,
+                    "sem resposta HTTP de upgrade; $responseMeta"
+                )
             }
         } catch (_: SocketTimeoutException) {
             CoreLayerResult(if (tls) "WebSocket WSS" else "WebSocket WS", CoreCaseStatus.WARN, "timeout no handshake WebSocket")
