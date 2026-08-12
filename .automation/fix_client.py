@@ -11,6 +11,8 @@ text = text.replace(
     "private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 * 60 * 1000L",
 )
 
+# The incoming patch changes the existing manual applyConfigUpdate() to return
+# Boolean; keep that compatible function and replace only its new polling check.
 start = text.index("    suspend fun checkForConfigUpdate() {")
 end = text.index("\n    ModalNavigationDrawer(", start)
 replacement = '''    suspend fun checkForConfigUpdate() {
@@ -48,41 +50,6 @@ replacement = '''    suspend fun checkForConfigUpdate() {
             appPrefs.edit().putBoolean("managed_config_update_available", existeAtualizacao).apply()
         }
     }
-
-    suspend fun applyConfigUpdate() {
-        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
-        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
-        applyingUpdate = true
-        try {
-            val cliente = PanelWebhookClient(baseUrlGerenciada)
-            val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
-            importPanelConfigs(
-                context = context,
-                response = respostaConfigs,
-                wireGuardManager = wireGuardManager,
-                sshManager = sshManager,
-                vlessManager = vlessManager,
-                vmessManager = vmessManager,
-                shadowsocksManager = shadowsocksManager,
-                trojanManager = trojanManager,
-                openVpnManager = openVpnManager
-            )
-            val versaoNova = runCatching { cliente.fetchConfigVersion(usuarioGerenciado) }.getOrDefault("")
-            appPrefs.edit()
-                .putString("managed_config_versao", versaoNova)
-                .putLong("managed_config_last_check_ms", System.currentTimeMillis())
-                .putBoolean("managed_config_update_available", false)
-                .apply()
-            updateAvailable = false
-        } catch (e: Exception) {
-            com.autombot.client.util.AppLog.log(
-                "Falha ao aplicar atualização de config: ${e.message}",
-                com.autombot.client.util.AppLog.Level.ERROR
-            )
-        } finally {
-            applyingUpdate = false
-        }
-    }
 '''
 text = text[:start] + replacement + text[end:]
 
@@ -95,11 +62,66 @@ if poll_start >= 0:
     text = text[:poll_start] + "            LaunchedEffect(Unit) { checkForConfigUpdate() }\n" + text[poll_end:]
 main.write_text(text)
 
-# The OkHttp API resolved by the current main doesn't accept the onClosed
-# override present in the incoming patch. onOpen is the only success path;
-# onFailure, onClosing and the coroutine timeout cover failures safely.
+# OkHttp 4.12 exposes Dns as a regular interface in the resolved bytecode for
+# this project; use an explicit object implementation instead of constructor-like
+# SAM syntax so it compiles reliably with the current Kotlin plugin.
+sync = Path("app/src/main/java/com/autombot/client/panel/SponsoredDomainSync.kt")
+s = sync.read_text()
+old_sync_dns = '''        val dns = Dns { requestedHost ->
+            if (requestedHost.equals(endpoint.domain, ignoreCase = true) && endpoint.bootstrapIps.isNotEmpty()) {
+                endpoint.bootstrapIps
+                    .mapNotNull { raw -> runCatching { InetAddress.getByName(raw) }.getOrNull() }
+                    .ifEmpty { Dns.SYSTEM.lookup(requestedHost) }
+            } else {
+                Dns.SYSTEM.lookup(requestedHost)
+            }
+        }
+'''
+new_sync_dns = '''        val dns = object : Dns {
+            override fun lookup(requestedHost: String): List<InetAddress> {
+                return if (requestedHost.equals(endpoint.domain, ignoreCase = true) && endpoint.bootstrapIps.isNotEmpty()) {
+                    endpoint.bootstrapIps
+                        .mapNotNull { raw -> runCatching { InetAddress.getByName(raw) }.getOrNull() }
+                        .ifEmpty { Dns.SYSTEM.lookup(requestedHost) }
+                } else {
+                    Dns.SYSTEM.lookup(requestedHost)
+                }
+            }
+        }
+'''
+if old_sync_dns not in s:
+    raise RuntimeError("Bloco Dns esperado não encontrado em SponsoredDomainSync")
+sync.write_text(s.replace(old_sync_dns, new_sync_dns))
+
 validator = Path("app/src/main/java/com/autombot/client/panel/SponsoredRouteValidator.kt")
 v = validator.read_text()
+old_validator_dns = '''            val dns = Dns { requestedHost ->
+                if (requestedHost.equals(host, ignoreCase = true) && bootstrapIps.isNotEmpty()) {
+                    bootstrapIps.mapNotNull { raw -> runCatching { InetAddress.getByName(raw) }.getOrNull() }
+                        .ifEmpty { Dns.SYSTEM.lookup(requestedHost) }
+                } else {
+                    Dns.SYSTEM.lookup(requestedHost)
+                }
+            }
+'''
+new_validator_dns = '''            val dns = object : Dns {
+                override fun lookup(requestedHost: String): List<InetAddress> {
+                    return if (requestedHost.equals(host, ignoreCase = true) && bootstrapIps.isNotEmpty()) {
+                        bootstrapIps.mapNotNull { raw -> runCatching { InetAddress.getByName(raw) }.getOrNull() }
+                            .ifEmpty { Dns.SYSTEM.lookup(requestedHost) }
+                    } else {
+                        Dns.SYSTEM.lookup(requestedHost)
+                    }
+                }
+            }
+'''
+if old_validator_dns not in v:
+    raise RuntimeError("Bloco Dns esperado não encontrado em SponsoredRouteValidator")
+v = v.replace(old_validator_dns, new_validator_dns)
+
+# The OkHttp API resolved by current main doesn't accept this override in the
+# WebSocket listener. onOpen is the sole success signal; onFailure/onClosing and
+# the coroutine timeout cover unsuccessful validation.
 v, removed = re.subn(
     r'\n\s*override fun onClosed\(webSocket: WebSocket, code: Int, reason: String\) \{\s*complete\(false\)\s*\}\s*',
     '\n',
@@ -111,7 +133,7 @@ if removed != 1:
 validator.write_text(v)
 
 # Avoid smart-cast errors on nullable complex expressions with the Kotlin
-# compiler used by the current main branch.
+# compiler used by current main.
 importer = Path("app/src/main/java/com/autombot/client/panel/panelConfigImporter.kt")
 i = importer.read_text()
 i = i.replace(
