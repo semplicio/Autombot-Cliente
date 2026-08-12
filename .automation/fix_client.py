@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 # Preserve the update behavior already present on main: opportunistic check,
 # no continuous polling, and no automatic full config import.
@@ -94,19 +95,19 @@ if poll_start >= 0:
     text = text[:poll_start] + "            LaunchedEffect(Unit) { checkForConfigUpdate() }\n" + text[poll_end:]
 main.write_text(text)
 
-# OkHttp version in the current project doesn't expose the onClosed override
-# used by the incoming patch. onOpen is the only success path; onFailure,
-# onClosing and timeout cover failures safely.
+# The OkHttp API resolved by the current main doesn't accept the onClosed
+# override present in the incoming patch. onOpen is the only success path;
+# onFailure, onClosing and the coroutine timeout cover failures safely.
 validator = Path("app/src/main/java/com/autombot/client/panel/SponsoredRouteValidator.kt")
 v = validator.read_text()
-v = v.replace(
-    '''
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    complete(false)
-                }
-''',
-    "\n",
+v, removed = re.subn(
+    r'\n\s*override fun onClosed\(webSocket: WebSocket, code: Int, reason: String\) \{\s*complete\(false\)\s*\}\s*',
+    '\n',
+    v,
+    count=1,
 )
+if removed != 1:
+    raise RuntimeError("Não encontrei exatamente um override onClosed para adaptar")
 validator.write_text(v)
 
 # Avoid smart-cast errors on nullable complex expressions with the Kotlin
