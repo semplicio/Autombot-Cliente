@@ -84,15 +84,33 @@ jobs:
         shell: bash
         run: |
           git checkout -- local.properties gradle.properties
-          # O build modifica arquivos nativos/cache já rastreados pelo repositório.
-          # Restaura esses artefatos antes do commit para que apenas a feature seja publicada.
-          git restore --worktree --staged -- app/.cxx app/build .cxx 2>/dev/null || true
-          git clean -fdX app/.cxx app/build .cxx 2>/dev/null || true
           rm -rf .automation
           rm -f .github/workflows/apply-sponsored-domain.yml
+
           git config user.name 'AutomBot Patch Bot'
           git config user.email 'actions@users.noreply.github.com'
-          git add -A
-          git diff --cached --check
+
+          # Stage somente os arquivos reais da feature. Nunca adicione app/.cxx,
+          # app/build ou outros artefatos gerados pelo CMake/Gradle.
+          git add -- \
+            SPEC.md \
+            app/src/main/java/com/autombot/client/panel/PanelWebhookClient.kt \
+            app/src/main/java/com/autombot/client/panel/SponsoredDomainSync.kt \
+            app/src/main/java/com/autombot/client/panel/SponsoredRouteValidator.kt \
+            app/src/main/java/com/autombot/client/panel/panelConfigImporter.kt \
+            app/src/main/java/com/autombot/client/ui/MainActivity.kt
+
+          # Registra apenas a remoção dos arquivos temporários usados para aplicar/testar o patch.
+          git add -u -- .automation .github/workflows/apply-sponsored-domain.yml
+
+          git diff --cached --check -- \
+            SPEC.md \
+            app/src/main/java/com/autombot/client/panel/PanelWebhookClient.kt \
+            app/src/main/java/com/autombot/client/panel/SponsoredDomainSync.kt \
+            app/src/main/java/com/autombot/client/panel/SponsoredRouteValidator.kt \
+            app/src/main/java/com/autombot/client/panel/panelConfigImporter.kt \
+            app/src/main/java/com/autombot/client/ui/MainActivity.kt
+
+          git status --short
           git commit -m 'Sincronizar domínio patrocinado gerenciável'
           git push origin HEAD:feature/sponsored-domain
