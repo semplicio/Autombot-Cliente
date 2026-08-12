@@ -46,6 +46,7 @@ import com.autombot.client.ui.onboarding.ProgressStepsScreen
 import com.autombot.client.ui.onboarding.SplashScreen
 import com.autombot.client.panel.PanelException
 import com.autombot.client.panel.PanelWebhookClient
+import com.autombot.client.panel.SponsoredDomainSync
 import com.autombot.client.panel.TrialAccount
 import com.autombot.client.panel.importPanelConfigs
 import com.autombot.client.provisioning.DeviceProvisioning
@@ -614,43 +615,18 @@ private fun MainShell(
     val context = LocalContext.current
     val appPrefs = remember { context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE) }
 
-    // A disponibilidade de atualização fica persistida para não sumir se o usuário
-    // abrir outra tela antes de tocar em "Atualizar". A checagem é oportunista: só
-    // ocorre quando o Dashboard entra em cena, com intervalo mínimo de 1 hora por
-    // dispositivo. Não existe polling contínuo nem chamada em segundo plano.
+    // A disponibilidade de atualização fica persistida como fallback visual. Em
+    // modo gerenciado o app aplica revisões válidas automaticamente e consulta o
+    // manifesto público também pelo próprio domínio patrocinado. Isso permite
+    // receber uma rotação mesmo quando o domínio técnico do painel está bloqueado.
     var updateAvailable by remember {
         mutableStateOf(appPrefs.getBoolean("managed_config_update_available", false))
     }
     var applyingUpdate by remember { mutableStateOf(false) }
 
-    suspend fun checkForConfigUpdate() {
-        if (!isManagedMode) return
-        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
-        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
-        val versaoConhecida = appPrefs.getString("managed_config_versao", "")
-        val agora = System.currentTimeMillis()
-        val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
-        val decorrido = agora - ultimaChecagem
-        if (ultimaChecagem > 0L && decorrido >= 0L && decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS) {
-            return
-        }
-
-        // Marca a tentativa antes da chamada para também evitar rajadas de requests
-        // quando o aparelho estiver sem rede ou o painel estiver temporariamente fora.
-        appPrefs.edit().putLong("managed_config_last_check_ms", agora).apply()
-
-        runCatching {
-            PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
-        }.onSuccess { versaoAtual ->
-            val existeAtualizacao = versaoAtual.isNotBlank() && versaoAtual != versaoConhecida
-            updateAvailable = existeAtualizacao
-            appPrefs.edit().putBoolean("managed_config_update_available", existeAtualizacao).apply()
-        }
-    }
-
-    suspend fun applyConfigUpdate() {
-        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
-        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
+    suspend fun applyConfigUpdate(): Boolean {
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
         applyingUpdate = true
         try {
             val cliente = PanelWebhookClient(baseUrlGerenciada)
@@ -666,17 +642,55 @@ private fun MainShell(
                 trojanManager = trojanManager,
                 openVpnManager = openVpnManager
             )
-            val versaoNova = runCatching { cliente.fetchConfigVersion(usuarioGerenciado) }.getOrDefault("")
-            appPrefs.edit()
-                .putString("managed_config_versao", versaoNova)
+            val versaoNova = runCatching { cliente.fetchConfigVersion(usuarioGerenciado) }.getOrNull()
+            val editor = appPrefs.edit()
                 .putLong("managed_config_last_check_ms", System.currentTimeMillis())
                 .putBoolean("managed_config_update_available", false)
-                .apply()
+            if (!versaoNova.isNullOrBlank()) editor.putString("managed_config_versao", versaoNova)
+            editor.apply()
             updateAvailable = false
+            return true
         } catch (e: Exception) {
             com.autombot.client.util.AppLog.log("Falha ao aplicar atualização de config: ${e.message}", com.autombot.client.util.AppLog.Level.ERROR)
+            return false
         } finally {
             applyingUpdate = false
+        }
+    }
+
+    suspend fun checkForConfigUpdate() {
+        if (!isManagedMode) return
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
+        val versaoConhecida = appPrefs.getString("managed_config_versao", "")
+        val agora = System.currentTimeMillis()
+        val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
+        val decorrido = agora - ultimaChecagem
+        if (ultimaChecagem > 0L && decorrido >= 0L && decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS) return
+
+        // Uma única janela oportunista por hora. O manifesto patrocinado usa o
+        // endpoint/bootstrap já armazenado, sem polling contínuo em background.
+        appPrefs.edit().putLong("managed_config_last_check_ms", agora).apply()
+        runCatching {
+            SponsoredDomainSync.refresh(
+                context = context,
+                vlessManager = vlessManager,
+                vmessManager = vmessManager,
+                trojanManager = trojanManager
+            )
+        }.onFailure {
+            com.autombot.client.util.AppLog.log(
+                "Falha ao sincronizar domínio patrocinado: ${it.message}",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
+        }
+
+        runCatching {
+            PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
+        }.onSuccess { versaoAtual ->
+            val existeAtualizacao = versaoAtual.isNotBlank() && versaoAtual != versaoConhecida
+            updateAvailable = existeAtualizacao
+            appPrefs.edit().putBoolean("managed_config_update_available", existeAtualizacao).apply()
         }
     }
 

@@ -2138,3 +2138,14 @@ instabilidade sob carga é o que importa primeiro.
 Pode ser limitação inerente do Dropbear (implementação de SSH bem leve, pensada pra pouco uso simultâneo)
 que nenhum ajuste do lado do cliente resolve sozinho — nesse caso, o próximo passo seria verificar se existe
 um SSH mais robusto (OpenSSH) disponível na VPS, em vez de continuar ajustando limites.
+# Domínio patrocinado gerenciado
+
+No modo gerenciado, os pacotes Xray podem trazer `sponsored_endpoint` e rotas
+com `role=sponsored`. O cliente armazena o manifesto público, tenta as rotas na
+ordem informada pelo Core e só promove uma rota patrocinada depois de receber um
+upgrade WebSocket real (`101`); redirects de portal cativo não são aceitos.
+
+Quando o DNS da rede móvel não resolve o FQDN, o app pode conectar pelo IP de
+bootstrap mantendo o domínio patrocinado em TLS/SNI e no Host WebSocket. O
+manifesto também é consultado pelo próprio endpoint patrocinado, permitindo
+troca automática de domínio/IP com uma janela de sobreposição.

@@ -21,6 +21,13 @@ import com.autombot.client.protocols.vmess.parseVmessUri
 import com.autombot.client.protocols.wireguard.WireGuardManager
 import com.autombot.client.util.AppLog
 
+private data class RouteSelection(
+    val uri: String?,
+    val route: ProtocolRoute?,
+    val connectHost: String? = null,
+    val preserveExisting: Boolean = false
+)
+
 /**
  * Importa as configurações do painel e respeita a rota preferida indicada pelo Core.
  *
@@ -51,21 +58,59 @@ suspend fun importPanelConfigs(
         AppLog.log(msg, AppLog.Level.ERROR)
     }
 
-    fun registrarRota(protocolo: String, item: ProtocolPackage) {
-        item.selectedRoute()?.let { route ->
+    fun registrarRota(protocolo: String, route: ProtocolRoute?) {
+        route?.let {
             AppLog.log(
-                "Painel: $protocolo usando rota ${route.id} — ${route.host ?: "?"}:${route.port ?: "?"} " +
-                    "${route.transport ?: ""}${if (route.tls) " + TLS" else ""}${route.path?.let { " path=$it" } ?: ""}",
+                "Painel: $protocolo usando rota ${it.id} — ${it.host ?: "?"}:${it.port ?: "?"} " +
+                    "${it.transport ?: ""}${if (it.tls) " + TLS" else ""}${it.path?.let { path -> " path=$path" } ?: ""}",
                 AppLog.Level.INFO
             )
         }
     }
 
+    suspend fun selecionarRota(item: ProtocolPackage?): RouteSelection {
+        if (item == null) return RouteSelection(null, null)
+        var patrocinadaFalhou = false
+        for (route in item.orderedRoutes()) {
+            if (route.role.equals("sponsored", ignoreCase = true)) {
+                val endpoint = item.sponsoredEndpoint?.endpointForDomain(route.host)
+                val connectHost = SponsoredRouteValidator.selectConnectHost(route, endpoint)
+                if (connectHost != null) {
+                    return RouteSelection(route.uri, route, connectHost = connectHost)
+                }
+                patrocinadaFalhou = true
+                AppLog.log(
+                    "Painel: rota patrocinada ${route.id} não concluiu upgrade WebSocket; tentando fallback sem substituir a última rota válida",
+                    AppLog.Level.ERROR
+                )
+                continue
+            }
+            // Não substitui um perfil patrocinado já funcional por uma rota
+            // comum só porque a rede atual não conseguiu validar a revisão nova.
+            if (patrocinadaFalhou) return RouteSelection(null, null, preserveExisting = true)
+            return RouteSelection(route.uri, route)
+        }
+        return if (patrocinadaFalhou) {
+            RouteSelection(null, null, preserveExisting = true)
+        } else {
+            RouteSelection(item.uri, null)
+        }
+    }
+
     val itemVmess = response.protocols["vmess"]
-    val uriVmess = itemVmess?.effectiveUri()
-    if (itemVmess != null && itemVmess.success && !uriVmess.isNullOrBlank()) {
-        registrarRota("vmess", itemVmess)
-        runCatching { vmessManager.addProfile(parseVmessUri(uriVmess)) }
+    val selecaoVmess = selecionarRota(itemVmess)
+    val uriVmess = selecaoVmess.uri
+    val rotaVmess = selecaoVmess.route
+    if (selecaoVmess.preserveExisting) {
+        avisar("vmess", "a nova rota patrocinada não validou; mantive o perfil anterior")
+    } else if (itemVmess != null && itemVmess.success && !uriVmess.isNullOrBlank()) {
+        registrarRota("vmess", rotaVmess)
+        runCatching {
+            val parsed = parseVmessUri(uriVmess)
+            vmessManager.addProfile(
+                parsed.copy(server = selecaoVmess.connectHost ?: parsed.server)
+            )
+        }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("vmess", it.message ?: "erro ao interpretar a URI") }
     } else {
@@ -74,10 +119,19 @@ suspend fun importPanelConfigs(
     }
 
     val itemVless = response.protocols["vless"]
-    val uriVless = itemVless?.effectiveUri()
-    if (itemVless != null && itemVless.success && !uriVless.isNullOrBlank()) {
-        registrarRota("vless", itemVless)
-        runCatching { vlessManager.addProfile(parseVlessUri(uriVless)) }
+    val selecaoVless = selecionarRota(itemVless)
+    val uriVless = selecaoVless.uri
+    val rotaVless = selecaoVless.route
+    if (selecaoVless.preserveExisting) {
+        avisar("vless", "a nova rota patrocinada não validou; mantive o perfil anterior")
+    } else if (itemVless != null && itemVless.success && !uriVless.isNullOrBlank()) {
+        registrarRota("vless", rotaVless)
+        runCatching {
+            val parsed = parseVlessUri(uriVless)
+            vlessManager.addProfile(
+                parsed.copy(server = selecaoVless.connectHost ?: parsed.server)
+            )
+        }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("vless", it.message ?: "erro ao interpretar a URI") }
     } else {
@@ -86,10 +140,19 @@ suspend fun importPanelConfigs(
     }
 
     val itemTrojan = response.protocols["trojan"]
-    val uriTrojan = itemTrojan?.effectiveUri()
-    if (itemTrojan != null && itemTrojan.success && !uriTrojan.isNullOrBlank()) {
-        registrarRota("trojan", itemTrojan)
-        runCatching { trojanManager.addProfile(parseTrojanUri(uriTrojan)) }
+    val selecaoTrojan = selecionarRota(itemTrojan)
+    val uriTrojan = selecaoTrojan.uri
+    val rotaTrojan = selecaoTrojan.route
+    if (selecaoTrojan.preserveExisting) {
+        avisar("trojan", "a nova rota patrocinada não validou; mantive o perfil anterior")
+    } else if (itemTrojan != null && itemTrojan.success && !uriTrojan.isNullOrBlank()) {
+        registrarRota("trojan", rotaTrojan)
+        runCatching {
+            val parsed = parseTrojanUri(uriTrojan)
+            trojanManager.addProfile(
+                parsed.copy(server = selecaoTrojan.connectHost ?: parsed.server)
+            )
+        }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("trojan", it.message ?: "erro ao interpretar a URI") }
     } else {
@@ -98,9 +161,13 @@ suspend fun importPanelConfigs(
     }
 
     val itemSs = response.protocols["shadowsocks"]
-    val uriSs = itemSs?.effectiveUri()
-    if (itemSs != null && itemSs.success && !uriSs.isNullOrBlank()) {
-        registrarRota("shadowsocks", itemSs)
+    val selecaoSs = selecionarRota(itemSs)
+    val uriSs = selecaoSs.uri
+    val rotaSs = selecaoSs.route
+    if (selecaoSs.preserveExisting) {
+        avisar("shadowsocks", "a nova rota patrocinada não validou; mantive o perfil anterior")
+    } else if (itemSs != null && itemSs.success && !uriSs.isNullOrBlank()) {
+        registrarRota("shadowsocks", rotaSs)
         runCatching { shadowsocksManager.addProfile(parseShadowsocksUri(uriSs)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("shadowsocks", it.message ?: "erro ao interpretar a URI") }
@@ -114,7 +181,7 @@ suspend fun importPanelConfigs(
         val uri = item?.effectiveUri()
         val managedNames = setOf(response.usuario, nomeBase).filter { it.isNotBlank() }.toSet()
         if (item != null && item.success && !uri.isNullOrBlank()) {
-            registrarRota(protocolKey, item)
+            registrarRota(protocolKey, item.selectedRoute())
             runCatching { modernManager.importUri(uri) }
                 .onSuccess { parsed ->
                     if (parsed.type != expectedType) {
@@ -240,6 +307,8 @@ suspend fun importPanelConfigs(
     if (!algumaImportacao) {
         throw PanelException("Nenhum protocolo pôde ser importado. " + (avisos.firstOrNull() ?: "Verifique a config do painel."))
     }
+
+    response.sponsoredEndpoint?.let { SponsoredDomainSync.storeManifest(context, it) }
 
     return avisos
 }
