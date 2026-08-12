@@ -291,6 +291,7 @@ private sealed class Screen {
 }
 
 private const val TRIAL_DURATION_SECONDS = 2 * 60 * 60L
+private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 * 60 * 1000L
 
 @Composable
 private fun AppRoot(
@@ -437,15 +438,13 @@ private fun AppRoot(
                         avisos.forEach {
                             com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
                         }
-                        // CORRECAO: usuario/dominio gerenciados nunca eram guardados em
-                        // lugar nenhum depois da criacao — sem isso, nao tem como checar
-                        // atualizacao de config depois (nao sabe nem em quem perguntar).
-                        // Guarda tambem a versao atual como base de comparacao.
                         val versaoInicial = runCatching { panelClient.fetchConfigVersion(conta.usuario) }.getOrDefault("")
                         appPrefs.edit()
                             .putString("managed_usuario", conta.usuario)
                             .putString("managed_base_url", current.domain)
                             .putString("managed_config_versao", versaoInicial)
+                            .putLong("managed_config_last_check_ms", System.currentTimeMillis())
+                            .putBoolean("managed_config_update_available", false)
                             .apply()
                     }
                 ),
@@ -615,30 +614,38 @@ private fun MainShell(
     val context = LocalContext.current
     val appPrefs = remember { context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE) }
 
-    // CORRECAO: pedido do usuário — botão "Novas atualizações" no Dashboard quando
-    // a config de conexão mudar no painel (ex: admin editou a config SSH em "SSH pro
-    // App"). Checagem TODA VEZ que o Dashboard aparece na tela (não é um serviço de
-    // fundo de verdade rodando com o app fechado — isso exigiria WorkManager, uma
-    // dependência nova, mais arriscado de introduzir bem na hora de compilar tudo
-    // de uma vez; dá pra evoluir pra isso depois se precisar rodar mesmo com o app
-    // fechado). Só CHECA sozinho (é leve, um hash só); a importação de verdade só
-    // acontece quando a pessoa toca no botão — trocar a config de conexão sozinha,
-    // sem avisar, poderia derrubar uma VPN ativa na hora sem a pessoa esperar.
-    var updateAvailable by remember { mutableStateOf(false) }
+    // A disponibilidade de atualização fica persistida para não sumir se o usuário
+    // abrir outra tela antes de tocar em "Atualizar". A checagem é oportunista: só
+    // ocorre quando o Dashboard entra em cena, com intervalo mínimo de 1 hora por
+    // dispositivo. Não existe polling contínuo nem chamada em segundo plano.
+    var updateAvailable by remember {
+        mutableStateOf(appPrefs.getBoolean("managed_config_update_available", false))
+    }
     var applyingUpdate by remember { mutableStateOf(false) }
 
     suspend fun checkForConfigUpdate() {
+        if (!isManagedMode) return
         val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
         val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
         val versaoConhecida = appPrefs.getString("managed_config_versao", "")
-        runCatching {
-            val versaoAtual = PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
-            if (versaoAtual.isNotBlank() && versaoAtual != versaoConhecida) {
-                updateAvailable = true
-            }
+        val agora = System.currentTimeMillis()
+        val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
+        val decorrido = agora - ultimaChecagem
+        if (ultimaChecagem > 0L && decorrido >= 0L && decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS) {
+            return
         }
-        // Falha de rede na checagem não é erro visível pro usuário — só tenta de
-        // novo na próxima vez que o Dashboard aparecer.
+
+        // Marca a tentativa antes da chamada para também evitar rajadas de requests
+        // quando o aparelho estiver sem rede ou o painel estiver temporariamente fora.
+        appPrefs.edit().putLong("managed_config_last_check_ms", agora).apply()
+
+        runCatching {
+            PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
+        }.onSuccess { versaoAtual ->
+            val existeAtualizacao = versaoAtual.isNotBlank() && versaoAtual != versaoConhecida
+            updateAvailable = existeAtualizacao
+            appPrefs.edit().putBoolean("managed_config_update_available", existeAtualizacao).apply()
+        }
     }
 
     suspend fun applyConfigUpdate() {
@@ -660,7 +667,11 @@ private fun MainShell(
                 openVpnManager = openVpnManager
             )
             val versaoNova = runCatching { cliente.fetchConfigVersion(usuarioGerenciado) }.getOrDefault("")
-            appPrefs.edit().putString("managed_config_versao", versaoNova).apply()
+            appPrefs.edit()
+                .putString("managed_config_versao", versaoNova)
+                .putLong("managed_config_last_check_ms", System.currentTimeMillis())
+                .putBoolean("managed_config_update_available", false)
+                .apply()
             updateAvailable = false
         } catch (e: Exception) {
             com.autombot.client.util.AppLog.log("Falha ao aplicar atualização de config: ${e.message}", com.autombot.client.util.AppLog.Level.ERROR)
