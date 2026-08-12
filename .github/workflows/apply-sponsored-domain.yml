@@ -1,4 +1,4 @@
-name: Diagnose sponsored domain client patch
+name: Diagnose sponsored domain compilation
 
 on:
   push:
@@ -29,20 +29,17 @@ jobs:
           echo '49b7fed653f8e3e10bc91c7579f5b076e7f8c79c7f415ced121a87ee27b5aee0  /tmp/client.patch' | sha256sum -c -
           git apply /tmp/client.patch
           python .automation/fix_client.py
+          test -f app/src/main/java/com/autombot/client/panel/SponsoredDomainSync.kt
+          grep -n 'internal object SponsoredDomainSync' app/src/main/java/com/autombot/client/panel/SponsoredDomainSync.kt
 
-      - name: Show sponsored sources
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Compile from clean state
         shell: bash
         run: |
-          echo '--- files ---'
-          find app/src/main/java/com/autombot/client/panel -maxdepth 1 -type f -iname '*sponsor*' -print | sort
-          echo '--- symbols ---'
-          grep -R -n 'SponsoredDomainSync\|SponsoredRouteValidator\|package com.autombot.client.panel' app/src/main/java/com/autombot/client/panel | head -200
-          echo '--- SponsoredDomainSync.kt ---'
-          if test -f app/src/main/java/com/autombot/client/panel/SponsoredDomainSync.kt; then
-            sed -n '1,280p' app/src/main/java/com/autombot/client/panel/SponsoredDomainSync.kt
-          else
-            echo 'MISSING SponsoredDomainSync.kt'
-          fi
-          echo '--- git status ---'
-          git status --short
-          false
+          chmod +x gradlew
+          ./gradlew clean :app:compileDebugKotlin --stacktrace --info
