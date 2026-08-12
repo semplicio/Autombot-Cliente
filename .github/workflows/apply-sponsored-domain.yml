@@ -33,14 +33,149 @@ jobs:
           git apply /tmp/client.patch
           git diff --check
 
-      - name: Preserve current throttled update behavior
-        run: echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCnBhdGggPSBQYXRoKCdhcHAvc3JjL21haW4vamF2YS9jb20vYXV0b21ib3QvY2xpZW50L3VpL01haW5BY3Rpdml0eS5rdCcpCnRleHQgPSBwYXRoLnJlYWRfdGV4dCgpCnRleHQgPSB0ZXh0LnJlcGxhY2UoCiAgICAncHJpdmF0ZSBjb25zdCB2YWwgTUFOQUdFRF9DT05GSUdfQ0hFQ0tfSU5URVJWQUxfTVMgPSAxNSAqIDYwICogMTAwMExcbnByaXZhdGUgY29uc3QgdmFsIFNQT05TT1JFRF9NQU5JRkVTVF9QT0xMX0lOVEVSVkFMX01TID0gNSAqIDYwICogMTAwMEwnLAogICAgJ3ByaXZhdGUgY29uc3QgdmFsIE1BTkFHRURfQ09ORklHX0NIRUNLX0lOVEVSVkFMX01TID0gNjAgKiA2MCAqIDEwMDBMJwopCm9sZF9jaGVjayA9ICcnJyAgICBzdXNwZW5kIGZ1biBjaGVja0ZvckNvbmZpZ1VwZGF0ZSgpIHsKICAgICAgICBpZiAoIWlzTWFuYWdlZE1vZGUpIHJldHVybgoKICAgICAgICB0cnkgewogICAgICAgICAgICBTcG9uc29yZWREb21haW5TeW5jLnJlZnJlc2goCiAgICAgICAgICAgICAgICBjb250ZXh0ID0gY29udGV4dCwKICAgICAgICAgICAgICAgIHZsZXNzTWFuYWdlciA9IHZsZXNzTWFuYWdlciwKICAgICAgICAgICAgICAgIHZtZXNzTWFuYWdlciA9IHZtZXNzTWFuYWdlciwKICAgICAgICAgICAgICAgIHRyb2phbk1hbmFnZXIgPSB0cm9qYW5NYW5hZ2VyCiAgICAgICAgICAgICkKICAgICAgICB9IGNhdGNoIChlOiBFeGNlcHRpb24pIHsKICAgICAgICAgICAgY29tLmF1dG9tYm90LmNsaWVudC51dGlsLkFwcExvZy5sb2coCiAgICAgICAgICAgICAgICAiRmFsaGEgYW8gc2luY3Jvbml6YXIgZG9tw61uaW8gcGF0cm9jaW5hZG86ICR7ZS5tZXNzYWdlfSIsCiAgICAgICAgICAgICAgICBjb20uYXV0b21ib3QuY2xpZW50LnV0aWwuQXBwTG9nLkxldmVsLkVSUk9SCiAgICAgICAgICAgICkKICAgICAgICB9CgogICAgICAgIHZhbCB1c3VhcmlvR2VyZW5jaWFkbyA9IGFwcFByZWZzLmdldFN0cmluZygibWFuYWdlZF91c3VhcmlvIiwgbnVsbCkgPzogcmV0dXJuCiAgICAgICAgdmFsIGJhc2VVcmxHZXJlbmNpYWRhID0gYXBwUHJlZnMuZ2V0U3RyaW5nKCJtYW5hZ2VkX2Jhc2VfdXJsIiwgbnVsbCkgPzogcmV0dXJuCiAgICAgICAgdmFsIHZlcnNhb0NvbmhlY2lkYSA9IGFwcFByZWZzLmdldFN0cmluZygibWFuYWdlZF9jb25maWdfdmVyc2FvIiwgIiIpCiAgICAgICAgdmFsIGFnb3JhID0gU3lzdGVtLmN1cnJlbnRUaW1lTWlsbGlzKCkKICAgICAgICB2YWwgdWx0aW1hQ2hlY2FnZW0gPSBhcHBQcmVmcy5nZXRMb25nKCJtYW5hZ2VkX2NvbmZpZ19sYXN0X2NoZWNrX21zIiwgMEwpCiAgICAgICAgdmFsIGRlY29ycmlkbyA9IGFnb3JhIC0gdWx0aW1hQ2hlY2FnZW0KICAgICAgICBpZiAodWx0aW1hQ2hlY2FnZW0gPiAwTCAmJiBkZWNvcnJpZG8gPj0gMEwgJiYgZGVjb3JyaWRvIDwgTUFOQUdFRF9DT05GSUdfQ0hFQ0tfSU5URVJWQUxfTVMpIHsKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgfQoKICAgICAgICBhcHBQcmVmcy5lZGl0KCkucHV0TG9uZygibWFuYWdlZF9jb25maWdfbGFzdF9jaGVja19tcyIsIGFnb3JhKS5hcHBseSgpCiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgdmFsIHZlcnNhb0F0dWFsID0gUGFuZWxXZWJob29rQ2xpZW50KGJhc2VVcmxHZXJlbmNpYWRhKS5mZXRjaENvbmZpZ1ZlcnNpb24odXN1YXJpb0dlcmVuY2lhZG8pCiAgICAgICAgICAgIHZhbCBleGlzdGVBdHVhbGl6YWNhbyA9IHZlcnNhb0F0dWFsLmlzTm90QmxhbmsoKSAmJiB2ZXJzYW9BdHVhbCAhPSB2ZXJzYW9Db25oZWNpZGEKICAgICAgICAgICAgdXBkYXRlQXZhaWxhYmxlID0gZXhpc3RlQXR1YWxpemFjYW8KICAgICAgICAgICAgYXBwUHJlZnMuZWRpdCgpLnB1dEJvb2xlYW4oIm1hbmFnZWRfY29uZmlnX3VwZGF0ZV9hdmFpbGFibGUiLCBleGlzdGVBdHVhbGl6YWNhbykuYXBwbHkoKQogICAgICAgICAgICBpZiAoZXhpc3RlQXR1YWxpemFjYW8pIGFwcGx5Q29uZmlnVXBkYXRlKCkKICAgICAgICB9IGNhdGNoIChlOiBFeGNlcHRpb24pIHsKICAgICAgICAgICAgY29tLmF1dG9tYm90LmNsaWVudC51dGlsLkFwcExvZy5sb2coCiAgICAgICAgICAgICAgICAiUGFpbmVsIGluZGlzcG9uw612ZWwgZHVyYW50ZSBhIHNpbmNyb25pemHDp8OjbyBkZSBjb25maWc6ICR7ZS5tZXNzYWdlfSIsCiAgICAgICAgICAgICAgICBjb20uYXV0b21ib3QuY2xpZW50LnV0aWwuQXBwTG9nLkxldmVsLkVSUk9SCiAgICAgICAgICAgICkKICAgICAgICB9CiAgICB9CicnJwpuZXdfY2hlY2sgPSAnJycgICAgc3VzcGVuZCBmdW4gY2hlY2tGb3JDb25maWdVcGRhdGUoKSB7CiAgICAgICAgaWYgKCFpc01hbmFnZWRNb2RlKSByZXR1cm4KICAgICAgICB2YWwgdXN1YXJpb0dlcmVuY2lhZG8gPSBhcHBQcmVmcy5nZXRTdHJpbmcoIm1hbmFnZWRfdXN1YXJpbyIsIG51bGwpID86IHJldHVybgogICAgICAgIHZhbCBiYXNlVXJsR2VyZW5jaWFkYSA9IGFwcFByZWZzLmdldFN0cmluZygibWFuYWdlZF9iYXNlX3VybCIsIG51bGwpID86IHJldHVybgogICAgICAgIHZhbCB2ZXJzYW9Db25oZWNpZGEgPSBhcHBQcmVmcy5nZXRTdHJpbmcoIm1hbmFnZWRfY29uZmlnX3ZlcnNhbyIsICIiKQogICAgICAgIHZhbCBhZ29yYSA9IFN5c3RlbS5jdXJyZW50VGltZU1pbGxpcygpCiAgICAgICAgdmFsIHVsdGltYUNoZWNhZ2VtID0gYXBwUHJlZnMuZ2V0TG9uZygibWFuYWdlZF9jb25maWdfbGFzdF9jaGVja19tcyIsIDBMKQogICAgICAgIHZhbCBkZWNvcnJpZG8gPSBhZ29yYSAtIHVsdGltYUNoZWNhZ2VtCiAgICAgICAgaWYgKHVsdGltYUNoZWNhZ2VtID4gMEwgJiYgZGVjb3JyaWRvID49IDBMICYmIGRlY29ycmlkbyA8IE1BTkFHRURfQ09ORklHX0NIRUNLX0lOVEVSVkFMX01TKSB7CiAgICAgICAgICAgIHJldHVybgogICAgICAgIH0KCiAgICAgICAgLy8gVW1hIMO6bmljYSBqYW5lbGEgZGUgc2luY3Jvbml6YcOnw6NvIG9wb3J0dW5pc3RhIHBvciBob3JhLiBPIG1hbmlmZXN0bwogICAgICAgIC8vIHBhdHJvY2luYWRvIHVzYSBvIGVuZHBvaW50L2Jvb3RzdHJhcCBqw6EgYXJtYXplbmFkbywgc2VtIHBvbGxpbmcgZW0gYmFja2dyb3VuZC4KICAgICAgICBhcHBQcmVmcy5lZGl0KCkucHV0TG9uZygibWFuYWdlZF9jb25maWdfbGFzdF9jaGVja19tcyIsIGFnb3JhKS5hcHBseSgpCiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgU3BvbnNvcmVkRG9tYWluU3luYy5yZWZyZXNoKAogICAgICAgICAgICAgICAgY29udGV4dCA9IGNvbnRleHQsCiAgICAgICAgICAgICAgICB2bGVzc01hbmFnZXIgPSB2bGVzc01hbmFnZXIsCiAgICAgICAgICAgICAgICB2bWVzc01hbmFnZXIgPSB2bWVzc01hbmFnZXIsCiAgICAgICAgICAgICAgICB0cm9qYW5NYW5hZ2VyID0gdHJvamFuTWFuYWdlcgogICAgICAgICAgICApCiAgICAgICAgfSBjYXRjaCAoZTogRXhjZXB0aW9uKSB7CiAgICAgICAgICAgIGNvbS5hdXRvbWJvdC5jbGllbnQudXRpbC5BcHBMb2cubG9nKAogICAgICAgICAgICAgICAgIkZhbGhhIGFvIHNpbmNyb25pemFyIGRvbcOtbmlvIHBhdHJvY2luYWRvOiAke2UubWVzc2FnZX0iLAogICAgICAgICAgICAgICAgY29tLmF1dG9tYm90LmNsaWVudC51dGlsLkFwcExvZy5MZXZlbC5FUlJPUgogICAgICAgICAgICApCiAgICAgICAgfQoKICAgICAgICBydW5DYXRjaGluZyB7CiAgICAgICAgICAgIFBhbmVsV2ViaG9va0NsaWVudChiYXNlVXJsR2VyZW5jaWFkYSkuZmV0Y2hDb25maWdWZXJzaW9uKHVzdWFyaW9HZXJlbmNpYWRvKQogICAgICAgIH0ub25TdWNjZXNzIHsgdmVyc2FvQXR1YWwgLT4KICAgICAgICAgICAgdmFsIGV4aXN0ZUF0dWFsaXphY2FvID0gdmVyc2FvQXR1YWwuaXNOb3RCbGFuaygpICYmIHZlcnNhb0F0dWFsICE9IHZlcnNhb0NvbmhlY2lkYQogICAgICAgICAgICB1cGRhdGVBdmFpbGFibGUgPSBleGlzdGVBdHVhbGl6YWNhbwogICAgICAgICAgICBhcHBQcmVmcy5lZGl0KCkucHV0Qm9vbGVhbigibWFuYWdlZF9jb25maWdfdXBkYXRlX2F2YWlsYWJsZSIsIGV4aXN0ZUF0dWFsaXphY2FvKS5hcHBseSgpCiAgICAgICAgfQogICAgfQonJycKaWYgb2xkX2NoZWNrIG5vdCBpbiB0ZXh0OgogICAgcmFpc2UgU3lzdGVtRXhpdCgnY2hlY2tGb3JDb25maWdVcGRhdGUgZXNwZXJhZG8gbsOjbyBlbmNvbnRyYWRvIGFww7NzIGFwbGljYXIgbyBwYXRjaCcpCnRleHQgPSB0ZXh0LnJlcGxhY2Uob2xkX2NoZWNrLCBuZXdfY2hlY2spCm9sZF9lZmZlY3QgPSAnJycgICAgICAgICAgICBMYXVuY2hlZEVmZmVjdChpc01hbmFnZWRNb2RlKSB7CiAgICAgICAgICAgICAgICB3aGlsZSAoaXNNYW5hZ2VkTW9kZSkgewogICAgICAgICAgICAgICAgICAgIGNoZWNrRm9yQ29uZmlnVXBkYXRlKCkKICAgICAgICAgICAgICAgICAgICBkZWxheShTUE9OU09SRURfTUFOSUZFU1RfUE9MTF9JTlRFUlZBTF9NUykKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgfQonJycKbmV3X2VmZmVjdCA9ICcnJyAgICAgICAgICAgIExhdW5jaGVkRWZmZWN0KFVuaXQpIHsgY2hlY2tGb3JDb25maWdVcGRhdGUoKSB9CicnJwppZiBvbGRfZWZmZWN0IG5vdCBpbiB0ZXh0OgogICAgcmFpc2UgU3lzdGVtRXhpdCgnbG9vcCBkZSBwb2xsaW5nIGVzcGVyYWRvIG7Do28gZW5jb250cmFkbyBhcMOzcyBhcGxpY2FyIG8gcGF0Y2gnKQp0ZXh0ID0gdGV4dC5yZXBsYWNlKG9sZF9lZmZlY3QsIG5ld19lZmZlY3QpCnBhdGgud3JpdGVfdGV4dCh0ZXh0KQo=' | base64 -d | python
+      - name: Adapt to current main without reintroducing polling
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          main = Path('app/src/main/java/com/autombot/client/ui/MainActivity.kt')
+          text = main.read_text()
+          text = text.replace(
+              'private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 15 * 60 * 1000L\nprivate const val SPONSORED_MANIFEST_POLL_INTERVAL_MS = 5 * 60 * 1000L',
+              'private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 * 60 * 1000L'
+          )
+
+          start = text.index('    suspend fun checkForConfigUpdate() {')
+          end = text.index('\n    ModalNavigationDrawer(', start)
+          replacement = '''    suspend fun checkForConfigUpdate() {
+              if (!isManagedMode) return
+              val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
+              val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
+              val versaoConhecida = appPrefs.getString("managed_config_versao", "")
+              val agora = System.currentTimeMillis()
+              val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
+              val decorrido = agora - ultimaChecagem
+              if (ultimaChecagem > 0L && decorrido >= 0L && decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS) return
+
+              appPrefs.edit().putLong("managed_config_last_check_ms", agora).apply()
+              runCatching {
+                  SponsoredDomainSync.refresh(
+                      context = context,
+                      vlessManager = vlessManager,
+                      vmessManager = vmessManager,
+                      trojanManager = trojanManager
+                  )
+              }.onFailure {
+                  com.autombot.client.util.AppLog.log(
+                      "Falha ao sincronizar domínio patrocinado: ${it.message}",
+                      com.autombot.client.util.AppLog.Level.ERROR
+                  )
+              }
+
+              runCatching {
+                  PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
+              }.onSuccess { versaoAtual ->
+                  val existeAtualizacao = versaoAtual.isNotBlank() && versaoAtual != versaoConhecida
+                  updateAvailable = existeAtualizacao
+                  appPrefs.edit().putBoolean("managed_config_update_available", existeAtualizacao).apply()
+              }
+          }
+
+          suspend fun applyConfigUpdate(): Boolean {
+              val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
+              val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
+              applyingUpdate = true
+              return try {
+                  val cliente = PanelWebhookClient(baseUrlGerenciada)
+                  val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
+                  importPanelConfigs(
+                      context = context,
+                      response = respostaConfigs,
+                      wireGuardManager = wireGuardManager,
+                      sshManager = sshManager,
+                      vlessManager = vlessManager,
+                      vmessManager = vmessManager,
+                      shadowsocksManager = shadowsocksManager,
+                      trojanManager = trojanManager,
+                      openVpnManager = openVpnManager
+                  )
+                  val versaoNova = runCatching { cliente.fetchConfigVersion(usuarioGerenciado) }.getOrNull()
+                  val editor = appPrefs.edit()
+                      .putLong("managed_config_last_check_ms", System.currentTimeMillis())
+                      .putBoolean("managed_config_update_available", false)
+                  if (!versaoNova.isNullOrBlank()) editor.putString("managed_config_versao", versaoNova)
+                  editor.apply()
+                  updateAvailable = false
+                  true
+              } catch (e: Exception) {
+                  com.autombot.client.util.AppLog.log(
+                      "Falha ao aplicar atualização de config: ${e.message}",
+                      com.autombot.client.util.AppLog.Level.ERROR
+                  )
+                  false
+              } finally {
+                  applyingUpdate = false
+              }
+          }
+'''
+          text = text[:start] + replacement + text[end:]
+
+          loop = '''            LaunchedEffect(isManagedMode) {
+                  while (isManagedMode) {
+                      checkForConfigUpdate()
+                      delay(SPONSORED_MANIFEST_POLL_INTERVAL_MS)
+                  }
+              }
+'''
+          if loop not in text:
+              # tolerate indentation emitted by the original patch
+              a = text.find('            LaunchedEffect(isManagedMode) {')
+              if a >= 0:
+                  b = text.find('\n            }', a)
+                  if b >= 0:
+                      b += len('\n            }')
+                      text = text[:a] + '            LaunchedEffect(Unit) { checkForConfigUpdate() }' + text[b:]
+          else:
+              text = text.replace(loop, '            LaunchedEffect(Unit) { checkForConfigUpdate() }\n')
+          main.write_text(text)
+
+          validator = Path('app/src/main/java/com/autombot/client/panel/SponsoredRouteValidator.kt')
+          v = validator.read_text()
+          v = v.replace('''
+                  override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                      complete(false)
+                  }
+''', '\n')
+          validator.write_text(v)
+
+          importer = Path('app/src/main/java/com/autombot/client/panel/panelConfigImporter.kt')
+          i = importer.read_text()
+          i = i.replace(
+              'selecaoVmess.connectHost?.let { parsed.copy(server = it) } ?: parsed',
+              'parsed.copy(server = selecaoVmess.connectHost ?: parsed.server)'
+          )
+          i = i.replace(
+              'selecaoVless.connectHost?.let { parsed.copy(server = it) } ?: parsed',
+              'parsed.copy(server = selecaoVless.connectHost ?: parsed.server)'
+          )
+          i = i.replace(
+              'selecaoTrojan.connectHost?.let { parsed.copy(server = it) } ?: parsed',
+              'parsed.copy(server = selecaoTrojan.connectHost ?: parsed.server)'
+          )
+          importer.write_text(i)
+          PY
+          git diff --check
 
       - name: Verify source policy
         run: |
-          git diff --check
-          if grep -R --line-number --fixed-strings 'mobile.autombot.com.br' app/src/main/java app/src/main/res; then exit 1; fi
-          if grep -R --line-number 'SPONSORED_MANIFEST_POLL_INTERVAL_MS' app/src/main/java; then exit 1; fi
+          if grep -R --line-number --fixed-strings 'mobile.autombot.com.br' app/src/main/java app/src/main/res; then
+            echo 'ERRO: domínio sugerido não pode ficar fixo no APK.' >&2
+            exit 1
+          fi
+          if grep -R --line-number 'SPONSORED_MANIFEST_POLL_INTERVAL_MS' app/src/main/java; then
+            echo 'ERRO: polling contínuo patrocinado foi reintroduzido.' >&2
+            exit 1
+          fi
           grep -n 'MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 \* 60 \* 1000L' app/src/main/java/com/autombot/client/ui/MainActivity.kt
           grep -n 'LaunchedEffect(Unit) { checkForConfigUpdate() }' app/src/main/java/com/autombot/client/ui/MainActivity.kt
 
