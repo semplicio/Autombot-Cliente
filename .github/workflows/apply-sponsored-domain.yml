@@ -62,10 +62,11 @@ jobs:
           printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > local.properties
           sed -i '/^android\.aapt2FromMavenOverride=/d' gradle.properties
           chmod +x gradlew
+          rm -rf app/.cxx .cxx app/build
 
-      - name: Compile debug Kotlin from clean state
+      - name: Compile debug Kotlin from fresh app outputs
         shell: bash
-        run: ./gradlew clean :app:compileDebugKotlin --stacktrace
+        run: ./gradlew :app:compileDebugKotlin --stacktrace
 
       - name: Assemble debug APK
         shell: bash
