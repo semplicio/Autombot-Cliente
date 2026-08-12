@@ -1,4 +1,4 @@
-name: Diagnose sponsored domain compilation
+name: Apply sponsored domain client patch
 
 on:
   push:
@@ -6,10 +6,10 @@ on:
       - feature/sponsored-domain
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  apply-test-commit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0
           ref: feature/sponsored-domain
 
-      - name: Reconstruct and apply uploaded patch
+      - name: Reconstruct uploaded patch
         shell: bash
         run: |
           head -c 12000 .automation/client.patch.b64.part0 > /tmp/p0
@@ -27,10 +27,28 @@ jobs:
           cp .automation/client.patch.b64.part4 /tmp/p4
           cat /tmp/p0 /tmp/p1 /tmp/p2 /tmp/p3 /tmp/p4 | base64 -d > /tmp/client.patch
           echo '49b7fed653f8e3e10bc91c7579f5b076e7f8c79c7f415ced121a87ee27b5aee0  /tmp/client.patch' | sha256sum -c -
+
+      - name: Apply patch and current-main adaptations
+        shell: bash
+        run: |
+          git apply --check /tmp/client.patch
           git apply /tmp/client.patch
           python .automation/fix_client.py
-          test -f app/src/main/java/com/autombot/client/panel/SponsoredDomainSync.kt
-          grep -n 'internal object SponsoredDomainSync' app/src/main/java/com/autombot/client/panel/SponsoredDomainSync.kt
+          git diff --check
+
+      - name: Verify Core-managed endpoint policy
+        shell: bash
+        run: |
+          if grep -R --line-number --fixed-strings 'mobile.autombot.com.br' app/src/main/java app/src/main/res; then
+            echo 'ERRO: domínio patrocinado ficou fixo no APK.' >&2
+            exit 1
+          fi
+          if grep -R --line-number 'SPONSORED_MANIFEST_POLL_INTERVAL_MS' app/src/main/java; then
+            echo 'ERRO: polling contínuo patrocinado foi reintroduzido.' >&2
+            exit 1
+          fi
+          grep -n 'MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 \* 60 \* 1000L' app/src/main/java/com/autombot/client/ui/MainActivity.kt
+          grep -n 'LaunchedEffect(Unit) { checkForConfigUpdate() }' app/src/main/java/com/autombot/client/ui/MainActivity.kt
 
       - uses: actions/setup-java@v4
         with:
@@ -38,8 +56,24 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Compile from clean state
+      - name: Compile debug Kotlin from clean state
         shell: bash
         run: |
           chmod +x gradlew
-          ./gradlew clean :app:compileDebugKotlin --stacktrace --info
+          ./gradlew clean :app:compileDebugKotlin --stacktrace
+
+      - name: Assemble debug APK
+        shell: bash
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Commit final source changes
+        shell: bash
+        run: |
+          rm -rf .automation
+          rm -f .github/workflows/apply-sponsored-domain.yml
+          git config user.name 'AutomBot Patch Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Sincronizar domínio patrocinado gerenciável'
+          git push origin HEAD:feature/sponsored-domain
