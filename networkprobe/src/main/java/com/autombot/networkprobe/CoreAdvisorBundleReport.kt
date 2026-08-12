@@ -18,7 +18,7 @@ data class CoreAdvisorBundleReport(
     fun toJson(): String {
         val root = JSONObject(advisor.toJson())
         val nextSteps = buildVpnNextSteps()
-        root.put("version", "0.8.0")
+        root.put("version", "0.9.0")
         root.put("authorized_endpoint_sweep", sweep.toJsonArray())
         root.put("vpn_connection_next_steps", nextSteps)
         root.put("manual", toText())
@@ -66,6 +66,7 @@ data class CoreAdvisorBundleReport(
                 val wsLayer = item.layers.firstOrNull { it.name.startsWith("WebSocket") }
                 appendLine("WebSocket ${item.host}:${item.port}${item.path?.let { " $it" } ?: ""}: TCP chega ao servidor, mas o upgrade não foi confirmado${wsLayer?.detail?.let { " ($it)" } ?: ""}.")
             }
+            appendLine("A v0.9 registra também Server, Location, Via, Connection, Upgrade e X-Cache quando esses headers existem. Use esses campos para distinguir redirect do Caddy de resposta produzida por outro intermediário no caminho.")
             appendLine("Nessa situação, o próximo teste útil é corrigir/confirmar o front door HTTP/WS da própria VPS e repetir o diagnóstico até obter HTTP 101 no path configurado.")
         }
 
