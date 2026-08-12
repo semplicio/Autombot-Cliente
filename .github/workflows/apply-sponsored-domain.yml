@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  inspect-rejects:
+  apply-test-commit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,20 +27,155 @@ jobs:
           cat /tmp/p0 /tmp/p1 /tmp/p2 /tmp/p3 /tmp/p4 | base64 -d > /tmp/client.patch
           echo '49b7fed653f8e3e10bc91c7579f5b076e7f8c79c7f415ced121a87ee27b5aee0  /tmp/client.patch' | sha256sum -c -
 
-      - name: Apply independent hunks and print rejects
+      - name: Apply patch
         run: |
-          set +e
-          git apply --reject --whitespace=nowarn /tmp/client.patch
-          status=$?
-          set -e
-          echo "git apply status=$status"
-          echo "--- reject files ---"
-          find . -name '*.rej' -print
-          for f in $(find . -name '*.rej' -print); do
-            echo "===== $f ====="
-            cat "$f"
-          done
-          echo "--- resulting diff ---"
-          git diff --check || true
-          git diff --stat
-          exit 1
+          git apply --check /tmp/client.patch
+          git apply /tmp/client.patch
+          git diff --check
+
+      - name: Preserve current throttled update behavior
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('app/src/main/java/com/autombot/client/ui/MainActivity.kt')
+          text = path.read_text()
+          text = text.replace(
+              'private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 15 * 60 * 1000L\nprivate const val SPONSORED_MANIFEST_POLL_INTERVAL_MS = 5 * 60 * 1000L',
+              'private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 * 60 * 1000L'
+          )
+          old_check = '''    suspend fun checkForConfigUpdate() {
+        if (!isManagedMode) return
+
+        try {
+            SponsoredDomainSync.refresh(
+                context = context,
+                vlessManager = vlessManager,
+                vmessManager = vmessManager,
+                trojanManager = trojanManager
+            )
+        } catch (e: Exception) {
+            com.autombot.client.util.AppLog.log(
+                "Falha ao sincronizar domínio patrocinado: ${e.message}",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
+        }
+
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
+        val versaoConhecida = appPrefs.getString("managed_config_versao", "")
+        val agora = System.currentTimeMillis()
+        val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
+        val decorrido = agora - ultimaChecagem
+        if (ultimaChecagem > 0L && decorrido >= 0L && decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS) {
+            return
+        }
+
+        appPrefs.edit().putLong("managed_config_last_check_ms", agora).apply()
+        try {
+            val versaoAtual = PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
+            val existeAtualizacao = versaoAtual.isNotBlank() && versaoAtual != versaoConhecida
+            updateAvailable = existeAtualizacao
+            appPrefs.edit().putBoolean("managed_config_update_available", existeAtualizacao).apply()
+            if (existeAtualizacao) applyConfigUpdate()
+        } catch (e: Exception) {
+            com.autombot.client.util.AppLog.log(
+                "Painel indisponível durante a sincronização de config: ${e.message}",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
+        }
+    }
+'''
+          new_check = '''    suspend fun checkForConfigUpdate() {
+        if (!isManagedMode) return
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
+        val versaoConhecida = appPrefs.getString("managed_config_versao", "")
+        val agora = System.currentTimeMillis()
+        val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
+        val decorrido = agora - ultimaChecagem
+        if (ultimaChecagem > 0L && decorrido >= 0L && decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS) {
+            return
+        }
+
+        // Uma única janela de sincronização oportunista por hora. O manifesto
+        // patrocinado usa o endpoint/bootstrap já armazenado, sem polling em background.
+        appPrefs.edit().putLong("managed_config_last_check_ms", agora).apply()
+        try {
+            SponsoredDomainSync.refresh(
+                context = context,
+                vlessManager = vlessManager,
+                vmessManager = vmessManager,
+                trojanManager = trojanManager
+            )
+        } catch (e: Exception) {
+            com.autombot.client.util.AppLog.log(
+                "Falha ao sincronizar domínio patrocinado: ${e.message}",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
+        }
+
+        runCatching {
+            PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
+        }.onSuccess { versaoAtual ->
+            val existeAtualizacao = versaoAtual.isNotBlank() && versaoAtual != versaoConhecida
+            updateAvailable = existeAtualizacao
+            appPrefs.edit().putBoolean("managed_config_update_available", existeAtualizacao).apply()
+        }
+    }
+'''
+          if old_check not in text:
+              raise SystemExit('checkForConfigUpdate esperado não encontrado após aplicar o patch')
+          text = text.replace(old_check, new_check)
+          old_effect = '''            LaunchedEffect(isManagedMode) {
+                while (isManagedMode) {
+                    checkForConfigUpdate()
+                    delay(SPONSORED_MANIFEST_POLL_INTERVAL_MS)
+                }
+            }
+'''
+          new_effect = '''            LaunchedEffect(Unit) { checkForConfigUpdate() }
+'''
+          if old_effect not in text:
+              raise SystemExit('loop de polling esperado não encontrado após aplicar o patch')
+          text = text.replace(old_effect, new_effect)
+          path.write_text(text)
+          PY
+          git diff --check
+
+      - name: Verify domain remains Core-managed
+        run: |
+          if grep -R --line-number --fixed-strings 'mobile.autombot.com.br' app/src/main/java app/src/main/res; then
+            echo 'ERRO: domínio sugerido não pode ficar fixo no APK.' >&2
+            exit 1
+          fi
+          if grep -R --line-number 'SPONSORED_MANIFEST_POLL_INTERVAL_MS' app/src/main/java; then
+            echo 'ERRO: polling contínuo patrocinado foi reintroduzido.' >&2
+            exit 1
+          fi
+          grep -n 'MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 \* 60 \* 1000L' app/src/main/java/com/autombot/client/ui/MainActivity.kt
+          grep -n 'LaunchedEffect(Unit) { checkForConfigUpdate() }' app/src/main/java/com/autombot/client/ui/MainActivity.kt
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Compile managed client
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:compileDebugKotlin --stacktrace
+
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Commit final source changes
+        run: |
+          rm -rf .automation
+          rm -f .github/workflows/apply-sponsored-domain.yml
+          git config user.name 'AutomBot Patch Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Sincronizar domínio patrocinado gerenciável'
+          git push origin HEAD:feature/sponsored-domain
