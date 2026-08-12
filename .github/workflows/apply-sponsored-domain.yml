@@ -17,28 +17,30 @@ jobs:
           fetch-depth: 0
           ref: feature/sponsored-domain
 
-      - name: Locate valid patch chunks inside staged files
+      - name: Reconstruct uploaded patch
         run: |
-          python - <<'PY'
-          import hashlib
-          from pathlib import Path
-          expected = {
-              0: (12000, '2bf43f1ae0ca94462784fdab181b372c502e465c07402b51ace22563280a8f15'),
-              1: (12000, '06a66869d58b8cfb944ecf344bc6758a53d664e467c4931448771913b12f171a'),
-              2: (12000, 'dda62d65f0a105aebe1e49609623119f329fc6722a211e65108fa10b6ce50fa4'),
-              3: (12000, '6e542bc7873e57482772c70ed1c0bd0f2c92cb5cba749d08fe970c9cb5f56950'),
-              4: (7664, '931c5d689fbdb471d392b04c37a0a844aed1a560b28174527e503cbd4592ef4d'),
-          }
-          for i, (size, wanted) in expected.items():
-              data = Path(f'.automation/client.patch.b64.part{i}').read_bytes()
-              direct = hashlib.sha256(data).hexdigest()
-              print(i, 'len', len(data), 'direct', direct, 'OK' if direct == wanted else '')
-              if direct == wanted:
-                  continue
-              hits=[]
-              for off in range(0, len(data)-size+1):
-                  if hashlib.sha256(data[off:off+size]).hexdigest() == wanted:
-                      hits.append(off)
-              print('  hits', hits)
-          PY
-          false
+          head -c 12000 .automation/client.patch.b64.part0 > /tmp/p0
+          cp .automation/client.patch.b64.part1 /tmp/p1
+          head -c 12000 .automation/client.patch.b64.part2 > /tmp/p2
+          head -c 12000 .automation/client.patch.b64.part3 > /tmp/p3
+          cp .automation/client.patch.b64.part4 /tmp/p4
+          cat /tmp/p0 /tmp/p1 /tmp/p2 /tmp/p3 /tmp/p4 | base64 -d > /tmp/client.patch
+          echo '49b7fed653f8e3e10bc91c7579f5b076e7f8c79c7f415ced121a87ee27b5aee0  /tmp/client.patch' | sha256sum -c -
+
+      - name: Apply independent hunks and print rejects
+        run: |
+          set +e
+          git apply --reject --whitespace=nowarn /tmp/client.patch
+          status=$?
+          set -e
+          echo "git apply status=$status"
+          echo "--- reject files ---"
+          find . -name '*.rej' -print
+          for f in $(find . -name '*.rej' -print); do
+            echo "===== $f ====="
+            cat "$f"
+          done
+          echo "--- resulting diff ---"
+          git diff --check || true
+          git diff --stat
+          exit 1
