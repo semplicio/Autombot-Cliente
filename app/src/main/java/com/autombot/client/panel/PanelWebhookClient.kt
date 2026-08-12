@@ -37,9 +37,92 @@ data class ProtocolRoute(
     val transport: String?,
     val tls: Boolean,
     val path: String?,
+    val role: String?,
+    val validUntil: String?,
     val priority: Int,
     val recommended: Boolean
 )
+
+data class SponsoredEndpoint(
+    val domain: String,
+    val tcpPort: Int,
+    val udpPort: Int,
+    val bootstrapIps: List<String>,
+    val validUntil: String? = null
+)
+
+data class SponsoredEndpointManifest(
+    val schemaVersion: Int,
+    val revision: String,
+    val enabled: Boolean,
+    val active: SponsoredEndpoint?,
+    val previous: List<SponsoredEndpoint>,
+    val xrayEnabled: Boolean,
+    val updatedAt: String?
+) {
+    fun allEndpoints(): List<SponsoredEndpoint> = listOfNotNull(active) + previous
+
+    fun endpointForDomain(domain: String?): SponsoredEndpoint? {
+        if (domain.isNullOrBlank()) return null
+        return allEndpoints().firstOrNull { it.domain.equals(domain, ignoreCase = true) }
+    }
+}
+
+internal fun JSONObject.toSponsoredEndpointManifest(): SponsoredEndpointManifest? {
+    fun JSONArray?.strings(): List<String> {
+        if (this == null) return emptyList()
+        return (0 until length()).map { optString(it) }
+    }
+
+    fun JSONObject?.toEndpoint(): SponsoredEndpoint? {
+        if (this == null) return null
+        val domain = optString("domain").ifBlank { optString("dominio") }
+        if (domain.isBlank()) return null
+        return SponsoredEndpoint(
+            domain = domain,
+            tcpPort = optInt("tcp_port", optInt("porta_tcp", 443)).takeIf { it in 1..65535 } ?: 443,
+            udpPort = optInt("udp_port", optInt("porta_udp", 443)).takeIf { it in 1..65535 } ?: 443,
+            bootstrapIps = optJSONArray("bootstrap_ips").strings(),
+            validUntil = optString("valid_until").takeIf { it.isNotBlank() }
+        )
+    }
+
+    val active = optJSONObject("active").toEndpoint()
+    val previousJson = optJSONArray("previous")
+    val previous = if (previousJson == null) emptyList() else {
+        (0 until previousJson.length()).mapNotNull { previousJson.optJSONObject(it).toEndpoint() }
+    }
+    val services = optJSONObject("services")
+    return SponsoredEndpointManifest(
+        schemaVersion = optInt("schema_version", 1),
+        revision = optString("revision"),
+        enabled = optBoolean("enabled", active != null),
+        active = active,
+        previous = previous,
+        xrayEnabled = services?.optBoolean("xray", false) ?: false,
+        updatedAt = optString("updated_at").takeIf { it.isNotBlank() }
+    )
+}
+
+internal fun SponsoredEndpointManifest.toJson(): JSONObject = JSONObject().apply {
+    fun endpointJson(endpoint: SponsoredEndpoint): JSONObject = JSONObject().apply {
+        put("domain", endpoint.domain)
+        put("tcp_port", endpoint.tcpPort)
+        put("udp_port", endpoint.udpPort)
+        put("bootstrap_ips", JSONArray(endpoint.bootstrapIps))
+        endpoint.validUntil?.let { put("valid_until", it) }
+    }
+
+    put("schema_version", this@toJson.schemaVersion)
+    put("revision", this@toJson.revision)
+    put("enabled", this@toJson.enabled)
+    put("active", this@toJson.active?.let(::endpointJson) ?: JSONObject.NULL)
+    put("previous", JSONArray().apply {
+        this@toJson.previous.forEach { put(endpointJson(it)) }
+    })
+    put("services", JSONObject().put("xray", this@toJson.xrayEnabled))
+    this@toJson.updatedAt?.let { put("updated_at", it) }
+}
 
 data class ProtocolPackage(
     val protocol: String,
@@ -53,24 +136,28 @@ data class ProtocolPackage(
     val wireGuardConf: String? = null,
     val configVersion: Int = 1,
     val preferredRoute: String? = null,
-    val routes: List<ProtocolRoute> = emptyList()
+    val routes: List<ProtocolRoute> = emptyList(),
+    val sponsoredEndpoint: SponsoredEndpointManifest? = null
 ) {
     /**
      * Escolhe a URI indicada pelo Core, sem codificar operadora/domínio no APK.
      * Se o painel ainda estiver no contrato antigo, cai na URI legada.
      */
     fun effectiveUri(): String? {
-        val preferred = preferredRoute?.let { wanted -> routes.firstOrNull { it.id == wanted } }
-        val recommendedRoute = routes
-            .filter { it.recommended && !it.uri.isNullOrBlank() }
-            .minByOrNull { it.priority }
-        val firstUsable = routes
-            .filter { !it.uri.isNullOrBlank() }
-            .minByOrNull { it.priority }
-        return preferred?.uri?.takeIf { it.isNotBlank() }
-            ?: recommendedRoute?.uri
-            ?: firstUsable?.uri
-            ?: uri
+        return orderedRoutes().firstOrNull()?.uri ?: uri
+    }
+
+    /**
+     * Ordem real de tentativa enviada pelo Core. A rota explicitamente preferida
+     * vem primeiro; depois entram os fallbacks por prioridade (inclusive o domínio
+     * patrocinado anterior durante a janela de transição).
+     */
+    fun orderedRoutes(): List<ProtocolRoute> {
+        val utilizaveis = routes.filter { !it.uri.isNullOrBlank() }
+        val preferida = preferredRoute?.let { wanted -> utilizaveis.firstOrNull { it.id == wanted } }
+        return (listOfNotNull(preferida) + utilizaveis.sortedWith(
+            compareBy<ProtocolRoute> { it.priority }.thenByDescending { it.recommended }
+        )).distinctBy { it.id to it.uri }
     }
 
     fun selectedRoute(): ProtocolRoute? {
@@ -85,7 +172,8 @@ data class PanelConfigsResponse(
     val status: String,
     val expiraEm: String?,
     val protocols: Map<String, ProtocolPackage>,
-    val warnings: List<String>
+    val warnings: List<String>,
+    val sponsoredEndpoint: SponsoredEndpointManifest? = null
 )
 
 data class TrialAccount(
@@ -183,6 +271,12 @@ class PanelWebhookClient(
         val revisionPayload = JSONObject().apply {
             put("servidor", json.optString("servidor"))
             put("protocolos", json.optJSONObject("protocolos") ?: JSONObject())
+            put(
+                "dominio_patrocinado",
+                json.optJSONObject("dominio_patrocinado")
+                    ?: json.optJSONObject("sponsored_endpoint")
+                    ?: JSONObject()
+            )
         }
         val canonical = canonicalJson(revisionPayload)
         val digest = MessageDigest.getInstance("SHA-256")
@@ -203,6 +297,10 @@ class PanelWebhookClient(
 
         val protocolosJson = json.optJSONObject("protocolos") ?: JSONObject()
         val protocols = mutableMapOf<String, ProtocolPackage>()
+        var sponsoredEndpoint = (
+            json.optJSONObject("dominio_patrocinado")
+                ?: json.optJSONObject("sponsored_endpoint")
+            )?.toSponsoredEndpointManifest()
         protocolosJson.keys().forEach { chave ->
             val item = protocolosJson.optJSONObject(chave) ?: return@forEach
             val pacote = item.optJSONObject("pacote") ?: item
@@ -212,6 +310,12 @@ class PanelWebhookClient(
             val preferredRoute = pacote.optString("preferred_route")
                 .ifBlank { pacote.optString("rota_preferida") }
                 .takeIf { it.isNotBlank() }
+            val sponsored = (
+                pacote.optJSONObject("sponsored_endpoint")
+                    ?: item.optJSONObject("sponsored_endpoint")
+                )?.toSponsoredEndpointManifest()
+            if (sponsoredEndpoint == null && sponsored != null) sponsoredEndpoint = sponsored
+            val packageSponsoredEndpoint = sponsored ?: sponsoredEndpoint
 
             protocols[chave] = ProtocolPackage(
                 protocol = chave,
@@ -222,7 +326,8 @@ class PanelWebhookClient(
                 wireGuardConf = pacote.optString("config").takeIf { it.isNotBlank() },
                 configVersion = pacote.optInt("config_version", pacote.optInt("versao_config", 1)),
                 preferredRoute = preferredRoute,
-                routes = routes
+                routes = routes,
+                sponsoredEndpoint = packageSponsoredEndpoint
             )
         }
 
@@ -232,7 +337,8 @@ class PanelWebhookClient(
             status = json.optString("status"),
             expiraEm = json.optString("expira_em").takeIf { it.isNotBlank() },
             protocols = protocols,
-            warnings = json.optJSONArray("avisos").toStringList()
+            warnings = json.optJSONArray("avisos").toStringList(),
+            sponsoredEndpoint = sponsoredEndpoint
         )
     }
 
@@ -284,6 +390,8 @@ class PanelWebhookClient(
                 transport = route.optString("transport").ifBlank { route.optString("transporte") }.takeIf { it.isNotBlank() },
                 tls = route.optBoolean("tls", false),
                 path = route.optString("path").takeIf { it.isNotBlank() && it != "null" },
+                role = route.optString("role").ifBlank { route.optString("papel") }.takeIf { it.isNotBlank() },
+                validUntil = route.optString("valid_until").takeIf { it.isNotBlank() },
                 priority = route.optInt("priority", route.optInt("prioridade", (index + 1) * 10)),
                 recommended = route.optBoolean("recommended", route.optBoolean("recomendada", false))
             )
