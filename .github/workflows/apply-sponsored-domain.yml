@@ -17,25 +17,8 @@ jobs:
           fetch-depth: 0
           ref: feature/sponsored-domain
 
-      - name: Reconstruct and verify uploaded patch
+      - name: Verify patch chunks
         run: |
-          cat .automation/client.patch.b64.part* | base64 -d > /tmp/client.patch
-          echo '49b7fed653f8e3e10bc91c7579f5b076e7f8c79c7f415ced121a87ee27b5aee0  /tmp/client.patch' | sha256sum -c -
-
-      - name: Apply independent hunks and print rejects
-        run: |
-          set +e
-          git apply --reject --whitespace=nowarn /tmp/client.patch
-          status=$?
-          set -e
-          echo "git apply status=$status"
-          echo "--- reject files ---"
-          find . -name '*.rej' -print
-          for f in $(find . -name '*.rej' -print); do
-            echo "===== $f ====="
-            cat "$f"
-          done
-          echo "--- resulting diff ---"
-          git diff --check || true
-          git diff --stat
-          exit 1
+          wc -c .automation/client.patch.b64.part*
+          sha256sum .automation/client.patch.b64.part*
+          false
