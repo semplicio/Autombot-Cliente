@@ -17,8 +17,28 @@ jobs:
           fetch-depth: 0
           ref: feature/sponsored-domain
 
-      - name: Verify patch chunks
+      - name: Locate valid patch chunks inside staged files
         run: |
-          wc -c .automation/client.patch.b64.part*
-          sha256sum .automation/client.patch.b64.part*
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected = {
+              0: (12000, '2bf43f1ae0ca94462784fdab181b372c502e465c07402b51ace22563280a8f15'),
+              1: (12000, '06a66869d58b8cfb944ecf344bc6758a53d664e467c4931448771913b12f171a'),
+              2: (12000, 'dda62d65f0a105aebe1e49609623119f329fc6722a211e65108fa10b6ce50fa4'),
+              3: (12000, '6e542bc7873e57482772c70ed1c0bd0f2c92cb5cba749d08fe970c9cb5f56950'),
+              4: (7664, '931c5d689fbdb471d392b04c37a0a844aed1a560b28174527e503cbd4592ef4d'),
+          }
+          for i, (size, wanted) in expected.items():
+              data = Path(f'.automation/client.patch.b64.part{i}').read_bytes()
+              direct = hashlib.sha256(data).hexdigest()
+              print(i, 'len', len(data), 'direct', direct, 'OK' if direct == wanted else '')
+              if direct == wanted:
+                  continue
+              hits=[]
+              for off in range(0, len(data)-size+1):
+                  if hashlib.sha256(data[off:off+size]).hexdigest() == wanted:
+                      hits.append(off)
+              print('  hits', hits)
+          PY
           false
