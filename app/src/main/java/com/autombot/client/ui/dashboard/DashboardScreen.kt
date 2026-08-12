@@ -131,25 +131,52 @@ fun DashboardScreen(
         Text("Dashboard", color = C.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Text("Acompanhe seu plano e suas conexões", color = C.TextDim, fontSize = 12.sp)
 
-        if (updateAvailable) {
+        // No modo gerenciado o sincronizador fica sempre visível. Assim o cliente
+        // consegue buscar novamente TODAS as configurações do painel/VPS a qualquer
+        // momento, mesmo quando a checagem automática ainda não sinalizou mudança.
+        // O botão reaproveita o importador global do app: SSH, VMess, VLESS,
+        // Shadowsocks, Trojan, WireGuard, OpenVPN, Hysteria2 e TUIC são atualizados
+        // juntos, sem recriar a conta e sem resetar o aplicativo.
+        if (managedMode) {
             Spacer(Modifier.height(14.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
-                    .background(C.Accent.copy(alpha = 0.14f))
+                    .background(
+                        if (updateAvailable) C.Accent.copy(alpha = 0.16f)
+                        else C.SurfaceRaised
+                    )
                     .padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.SwapVert, contentDescription = null, tint = C.AccentLight, modifier = Modifier.size(20.dp))
+                Icon(
+                    Icons.Default.SwapVert,
+                    contentDescription = null,
+                    tint = if (updateAvailable) C.AccentLight else C.PrimaryLight,
+                    modifier = Modifier.size(20.dp)
+                )
                 Spacer(Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Novas atualizações", color = C.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Text("Sua conexão tem uma config nova pra buscar", color = C.TextDim, fontSize = 10.sp)
+                    Text(
+                        if (updateAvailable) "Novas configurações disponíveis" else "Sincronizar configurações",
+                        color = C.Text,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        if (updateAvailable) {
+                            "Há mudanças no painel. Atualize todos os protocolos de uma vez."
+                        } else {
+                            "Busca novamente portas, hosts, paths e credenciais de todos os protocolos."
+                        },
+                        color = C.TextDim,
+                        fontSize = 10.sp
+                    )
                 }
                 Spacer(Modifier.width(8.dp))
                 AutomBotGradientButton(
-                    text = if (applyingUpdate) "Buscando…" else "Buscar",
+                    text = if (applyingUpdate) "Atualizando…" else "Atualizar tudo",
                     onClick = onApplyUpdate,
                     enabled = !applyingUpdate,
                     accent = C.AccentLight
