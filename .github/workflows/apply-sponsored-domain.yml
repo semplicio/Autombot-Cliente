@@ -84,6 +84,10 @@ jobs:
         shell: bash
         run: |
           git checkout -- local.properties gradle.properties
+          # O build modifica arquivos nativos/cache já rastreados pelo repositório.
+          # Restaura esses artefatos antes do commit para que apenas a feature seja publicada.
+          git restore --worktree --staged -- app/.cxx app/build .cxx 2>/dev/null || true
+          git clean -fdX app/.cxx app/build .cxx 2>/dev/null || true
           rm -rf .automation
           rm -f .github/workflows/apply-sponsored-domain.yml
           git config user.name 'AutomBot Patch Bot'
