@@ -12,7 +12,8 @@ import java.util.concurrent.TimeUnit
 data class AutomCoreBootstrapResult(
     val probeToken: String,
     val expiresAt: String,
-    val profileJson: String
+    val profileJson: String,
+    val sponsoredManifestJson: String? = null
 )
 
 class AutomCoreSyncClient {
@@ -42,17 +43,23 @@ class AutomCoreSyncClient {
             if (probeToken.isBlank()) error("O servidor não retornou um token de diagnóstico.")
             val expiresAt = tokenJson.optString("expira_em")
             val profile = fetchProfileInternal(base, probeToken)
+            val sponsored = fetchSponsoredManifestInternal(base)
 
             AutomCoreBootstrapResult(
                 probeToken = probeToken,
                 expiresAt = expiresAt,
-                profileJson = profile
+                profileJson = profile,
+                sponsoredManifestJson = sponsored
             )
         }
 
     suspend fun refresh(managerUrl: String, probeToken: String): String = withContext(Dispatchers.IO) {
         require(probeToken.isNotBlank()) { "Vínculo de diagnóstico não encontrado neste aparelho." }
         fetchProfileInternal(normalizeBaseUrl(managerUrl), probeToken)
+    }
+
+    suspend fun fetchSponsoredManifest(managerUrl: String): String? = withContext(Dispatchers.IO) {
+        fetchSponsoredManifestInternal(normalizeBaseUrl(managerUrl))
     }
 
     private fun fetchProfileInternal(base: String, probeToken: String): String {
@@ -62,6 +69,14 @@ class AutomCoreSyncClient {
             .get()
             .build()
         return executeJson(request).toString()
+    }
+
+    private fun fetchSponsoredManifestInternal(base: String): String? {
+        val request = Request.Builder()
+            .url("$base/v1/dominio-patrocinado/manifesto")
+            .get()
+            .build()
+        return runCatching { executeJson(request).toString() }.getOrNull()
     }
 
     private fun executeJson(request: Request): JSONObject {
@@ -75,7 +90,7 @@ class AutomCoreSyncClient {
                 error(
                     when {
                         detail.isNotBlank() -> "HTTP ${response.code}: $detail"
-                        response.code == 404 -> "HTTP 404: esta plataforma ainda não expõe a API /v1/probe."
+                        response.code == 404 -> "HTTP 404: esta plataforma ainda não expõe a API solicitada."
                         else -> "HTTP ${response.code}: ${response.message}"
                     }
                 )
