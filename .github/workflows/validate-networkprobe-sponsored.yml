@@ -29,3 +29,10 @@ jobs:
         run: ./gradlew :networkprobe:compileDebugKotlin --stacktrace
       - name: Assemble Network Probe debug APK
         run: ./gradlew :networkprobe:assembleDebug --stacktrace
+      - name: Upload Network Probe debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: networkprobe-debug-apk
+          path: networkprobe/build/outputs/apk/debug/networkprobe-debug.apk
+          if-no-files-found: error
+          retention-days: 14
