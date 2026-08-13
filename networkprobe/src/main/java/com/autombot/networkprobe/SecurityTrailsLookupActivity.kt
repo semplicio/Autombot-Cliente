@@ -45,7 +45,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.IDN
-import java.net.Inet4Address
 import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 
@@ -118,7 +117,7 @@ private class SecurityTrailsClient {
         val total = extractLikelyTotal(stats) ?: extractLikelyTotal(reverse) ?: domains.size
         val providers = providerHints(listOfNotNull(reverse, whois))
 
-        SecurityTrailsLookupReport(
+        return SecurityTrailsLookupReport(
             query = ip,
             kind = "IPv4 / reverse IP",
             resolvedIps = listOf(ip),
@@ -151,7 +150,7 @@ private class SecurityTrailsClient {
         }
         val providers = providerHints(listOf(domainData) + whois)
 
-        SecurityTrailsLookupReport(
+        return SecurityTrailsLookupReport(
             query = domain,
             kind = "Domínio / DNS atual",
             resolvedIps = (localIps + ipv4s).distinct(),
