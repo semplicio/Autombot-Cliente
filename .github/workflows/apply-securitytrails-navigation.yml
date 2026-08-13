@@ -1,0 +1,112 @@
+name: Apply SecurityTrails navigation
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/apply-securitytrails-navigation.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Update Network Probe navigation and version
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('networkprobe/src/main/java/com/autombot/networkprobe/MainActivity.kt')
+          s = p.read_text()
+
+          old = '''                    onOpenManualDomainProbe = {
+                        startActivity(Intent(this, ManualDomainProbeActivity::class.java))
+                    },
+                    onOpenCoreLink = {'''
+          new = '''                    onOpenManualDomainProbe = {
+                        startActivity(Intent(this, ManualDomainProbeActivity::class.java))
+                    },
+                    onOpenSecurityTrailsLookup = {
+                        startActivity(Intent(this, SecurityTrailsLookupActivity::class.java))
+                    },
+                    onOpenCoreLink = {'''
+          if old not in s:
+              raise SystemExit('callback insertion point not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    onOpenProxyAnalyzer: () -> Unit,
+    onOpenManualDomainProbe: () -> Unit,
+    onOpenCoreLink: () -> Unit'''
+          new = '''    onOpenProxyAnalyzer: () -> Unit,
+    onOpenManualDomainProbe: () -> Unit,
+    onOpenSecurityTrailsLookup: () -> Unit,
+    onOpenCoreLink: () -> Unit'''
+          if old not in s:
+              raise SystemExit('signature insertion point not found')
+          s = s.replace(old, new, 1)
+
+          marker = '''            item {
+                Button(
+                    onClick = onOpenProxyAnalyzer,'''
+          block = '''            item {
+                Button(
+                    onClick = onOpenSecurityTrailsLookup,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = SurfaceAlt)
+                ) {
+                    Text("IP / Domain Intelligence (SecurityTrails)", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+'''
+          if marker not in s:
+              raise SystemExit('button insertion point not found')
+          s = s.replace(marker, block + marker, 1)
+
+          old = '''                "• Lista manual de domínios para alcance DNS/TCP/TLS/HTTP no 4G/5G\\n" +
+                "• Proxy Analyzer para HTTP CONNECT e SOCKS5\\n" +'''
+          new = '''                "• Lista manual de domínios para alcance DNS/TCP/TLS/HTTP no 4G/5G\\n" +
+                "• IP / Domain Intelligence via SecurityTrails para DNS, reverse IP, WHOIS e indicadores de CDN/provedor\\n" +
+                "• Proxy Analyzer para HTTP CONNECT e SOCKS5\\n" +'''
+          if old not in s:
+              raise SystemExit('tools text insertion point not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          g = Path('networkprobe/build.gradle.kts')
+          t = g.read_text()
+          t = t.replace('versionCode = 12', 'versionCode = 13')
+          t = t.replace('versionName = "1.2.0"', 'versionName = "1.3.0"')
+          g.write_text(t)
+          PY
+
+      - name: Point Gradle to runner Android SDK
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Compile Network Probe Kotlin
+        run: ./gradlew :networkprobe:compileDebugKotlin --stacktrace
+
+      - name: Assemble Network Probe debug APK
+        run: ./gradlew :networkprobe:assembleDebug --stacktrace
+
+      - name: Commit final source changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-securitytrails-navigation.yml
+          git add networkprobe/src/main/java/com/autombot/networkprobe/MainActivity.kt networkprobe/build.gradle.kts
+          git diff --cached --check
+          git commit -m "Expose SecurityTrails lookup in Network Probe"
+          git push origin main
