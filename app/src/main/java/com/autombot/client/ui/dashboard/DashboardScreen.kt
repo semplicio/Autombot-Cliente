@@ -49,6 +49,8 @@ import com.autombot.client.protocols.modern.ModernProtocolManagerProvider
 import com.autombot.client.protocols.modern.ModernProtocolStatus
 import com.autombot.client.ui.components.AutomBotCard
 import com.autombot.client.ui.components.AutomBotGradientButton
+import com.autombot.client.ui.components.AutomBotStatusDot
+import com.autombot.client.ui.components.protocolVisual
 import com.autombot.client.ui.rememberManagedMode
 import com.autombot.client.ui.theme.AutomBotColors as C
 import kotlinx.coroutines.Dispatchers
@@ -65,6 +67,9 @@ fun DashboardScreen(
     trafficLabel: String,
     onRenew: () -> Unit,
     onOpenConnections: () -> Unit,
+    quickConnection: DashboardQuickConnection? = null,
+    onToggleQuickConnection: () -> Unit = {},
+    onOpenQuickConnection: () -> Unit = {},
     updateAvailable: Boolean = false,
     applyingUpdate: Boolean = false,
     onApplyUpdate: () -> Unit = {}
@@ -77,6 +82,12 @@ fun DashboardScreen(
     val managedBaseUrl = remember(managedMode) {
         if (managedMode) prefs.getString("managed_base_url", "").orEmpty() else ""
     }
+    val managedUser = if (managedMode) prefs.getString("managed_usuario", "").orEmpty() else ""
+    val managedStatus = if (managedMode) prefs.getString("managed_account_status", "").orEmpty() else ""
+    val managedExpiry = if (managedMode) prefs.getString("managed_expira_em", "").orEmpty() else ""
+    val accountInactive = managedMode && managedStatus.isNotBlank() &&
+        managedStatus.lowercase() !in setOf("ativo", "active", "ok")
+
     var promotions by remember(managedBaseUrl) { mutableStateOf<List<PanelPromotion>>(emptyList()) }
 
     LaunchedEffect(managedMode, managedBaseUrl) {
@@ -131,6 +142,28 @@ fun DashboardScreen(
         Text("Dashboard", color = C.Text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Text("Acompanhe seu plano e suas conexões", color = C.TextDim, fontSize = 12.sp)
 
+        if (accountInactive) {
+            Spacer(Modifier.height(14.dp))
+            AutomBotCard(modifier = Modifier.fillMaxWidth(), accent = C.Red) {
+                Text("Conta expirada ou inativa", color = C.Red, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(4.dp))
+                if (managedUser.isNotBlank()) {
+                    Text("Conta: $managedUser", color = C.Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+                if (managedExpiry.isNotBlank()) {
+                    Text("Validade informada pelo servidor: $managedExpiry", color = C.TextDim, fontSize = 10.sp)
+                }
+                Text("O aparelho continua vinculado a esta conta. Renove o acesso para voltar a conectar.", color = C.TextDim, fontSize = 10.sp)
+                Spacer(Modifier.height(10.dp))
+                AutomBotGradientButton(
+                    text = "Renovar agora",
+                    onClick = onRenew,
+                    modifier = Modifier.fillMaxWidth(),
+                    accent = C.Red
+                )
+            }
+        }
+
         // A ação de sincronização fica invisível enquanto o app está alinhado com o
         // painel. Ela só aparece depois que a checagem automática detecta uma revisão
         // de configuração diferente, evitando incentivar chamadas manuais repetidas.
@@ -176,7 +209,7 @@ fun DashboardScreen(
 
         Spacer(Modifier.height(18.dp))
 
-        if (trialCountdown != null) {
+        if (trialCountdown != null && !accountInactive) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -232,6 +265,16 @@ fun DashboardScreen(
             modifier = Modifier.fillMaxWidth()
         )
 
+        quickConnection?.let { quick ->
+            Spacer(Modifier.height(14.dp))
+            QuickConnectionCard(
+                connection = quick,
+                onToggle = onToggleQuickConnection,
+                onOpen = onOpenQuickConnection,
+                enabled = !accountInactive
+            )
+        }
+
         if (managedMode && promotions.isNotEmpty()) {
             Spacer(Modifier.height(24.dp))
             Text("DIVULGAÇÕES", color = C.PrimaryLight, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
@@ -243,6 +286,63 @@ fun DashboardScreen(
         } else {
             Spacer(Modifier.height(18.dp))
         }
+    }
+}
+
+@Composable
+private fun QuickConnectionCard(
+    connection: DashboardQuickConnection,
+    onToggle: () -> Unit,
+    onOpen: () -> Unit,
+    enabled: Boolean
+) {
+    val (icon, protocolColor) = protocolVisual(connection.protocolId)
+    AutomBotCard(
+        modifier = Modifier.fillMaxWidth(),
+        accent = if (connection.connected) C.Green else null,
+        onClick = onOpen
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.foundation.layout.Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(protocolColor.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = null, tint = protocolColor, modifier = Modifier.size(23.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(connection.displayName, color = C.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(connection.connectionName, color = C.Text, fontSize = 12.sp)
+                if (connection.detail.isNotBlank()) {
+                    Text(connection.detail, color = C.TextDim, fontSize = 10.sp)
+                }
+                Spacer(Modifier.height(4.dp))
+                AutomBotStatusDot(
+                    color = when {
+                        connection.connected -> C.Green
+                        connection.statusLabel == "Erro" -> C.Red
+                        connection.busy -> C.Accent
+                        else -> C.TextDim
+                    },
+                    label = connection.statusLabel
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        AutomBotGradientButton(
+            text = when {
+                connection.busy -> connection.statusLabel
+                connection.connected -> "Desconectar"
+                else -> "Conectar"
+            },
+            onClick = onToggle,
+            enabled = enabled && !connection.busy,
+            modifier = Modifier.fillMaxWidth(),
+            accent = if (connection.connected) C.Red else C.AccentLight
+        )
     }
 }
 
