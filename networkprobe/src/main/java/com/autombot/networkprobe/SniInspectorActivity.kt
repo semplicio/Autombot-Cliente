@@ -134,7 +134,8 @@ private class SniInspectorEngine {
             raw.soTimeout = IO_TIMEOUT_MS
             raw.connect(InetSocketAddress(ip, port), CONNECT_TIMEOUT_MS)
 
-            val ssl = (SSLSocketFactory.getDefault().createSocket(raw, host, port, true) as SSLSocket)
+            val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory)
+                .createSocket(raw, host, port, true) as SSLSocket
             ssl.soTimeout = IO_TIMEOUT_MS
             val params = ssl.sslParameters
             params.serverNames = listOf(SNIHostName(host))
