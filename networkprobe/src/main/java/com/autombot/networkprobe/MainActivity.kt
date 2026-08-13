@@ -65,6 +65,9 @@ class MainActivity : ComponentActivity() {
                     onOpenManualDomainProbe = {
                         startActivity(Intent(this, ManualDomainProbeActivity::class.java))
                     },
+                    onOpenSecurityTrailsLookup = {
+                        startActivity(Intent(this, SecurityTrailsLookupActivity::class.java))
+                    },
                     onOpenCoreLink = {
                         startActivity(Intent(this, CoreLinkActivity::class.java))
                     }
@@ -99,6 +102,7 @@ private fun ProbeScreen(
     onShare: (ProbeReport) -> Unit,
     onOpenProxyAnalyzer: () -> Unit,
     onOpenManualDomainProbe: () -> Unit,
+    onOpenSecurityTrailsLookup: () -> Unit,
     onOpenCoreLink: () -> Unit
 ) {
     var host by remember { mutableStateOf(initialPreset?.host ?: "core.infinitenet.net") }
@@ -172,6 +176,17 @@ private fun ProbeScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = SurfaceAlt)
                 ) {
                     Text("Testar lista manual de domínios no 4G/5G", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            item {
+                Button(
+                    onClick = onOpenSecurityTrailsLookup,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = SurfaceAlt)
+                ) {
+                    Text("IP / Domain Intelligence (SecurityTrails)", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                 }
             }
 
@@ -411,6 +426,7 @@ private fun ToolsCard() {
                 "• HTTPS e WebSocket TLS\n" +
                 "• Matriz UDP para Hysteria2, TUIC, WireGuard e portas personalizadas\n" +
                 "• Lista manual de domínios para alcance DNS/TCP/TLS/HTTP no 4G/5G\n" +
+                "• IP / Domain Intelligence via SecurityTrails para DNS, reverse IP, WHOIS e indicadores de CDN/provedor\n" +
                 "• Proxy Analyzer para HTTP CONNECT e SOCKS5\n" +
                 "• Vínculo AutomBot Core com perfil local para testes offline do Manager\n" +
                 "• Pontuação de capacidade e candidatos de transporte",
