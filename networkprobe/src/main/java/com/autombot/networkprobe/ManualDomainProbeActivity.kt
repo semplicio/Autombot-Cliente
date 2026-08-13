@@ -54,17 +54,40 @@ import javax.net.ssl.SSLSocketFactory
 
 private enum class ManualDomainState {
     REACHABLE,
-    TCP_ONLY,
+    TRANSPORT_ONLY,
     DNS_ERROR,
     TIMEOUT,
     TLS_ERROR,
     ERROR
 }
 
+private enum class GeneralInternetState {
+    AVAILABLE,
+    BLOCKED,
+    INCONCLUSIVE,
+    NO_CELLULAR
+}
+
+private enum class ManualDomainClassification {
+    CORE_SPONSORED_WITHOUT_GENERAL_DATA,
+    STRONG_SPONSORED_CANDIDATE,
+    SPONSORED_CANDIDATE,
+    REACHABLE_WITH_GENERAL_INTERNET,
+    INCONCLUSIVE,
+    UNREACHABLE
+}
+
 private data class ManualDomainTarget(
     val domain: String,
     val port: Int,
     val tls: Boolean
+)
+
+private data class ProbeAttempt(
+    val state: ManualDomainState,
+    val connectedIp: String?,
+    val httpStatus: Int?,
+    val detail: String
 )
 
 private data class ManualDomainResult(
@@ -74,17 +97,43 @@ private data class ManualDomainResult(
     val connectedIp: String?,
     val httpStatus: Int?,
     val state: ManualDomainState,
+    val detail: String,
+    val successfulAttempts: Int,
+    val totalAttempts: Int,
+    val classification: ManualDomainClassification
+)
+
+private data class GeneralControlResult(
+    val domain: String,
+    val reachable: Boolean,
     val detail: String
 )
 
 private data class ManualDomainReport(
     val cellularNetworkFound: Boolean,
+    val generalInternetState: GeneralInternetState,
+    val controls: List<GeneralControlResult>,
     val results: List<ManualDomainResult>
 ) {
+    private val controlSuccesses: Int
+        get() = controls.count { it.reachable }
+
     fun toJson(): String = JSONObject()
         .put("tool", "AutomBot Manual Domain Probe")
-        .put("version", "1.1.0")
+        .put("version", "1.2.0")
         .put("cellular_network_found", cellularNetworkFound)
+        .put("general_internet_state", generalInternetState.name.lowercase())
+        .put("control_successes", controlSuccesses)
+        .put("control_total", controls.size)
+        .put("controls", JSONArray().apply {
+            controls.forEach { item ->
+                put(JSONObject()
+                    .put("domain", item.domain)
+                    .put("reachable", item.reachable)
+                    .put("detail", item.detail)
+                )
+            }
+        })
         .put("results", JSONArray().apply {
             results.forEach { item ->
                 put(JSONObject()
@@ -96,34 +145,40 @@ private data class ManualDomainReport(
                     .put("connected_ip", item.connectedIp ?: JSONObject.NULL)
                     .put("http_status", item.httpStatus ?: JSONObject.NULL)
                     .put("state", item.state.name.lowercase())
+                    .put("successful_attempts", item.successfulAttempts)
+                    .put("total_attempts", item.totalAttempts)
+                    .put("classification", item.classification.name.lowercase())
                     .put("detail", item.detail)
                 )
             }
         })
         .put(
             "note",
-            "A lista é informada manualmente. O teste mede somente alcance técnico na rede móvel e comparação com o manifesto salvo do AutomBot Core; não descobre a lista interna da operadora e não prova isenção de cobrança."
+            "A classificação usa somente domínios informados manualmente. Quando os três controles neutros de Internet geral falham e um domínio informado responde repetidamente, o Probe o marca como candidato a acesso patrocinado/permitido sem Internet geral. Isso é evidência de comportamento da rede, não garantia de política de cobrança da operadora."
         )
         .toString(2)
 
     fun toText(): String = buildString {
-        appendLine("AUTOMBOT NETWORK PROBE — LISTA MANUAL DE DOMÍNIOS")
+        appendLine("AUTOMBOT NETWORK PROBE — TESTE SEM DADOS / LISTA MANUAL")
         appendLine("Rede: dados móveis / 4G / 5G")
         appendLine()
         if (!cellularNetworkFound) {
             appendLine("Nenhuma interface celular com capacidade de Internet foi encontrada.")
             return@buildString
         }
+
+        appendLine("CONTROLE DE INTERNET GERAL")
+        appendLine("  Estado: ${generalInternetLabel(generalInternetState)}")
+        appendLine("  Controles: $controlSuccesses/${controls.size} responderam")
+        controls.forEach { control ->
+            appendLine("  ${if (control.reachable) "OK" else "FALHA"} ${control.domain} — ${control.detail}")
+        }
+        appendLine()
+
         results.forEach { item ->
-            val state = when (item.state) {
-                ManualDomainState.REACHABLE -> "ALCANÇÁVEL"
-                ManualDomainState.TCP_ONLY -> "TCP ALCANÇÁVEL"
-                ManualDomainState.DNS_ERROR -> "DNS FALHOU"
-                ManualDomainState.TIMEOUT -> "TIMEOUT"
-                ManualDomainState.TLS_ERROR -> "TLS/SNI FALHOU"
-                ManualDomainState.ERROR -> "ERRO"
-            }
-            appendLine("${item.target.domain}:${item.target.port} — $state")
+            appendLine("${item.target.domain}:${item.target.port} — ${stateLabel(item.state)}")
+            appendLine("  Classificação: ${classificationLabel(item.classification)}")
+            appendLine("  Repetições: ${item.successfulAttempts}/${item.totalAttempts} com resposta de aplicação")
             appendLine("  Core: ${if (item.coreDeclared) "declarado no manifesto patrocinado salvo" else "não declarado no manifesto patrocinado salvo"}")
             if (item.resolvedIps.isNotEmpty()) appendLine("  DNS móvel: ${item.resolvedIps.joinToString()}")
             item.connectedIp?.let { appendLine("  IP conectado: $it") }
@@ -131,7 +186,7 @@ private data class ManualDomainReport(
             appendLine("  ${item.detail}")
             appendLine()
         }
-        appendLine("Observação: resposta de DNS/TCP/TLS/HTTP não comprova que a operadora classifica o domínio como patrocinado nem que o tráfego será isento de cobrança.")
+        appendLine("Interpretação: domínio alcançável enquanto 0/3 controles de Internet geral respondem é um forte indício de acesso permitido/patrocinado naquela condição de rede. O Probe não afirma que a operadora deixará de contabilizar tráfego nem substitui confirmação contratual.")
     }.trimEnd()
 }
 
@@ -142,53 +197,198 @@ private class ManualDomainProbeEngine(context: Context) {
     suspend fun run(targets: List<ManualDomainTarget>, manifest: SponsoredDomainManifest?): ManualDomainReport =
         withContext(Dispatchers.IO) {
             val network = selectCellularNetwork()
-                ?: return@withContext ManualDomainReport(false, emptyList())
+                ?: return@withContext ManualDomainReport(
+                    cellularNetworkFound = false,
+                    generalInternetState = GeneralInternetState.NO_CELLULAR,
+                    controls = emptyList(),
+                    results = emptyList()
+                )
+
+            val controls = CONTROL_DOMAINS.map { domain ->
+                val target = ManualDomainTarget(domain = domain, port = 443, tls = true)
+                val result = testSingleRound(network, target)
+                GeneralControlResult(
+                    domain = domain,
+                    reachable = result.state == ManualDomainState.REACHABLE,
+                    detail = result.detail
+                )
+            }
+            val generalState = when (controls.count { it.reachable }) {
+                0 -> GeneralInternetState.BLOCKED
+                1 -> GeneralInternetState.INCONCLUSIVE
+                else -> GeneralInternetState.AVAILABLE
+            }
+
             val declared = manifest?.endpoints
                 ?.map { it.domain.lowercase() }
                 ?.toSet()
                 .orEmpty()
+
             ManualDomainReport(
                 cellularNetworkFound = true,
-                results = targets.map { target -> test(network, target, target.domain.lowercase() in declared) }
+                generalInternetState = generalState,
+                controls = controls,
+                results = targets.map { target ->
+                    testRepeated(
+                        network = network,
+                        target = target,
+                        coreDeclared = target.domain.lowercase() in declared,
+                        generalState = generalState
+                    )
+                }
             )
         }
 
-    private fun test(network: Network, target: ManualDomainTarget, coreDeclared: Boolean): ManualDomainResult {
-        val addresses = try {
+    private fun testRepeated(
+        network: Network,
+        target: ManualDomainTarget,
+        coreDeclared: Boolean,
+        generalState: GeneralInternetState
+    ): ManualDomainResult {
+        val resolved = try {
             network.getAllByName(target.domain)
                 .distinctBy { it.hostAddress }
                 .take(MAX_ADDRESSES)
         } catch (error: Exception) {
             return ManualDomainResult(
-                target, coreDeclared, emptyList(), null, null,
-                ManualDomainState.DNS_ERROR,
-                error.message ?: "falha ao resolver pela rede móvel"
+                target = target,
+                coreDeclared = coreDeclared,
+                resolvedIps = emptyList(),
+                connectedIp = null,
+                httpStatus = null,
+                state = ManualDomainState.DNS_ERROR,
+                detail = error.message ?: "falha ao resolver pela rede móvel",
+                successfulAttempts = 0,
+                totalAttempts = TARGET_REPETITIONS,
+                classification = ManualDomainClassification.UNREACHABLE
             )
         }
-        if (addresses.isEmpty()) {
+        if (resolved.isEmpty()) {
             return ManualDomainResult(
-                target, coreDeclared, emptyList(), null, null,
-                ManualDomainState.DNS_ERROR,
-                "DNS móvel não retornou endereço"
+                target = target,
+                coreDeclared = coreDeclared,
+                resolvedIps = emptyList(),
+                connectedIp = null,
+                httpStatus = null,
+                state = ManualDomainState.DNS_ERROR,
+                detail = "DNS móvel não retornou endereço",
+                successfulAttempts = 0,
+                totalAttempts = TARGET_REPETITIONS,
+                classification = ManualDomainClassification.UNREACHABLE
             )
         }
 
+        val attempts = (1..TARGET_REPETITIONS).map { testResolvedOnce(network, target, resolved) }
+        val successes = attempts.count { it.state == ManualDomainState.REACHABLE }
+        val best = attempts.firstOrNull { it.state == ManualDomainState.REACHABLE }
+            ?: attempts.firstOrNull { it.state == ManualDomainState.TRANSPORT_ONLY }
+            ?: attempts.last()
+        val finalState = when {
+            successes >= 2 -> ManualDomainState.REACHABLE
+            attempts.any { it.state == ManualDomainState.TRANSPORT_ONLY } -> ManualDomainState.TRANSPORT_ONLY
+            else -> best.state
+        }
+        val classification = classify(
+            coreDeclared = coreDeclared,
+            generalState = generalState,
+            successfulAttempts = successes,
+            state = finalState
+        )
+        val summary = when {
+            successes == TARGET_REPETITIONS -> "$successes/$TARGET_REPETITIONS tentativas responderam completamente"
+            successes > 0 -> "$successes/$TARGET_REPETITIONS tentativas responderam completamente; resultado parcialmente estável"
+            else -> "0/$TARGET_REPETITIONS tentativas responderam completamente"
+        }
+
+        return ManualDomainResult(
+            target = target,
+            coreDeclared = coreDeclared,
+            resolvedIps = resolved.mapNotNull { it.hostAddress },
+            connectedIp = best.connectedIp,
+            httpStatus = best.httpStatus,
+            state = finalState,
+            detail = "$summary. ${best.detail}",
+            successfulAttempts = successes,
+            totalAttempts = TARGET_REPETITIONS,
+            classification = classification
+        )
+    }
+
+    private fun classify(
+        coreDeclared: Boolean,
+        generalState: GeneralInternetState,
+        successfulAttempts: Int,
+        state: ManualDomainState
+    ): ManualDomainClassification {
+        if (state != ManualDomainState.REACHABLE || successfulAttempts == 0) {
+            return ManualDomainClassification.UNREACHABLE
+        }
+        if (successfulAttempts == 1) {
+            return ManualDomainClassification.INCONCLUSIVE
+        }
+        return when (generalState) {
+            GeneralInternetState.BLOCKED -> when {
+                coreDeclared -> ManualDomainClassification.CORE_SPONSORED_WITHOUT_GENERAL_DATA
+                successfulAttempts == TARGET_REPETITIONS -> ManualDomainClassification.STRONG_SPONSORED_CANDIDATE
+                else -> ManualDomainClassification.SPONSORED_CANDIDATE
+            }
+            GeneralInternetState.AVAILABLE -> ManualDomainClassification.REACHABLE_WITH_GENERAL_INTERNET
+            GeneralInternetState.INCONCLUSIVE,
+            GeneralInternetState.NO_CELLULAR -> ManualDomainClassification.INCONCLUSIVE
+        }
+    }
+
+    private fun testSingleRound(network: Network, target: ManualDomainTarget): ProbeAttempt {
+        val addresses = try {
+            network.getAllByName(target.domain)
+                .distinctBy { it.hostAddress }
+                .take(MAX_ADDRESSES)
+        } catch (error: Exception) {
+            return ProbeAttempt(
+                ManualDomainState.DNS_ERROR,
+                null,
+                null,
+                error.message ?: "DNS móvel falhou"
+            )
+        }
+        if (addresses.isEmpty()) {
+            return ProbeAttempt(ManualDomainState.DNS_ERROR, null, null, "DNS móvel não retornou endereço")
+        }
+        return testResolvedOnce(network, target, addresses)
+    }
+
+    private fun testResolvedOnce(
+        network: Network,
+        target: ManualDomainTarget,
+        addresses: List<java.net.InetAddress>
+    ): ProbeAttempt {
         var lastState = ManualDomainState.ERROR
         var lastDetail = "nenhuma tentativa concluída"
-        val resolved = addresses.mapNotNull { it.hostAddress }
+        var lastIp: String? = null
+
         for (address in addresses) {
+            lastIp = address.hostAddress
             try {
                 network.socketFactory.createSocket().use { raw ->
                     raw.soTimeout = IO_TIMEOUT_MS
                     raw.connect(InetSocketAddress(address, target.port), CONNECT_TIMEOUT_MS)
                     if (!target.tls) {
                         val status = requestHttp(raw, target.domain)
-                        return ManualDomainResult(
-                            target, coreDeclared, resolved, address.hostAddress, status,
-                            if (status != null) ManualDomainState.REACHABLE else ManualDomainState.TCP_ONLY,
-                            status?.let { "DNS + TCP + Host HTTP responderam pela rede móvel" }
-                                ?: "conexão TCP estabelecida pela rede móvel"
-                        )
+                        return if (status != null) {
+                            ProbeAttempt(
+                                ManualDomainState.REACHABLE,
+                                address.hostAddress,
+                                status,
+                                "DNS + TCP + Host HTTP responderam pela rede móvel"
+                            )
+                        } else {
+                            ProbeAttempt(
+                                ManualDomainState.TRANSPORT_ONLY,
+                                address.hostAddress,
+                                null,
+                                "TCP conectou, mas não houve resposta HTTP válida"
+                            )
+                        }
                     }
 
                     val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory)
@@ -201,15 +401,21 @@ private class ManualDomainProbeEngine(context: Context) {
                     ssl.startHandshake()
                     ssl.use { socket ->
                         val status = requestHttp(socket, target.domain)
-                        return ManualDomainResult(
-                            target, coreDeclared, resolved, address.hostAddress, status,
-                            ManualDomainState.REACHABLE,
-                            if (status != null) {
+                        return if (status != null) {
+                            ProbeAttempt(
+                                ManualDomainState.REACHABLE,
+                                address.hostAddress,
+                                status,
                                 "DNS + TCP + TLS/SNI + HTTP responderam pela rede móvel"
-                            } else {
-                                "DNS + TCP + TLS/SNI concluíram pela rede móvel"
-                            }
-                        )
+                            )
+                        } else {
+                            ProbeAttempt(
+                                ManualDomainState.TRANSPORT_ONLY,
+                                address.hostAddress,
+                                null,
+                                "TCP + TLS/SNI concluíram, mas não houve resposta HTTP válida"
+                            )
+                        }
                     }
                 }
             } catch (_: SocketTimeoutException) {
@@ -223,12 +429,12 @@ private class ManualDomainProbeEngine(context: Context) {
                 lastDetail = error.message ?: error.javaClass.simpleName
             }
         }
-        return ManualDomainResult(target, coreDeclared, resolved, null, null, lastState, lastDetail)
+        return ProbeAttempt(lastState, lastIp, null, lastDetail)
     }
 
     private fun requestHttp(socket: java.net.Socket, host: String): Int? {
         return runCatching {
-            val request = "HEAD / HTTP/1.1\r\nHost: $host\r\nUser-Agent: AutomBot-NetworkProbe/1.1\r\nConnection: close\r\n\r\n"
+            val request = "HEAD / HTTP/1.1\r\nHost: $host\r\nUser-Agent: AutomBot-NetworkProbe/1.2\r\nConnection: close\r\n\r\n"
             socket.outputStream.write(request.toByteArray(Charsets.US_ASCII))
             socket.outputStream.flush()
             val line = readAsciiLine(BufferedInputStream(socket.inputStream)) ?: return@runCatching null
@@ -270,6 +476,12 @@ private class ManualDomainProbeEngine(context: Context) {
     }
 
     private companion object {
+        val CONTROL_DOMAINS = listOf(
+            "example.com",
+            "www.wikipedia.org",
+            "www.cloudflare.com"
+        )
+        const val TARGET_REPETITIONS = 3
         const val MAX_ADDRESSES = 4
         const val CONNECT_TIMEOUT_MS = 2500
         const val IO_TIMEOUT_MS = 3500
@@ -299,10 +511,10 @@ class ManualDomainProbeActivity : ComponentActivity() {
                     ) {
                         item {
                             ManualCard {
-                                Text("Verificar lista manual de domínios", color = ManualText, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                                Text("Teste sem dados / domínios manuais", color = ManualText, fontSize = 21.sp, fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.height(6.dp))
                                 Text(
-                                    "Informe um domínio por linha, vírgula ou ponto e vírgula. Sem porta, o teste usa HTTPS/443. Você também pode usar domínio:80, http://domínio ou https://domínio:porta.",
+                                    "Informe um domínio por linha, vírgula ou ponto e vírgula. O Probe testa primeiro três controles de Internet geral e depois repete cada domínio 3 vezes pela rede móvel.",
                                     color = ManualDim,
                                     fontSize = 12.sp,
                                     lineHeight = 17.sp
@@ -315,7 +527,7 @@ class ManualDomainProbeActivity : ComponentActivity() {
                                 value = input,
                                 onValueChange = { input = it; error = null },
                                 label = { Text("Domínios para testar") },
-                                placeholder = { Text("exemplo.com\noutro.exemplo.com:443") },
+                                placeholder = { Text("exemplo-seu.com\noutro-seu.com:443") },
                                 minLines = 6,
                                 maxLines = 12,
                                 modifier = Modifier.fillMaxWidth(),
@@ -333,12 +545,16 @@ class ManualDomainProbeActivity : ComponentActivity() {
                         }
 
                         item {
-                            Text(
-                                "O app não procura domínios automaticamente. Ele testa apenas os nomes que você informar e mostra separadamente se cada domínio também está declarado no manifesto patrocinado salvo do seu AutomBot Core.",
-                                color = ManualDim,
-                                fontSize = 11.sp,
-                                lineHeight = 16.sp
-                            )
+                            ManualCard {
+                                Text("Como a classificação funciona", color = ManualText, fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    "Se 0/3 controles de Internet geral responderem e um domínio informado responder em 2/3 ou 3/3 tentativas, ele aparece como CANDIDATO A ACESSO PATROCINADO. Se também estiver no manifesto salvo do Core, aparece como PATROCINADO CONFIGURADO + ACESSÍVEL SEM INTERNET GERAL.",
+                                    color = ManualDim,
+                                    fontSize = 11.sp,
+                                    lineHeight = 16.sp
+                                )
+                            }
                         }
 
                         error?.let { message -> item { Text(message, color = ManualFail, fontSize = 12.sp) } }
@@ -369,9 +585,9 @@ class ManualDomainProbeActivity : ComponentActivity() {
                                 if (running) {
                                     CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp)
                                     Spacer(Modifier.padding(horizontal = 6.dp))
-                                    Text("Testando na rede móvel…")
+                                    Text("Comparando controles e domínios…")
                                 } else {
-                                    Text("Testar lista no 4G/5G", fontWeight = FontWeight.SemiBold)
+                                    Text("Executar teste sem dados no 4G/5G", fontWeight = FontWeight.SemiBold)
                                 }
                             }
                         }
@@ -379,14 +595,15 @@ class ManualDomainProbeActivity : ComponentActivity() {
                         report?.let { current ->
                             if (!current.cellularNetworkFound) {
                                 item {
-                                    ManualCard { Text("Nenhuma rede celular disponível. Desligue o Wi-Fi se necessário e mantenha os dados móveis ativos.", color = ManualFail) }
+                                    ManualCard { Text("Nenhuma rede celular disponível. Mantenha os dados móveis ativos e execute novamente.", color = ManualFail) }
                                 }
                             } else {
+                                item { GeneralInternetCard(current) }
                                 items(current.results) { item -> ManualDomainResultCard(item) }
                                 item {
                                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                         Button(
-                                            onClick = { ReportShare.shareText(this@ManualDomainProbeActivity, "AutomBot — domínios manuais", current.toText()) },
+                                            onClick = { ReportShare.shareText(this@ManualDomainProbeActivity, "AutomBot — teste sem dados", current.toText()) },
                                             modifier = Modifier.weight(1f),
                                             colors = ButtonDefaults.buttonColors(containerColor = ManualSurfaceAlt)
                                         ) { Text("TXT", color = ManualText) }
@@ -402,7 +619,7 @@ class ManualDomainProbeActivity : ComponentActivity() {
 
                         item {
                             Text(
-                                "Alcançável significa que o domínio respondeu tecnicamente pela rede móvel. Isso não comprova patrocínio/zero-rating, franquia gratuita ou política de cobrança da operadora.",
+                                "Use somente domínios que você está autorizado a testar. A classificação indica comportamento observado na rede móvel; não é confirmação de faturamento zero nem descoberta automática da lista interna da operadora.",
                                 color = ManualDim,
                                 fontSize = 11.sp,
                                 lineHeight = 16.sp,
@@ -417,25 +634,49 @@ class ManualDomainProbeActivity : ComponentActivity() {
 }
 
 @Composable
-private fun ManualDomainResultCard(result: ManualDomainResult) {
-    val color = when (result.state) {
-        ManualDomainState.REACHABLE -> ManualPass
-        ManualDomainState.TCP_ONLY -> ManualWarn
-        else -> ManualFail
+private fun GeneralInternetCard(report: ManualDomainReport) {
+    val success = report.controls.count { it.reachable }
+    val color = when (report.generalInternetState) {
+        GeneralInternetState.AVAILABLE -> ManualPass
+        GeneralInternetState.BLOCKED -> ManualWarn
+        GeneralInternetState.INCONCLUSIVE -> ManualWarn
+        GeneralInternetState.NO_CELLULAR -> ManualFail
     }
-    val label = when (result.state) {
-        ManualDomainState.REACHABLE -> "ALCANÇÁVEL"
-        ManualDomainState.TCP_ONLY -> "TCP OK"
-        ManualDomainState.DNS_ERROR -> "DNS FALHOU"
-        ManualDomainState.TIMEOUT -> "TIMEOUT"
-        ManualDomainState.TLS_ERROR -> "TLS FALHOU"
-        ManualDomainState.ERROR -> "ERRO"
+    ManualCard {
+        Text("Controle de Internet geral", color = ManualText, fontWeight = FontWeight.Bold)
+        Text(generalInternetLabel(report.generalInternetState), color = color, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text("$success/${report.controls.size} controles responderam", color = ManualDim, fontSize = 11.sp)
+        Spacer(Modifier.height(5.dp))
+        report.controls.forEach { control ->
+            Text(
+                "${if (control.reachable) "OK" else "FALHA"} · ${control.domain}",
+                color = if (control.reachable) ManualPass else ManualDim,
+                fontSize = 10.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun ManualDomainResultCard(result: ManualDomainResult) {
+    val color = when (result.classification) {
+        ManualDomainClassification.CORE_SPONSORED_WITHOUT_GENERAL_DATA,
+        ManualDomainClassification.STRONG_SPONSORED_CANDIDATE -> ManualPass
+        ManualDomainClassification.SPONSORED_CANDIDATE,
+        ManualDomainClassification.INCONCLUSIVE -> ManualWarn
+        ManualDomainClassification.REACHABLE_WITH_GENERAL_INTERNET -> ManualAccent
+        ManualDomainClassification.UNREACHABLE -> ManualFail
     }
     ManualCard {
         Text("${result.target.domain}:${result.target.port}", color = ManualText, fontWeight = FontWeight.Bold)
-        Text(label, color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Text(classificationLabel(result.classification), color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Text(
-            if (result.coreDeclared) "Também declarado no Core" else "Lista manual; não declarado no Core salvo",
+            "${result.successfulAttempts}/${result.totalAttempts} tentativas com resposta completa · ${stateLabel(result.state)}",
+            color = ManualDim,
+            fontSize = 10.sp
+        )
+        Text(
+            if (result.coreDeclared) "Também declarado no manifesto patrocinado do Core" else "Lista manual; não declarado no Core salvo",
             color = if (result.coreDeclared) ManualAccent else ManualDim,
             fontSize = 11.sp
         )
@@ -445,6 +686,31 @@ private fun ManualDomainResultCard(result: ManualDomainResult) {
         Spacer(Modifier.height(5.dp))
         Text(result.detail, color = ManualDim, fontSize = 11.sp, lineHeight = 16.sp)
     }
+}
+
+private fun generalInternetLabel(state: GeneralInternetState): String = when (state) {
+    GeneralInternetState.AVAILABLE -> "INTERNET GERAL DISPONÍVEL"
+    GeneralInternetState.BLOCKED -> "INTERNET GERAL APARENTEMENT BLOQUEADA"
+    GeneralInternetState.INCONCLUSIVE -> "CONTROLE INCONCLUSIVO"
+    GeneralInternetState.NO_CELLULAR -> "SEM REDE CELULAR"
+}
+
+private fun stateLabel(state: ManualDomainState): String = when (state) {
+    ManualDomainState.REACHABLE -> "ALCANÇÁVEL"
+    ManualDomainState.TRANSPORT_ONLY -> "TRANSPORTE OK / HTTP INCOMPLETO"
+    ManualDomainState.DNS_ERROR -> "DNS FALHOU"
+    ManualDomainState.TIMEOUT -> "TIMEOUT"
+    ManualDomainState.TLS_ERROR -> "TLS/SNI FALHOU"
+    ManualDomainState.ERROR -> "ERRO"
+}
+
+private fun classificationLabel(classification: ManualDomainClassification): String = when (classification) {
+    ManualDomainClassification.CORE_SPONSORED_WITHOUT_GENERAL_DATA -> "PATROCINADO CONFIGURADO + ACESSÍVEL SEM INTERNET GERAL"
+    ManualDomainClassification.STRONG_SPONSORED_CANDIDATE -> "FORTE CANDIDATO A ACESSO PATROCINADO"
+    ManualDomainClassification.SPONSORED_CANDIDATE -> "CANDIDATO A ACESSO PATROCINADO"
+    ManualDomainClassification.REACHABLE_WITH_GENERAL_INTERNET -> "ALCANÇÁVEL COM INTERNET GERAL"
+    ManualDomainClassification.INCONCLUSIVE -> "INCONCLUSIVO"
+    ManualDomainClassification.UNREACHABLE -> "NÃO ALCANÇÁVEL"
 }
 
 private fun parseManualTargets(raw: String): Result<List<ManualDomainTarget>> = runCatching {
