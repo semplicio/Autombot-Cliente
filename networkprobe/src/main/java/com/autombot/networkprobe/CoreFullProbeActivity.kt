@@ -41,6 +41,7 @@ class CoreFullProbeActivity : ComponentActivity() {
         val profile = CoreProfileStore(applicationContext).loadProfile()
         val advisorEngine = CoreAdvisorEngine(applicationContext)
         val sweepEngine = AuthorizedEndpointSweepEngine(applicationContext)
+        val sponsoredEngine = SponsoredDomainReachabilityProbe(applicationContext)
 
         setContent {
             MaterialTheme {
@@ -48,9 +49,10 @@ class CoreFullProbeActivity : ComponentActivity() {
                     profile = profile,
                     advisorEngine = advisorEngine,
                     sweepEngine = sweepEngine,
+                    sponsoredEngine = sponsoredEngine,
                     onShareBundle = { report -> ReportShare.share(this, report.toJson()) },
                     onShareText = { report ->
-                        ReportShare.shareText(this, "AutomBot Core — diagnóstico, varredura e plano", report.toText())
+                        ReportShare.shareText(this, "AutomBot Core — diagnóstico, varredura e domínio patrocinado", report.toText())
                     }
                 )
             }
@@ -63,6 +65,7 @@ private fun CoreFullProbeScreen(
     profile: CoreProfileSnapshot?,
     advisorEngine: CoreAdvisorEngine,
     sweepEngine: AuthorizedEndpointSweepEngine,
+    sponsoredEngine: SponsoredDomainReachabilityProbe,
     onShareBundle: (CoreAdvisorBundleReport) -> Unit,
     onShareText: (CoreAdvisorBundleReport) -> Unit
 ) {
@@ -82,7 +85,7 @@ private fun CoreFullProbeScreen(
                     Text("AutomBot Core Network Advisor", color = FullText, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Testa a configuração importada, repete TCP, verifica IPs resolvidos, avalia portas padrão, faz uma varredura limitada dos endpoints vinculados e gera próximos passos para a VPN.",
+                        "Testa a configuração importada, repete TCP, verifica IPs resolvidos, avalia portas padrão e valida o domínio patrocinado configurado pelo Core diretamente pela rede celular.",
                         color = FullDim,
                         fontSize = 13.sp,
                         lineHeight = 18.sp
@@ -109,9 +112,18 @@ private fun CoreFullProbeScreen(
                         Text("Versão: ${profile.profileVersion}", color = FullDim, fontSize = 11.sp)
                         Text("Configurações recebidas do Core: ${profile.protocols.size}", color = FullDim, fontSize = 11.sp)
                         Text("Combinações brutas no perfil: $planned", color = FullAccent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        profile.sponsoredManifest?.takeIf { it.enabled }?.active?.let { endpoint ->
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "Domínio patrocinado salvo: ${endpoint.domain}:${endpoint.tcpPort}",
+                                color = FullAccent,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "A varredura adicional é restrita aos IPs/domínios existentes neste perfil e a uma lista pequena de portas TCP. Não enumera sub-redes, domínios da operadora ou hosts de terceiros.",
+                            "A varredura adicional é restrita aos IPs/domínios existentes neste perfil e ao domínio patrocinado declarado pelo próprio Core. Não enumera domínios da operadora, sub-redes ou hosts de terceiros.",
                             color = FullDim,
                             fontSize = 11.sp,
                             lineHeight = 16.sp
@@ -129,7 +141,8 @@ private fun CoreFullProbeScreen(
                                 runCatching {
                                     val advisor = advisorEngine.run(profile)
                                     val sweep = sweepEngine.run(profile)
-                                    CoreAdvisorBundleReport(advisor, sweep)
+                                    val sponsored = sponsoredEngine.run(profile.sponsoredManifest)
+                                    CoreAdvisorBundleReport(advisor, sweep, sponsored)
                                 }.onSuccess { report = it }
                                     .onFailure { error = it.message ?: it.javaClass.simpleName }
                                 running = false
@@ -143,9 +156,9 @@ private fun CoreFullProbeScreen(
                         if (running) {
                             CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp)
                             Spacer(Modifier.padding(horizontal = 6.dp))
-                            Text("Testando configuração e endpoints…")
+                            Text("Testando configuração e rede móvel…")
                         } else {
-                            Text("Executar diagnóstico + varredura autorizada", fontWeight = FontWeight.SemiBold)
+                            Text("Executar diagnóstico + domínio patrocinado", fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -176,6 +189,39 @@ private fun CoreFullProbeScreen(
                             SummaryValue("FALHA", current.failed, FullFail)
                             SummaryValue("TOTAL", current.cases.size, FullText)
                         }
+                    }
+                }
+
+                current.sponsored?.let { sponsored ->
+                    item {
+                        FullCard {
+                            Text("Domínio patrocinado — rede celular", color = FullAccent, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                if (sponsored.cellularNetworkFound) {
+                                    "O teste foi preso a uma interface celular do Android. A confirmação abaixo significa alcance técnico do endpoint configurado no Core, não confirmação de cobrança zero pela operadora."
+                                } else {
+                                    "Nenhuma interface celular com Internet foi encontrada. Ative os dados móveis e execute novamente."
+                                },
+                                color = FullDim,
+                                fontSize = 11.sp,
+                                lineHeight = 16.sp
+                            )
+                        }
+                    }
+                    if (sponsored.items.isEmpty()) {
+                        item {
+                            FullCard {
+                                Text(
+                                    "Nenhum manifesto de domínio patrocinado está salvo. Sincronize novamente com o AutomBot Core antes de trocar para 4G/5G.",
+                                    color = FullWarn,
+                                    fontSize = 12.sp,
+                                    lineHeight = 17.sp
+                                )
+                            }
+                        }
+                    } else {
+                        items(sponsored.items) { item -> SponsoredDomainCard(item) }
                     }
                 }
 
@@ -278,7 +324,7 @@ private fun CoreFullProbeScreen(
 
             item {
                 Text(
-                    "UDP continua classificado como PARCIAL quando não há resposta ao payload genérico. Alterações de Hysteria2, TUIC, WireGuard e OpenVPN devem ser confirmadas por handshake real antes de serem promovidas.",
+                    "O teste patrocinado não procura outros domínios, listas privadas da operadora ou zero-rating. Ele valida apenas o FQDN ativo/anterior publicado pelo seu AutomBot Core e informa se esse endpoint responde pela rede celular.",
                     color = FullDim,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
@@ -286,6 +332,50 @@ private fun CoreFullProbeScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SponsoredDomainCard(result: SponsoredDomainProbeItem) {
+    val color = when (result.state) {
+        SponsoredDomainProbeState.CONFIRMED -> FullPass
+        SponsoredDomainProbeState.REACHABLE, SponsoredDomainProbeState.MANIFEST_MISMATCH -> FullWarn
+        SponsoredDomainProbeState.TIMEOUT, SponsoredDomainProbeState.TLS_ERROR, SponsoredDomainProbeState.ERROR -> FullFail
+    }
+    val label = when (result.state) {
+        SponsoredDomainProbeState.CONFIRMED -> "ENDPOINT OK"
+        SponsoredDomainProbeState.REACHABLE -> "ALCANÇÁVEL"
+        SponsoredDomainProbeState.MANIFEST_MISMATCH -> "DIVERGENTE"
+        SponsoredDomainProbeState.TIMEOUT -> "TIMEOUT"
+        SponsoredDomainProbeState.TLS_ERROR -> "TLS FALHOU"
+        SponsoredDomainProbeState.ERROR -> "ERRO"
+    }
+
+    FullCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "${if (result.endpoint.active) "ATIVO" else "ANTERIOR"} · ${result.endpoint.domain}:${result.endpoint.tcpPort}",
+                    color = FullText,
+                    fontWeight = FontWeight.Bold
+                )
+                if (result.resolvedIps.isNotEmpty()) {
+                    Text("DNS 4G/5G: ${result.resolvedIps.joinToString()}", color = FullDim, fontSize = 10.sp)
+                }
+                if (result.endpoint.bootstrapIps.isNotEmpty()) {
+                    Text("Bootstrap: ${result.endpoint.bootstrapIps.joinToString()}", color = FullDim, fontSize = 10.sp)
+                }
+                result.connectedIp?.let { Text("Conectado em: $it", color = FullAccent, fontSize = 10.sp) }
+            }
+            Text(label, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(7.dp))
+        Text(result.detail, color = color, fontSize = 11.sp, lineHeight = 16.sp)
+        result.remoteRevision?.let { Text("Manifesto remoto: $it", color = FullDim, fontSize = 10.sp) }
     }
 }
 
