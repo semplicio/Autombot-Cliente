@@ -97,11 +97,16 @@ private fun CoreLinkScreen(
             runCatching {
                 val normalized = AutomCoreSyncClient.normalizeBaseUrl(managerUrl)
                 val json = syncClient.refresh(normalized, scoped)
-                profileStore.saveProfile(normalized, json)
+                val sponsored = syncClient.fetchSponsoredManifest(normalized)
+                profileStore.saveProfile(normalized, json, sponsored)
             }.onSuccess { profile ->
                 savedProfile = profile
                 success = true
-                message = "Perfil atualizado e salvo no aparelho. Agora você pode trocar para 4G/5G e testar sem consultar o Manager."
+                message = if (profile.sponsoredManifest?.enabled == true) {
+                    "Perfil e manifesto patrocinado atualizados. Agora troque para 4G/5G e execute o teste completo."
+                } else {
+                    "Perfil atualizado e salvo no aparelho. Agora você pode trocar para 4G/5G e testar sem consultar o Manager."
+                }
             }.onFailure { error ->
                 success = false
                 message = error.message ?: error.javaClass.simpleName
@@ -180,13 +185,17 @@ private fun CoreLinkScreen(
                                     val normalized = AutomCoreSyncClient.normalizeBaseUrl(managerUrl)
                                     val result = syncClient.bootstrap(normalized, adminToken)
                                     tokenStore.save(result.probeToken)
-                                    profileStore.saveProfile(normalized, result.profileJson)
+                                    profileStore.saveProfile(normalized, result.profileJson, result.sponsoredManifestJson)
                                 }.onSuccess { profile ->
                                     managerUrl = profile.managerUrl
                                     savedProfile = profile
                                     adminToken = ""
                                     success = true
-                                    message = "Vínculo concluído. ${profile.protocols.size} configurações de protocolo foram salvas localmente."
+                                    message = if (profile.sponsoredManifest?.enabled == true) {
+                                        "Vínculo concluído. ${profile.protocols.size} configurações e o domínio patrocinado foram salvos localmente."
+                                    } else {
+                                        "Vínculo concluído. ${profile.protocols.size} configurações de protocolo foram salvas localmente."
+                                    }
                                 }.onFailure { error ->
                                     success = false
                                     message = error.message ?: error.javaClass.simpleName
@@ -222,6 +231,26 @@ private fun CoreLinkScreen(
                             color = LinkDim,
                             fontSize = 11.sp
                         )
+                        profile.sponsoredManifest?.takeIf { it.enabled }?.let { sponsored ->
+                            Spacer(Modifier.height(8.dp))
+                            Text("Domínio patrocinado do Core", color = LinkAccent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            sponsored.active?.let { endpoint ->
+                                Text(
+                                    "• ativo: ${endpoint.domain}:${endpoint.tcpPort} · bootstrap ${endpoint.bootstrapIps.joinToString().ifBlank { "não informado" }}",
+                                    color = LinkDim,
+                                    fontSize = 10.sp,
+                                    lineHeight = 15.sp
+                                )
+                            }
+                            sponsored.previous.forEach { endpoint ->
+                                Text(
+                                    "• anterior: ${endpoint.domain}:${endpoint.tcpPort}",
+                                    color = LinkDim,
+                                    fontSize = 10.sp
+                                )
+                            }
+                            Text("Manifesto: ${sponsored.revision}", color = LinkDim, fontSize = 10.sp)
+                        }
                         Spacer(Modifier.height(9.dp))
                         profile.protocols.forEach { protocol ->
                             Text(
@@ -299,7 +328,7 @@ private fun CoreLinkScreen(
 
             item {
                 Text(
-                    "O perfil salvo contém somente endpoints, portas, transportes, paths e dados de diagnóstico. Não contém token administrativo nem credenciais de clientes.",
+                    "O perfil salvo contém somente endpoints, portas, transportes, paths e dados de diagnóstico. O manifesto patrocinado contém apenas domínio, portas e IPs de bootstrap públicos. Não contém token administrativo nem credenciais de clientes.",
                     color = LinkDim,
                     fontSize = 11.sp,
                     lineHeight = 16.sp,
