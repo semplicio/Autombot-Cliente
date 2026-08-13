@@ -45,7 +45,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.net.IDN
-import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.net.URI
@@ -454,7 +453,8 @@ private fun parseManualTargets(raw: String): Result<List<ManualDomainTarget>> = 
     require(tokens.size <= 20) { "Use no máximo 20 domínios por execução." }
 
     tokens.map { original ->
-        require(!original.contains('*') && !original.contains('/').takeIf { !original.contains("://") }!!) { "Wildcards e CIDR não são aceitos: $original" }
+        val authority = original.substringAfter("://", original)
+        require(!authority.contains('*') && !authority.contains('/')) { "Wildcards, paths e CIDR não são aceitos: $original" }
         val hasScheme = original.contains("://")
         val uri = URI(if (hasScheme) original else "probe://$original")
         val rawHost = uri.host?.trim().orEmpty()
@@ -462,7 +462,12 @@ private fun parseManualTargets(raw: String): Result<List<ManualDomainTarget>> = 
         val host = IDN.toASCII(rawHost).lowercase()
         require(!host.all { it.isDigit() || it == '.' } && !host.contains(':')) { "Informe nomes de domínio, não IPs: $original" }
         require(host.contains('.')) { "Domínio incompleto: $original" }
-        require(host.matches(Regex("^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$"))) { "Domínio inválido: $original" }
+        require(host.length <= 253 && host.split('.').all { label ->
+            label.length in 1..63 &&
+                label.first().isLetterOrDigit() &&
+                label.last().isLetterOrDigit() &&
+                label.all { it.isLetterOrDigit() || it == '-' }
+        }) { "Domínio inválido: $original" }
 
         val scheme = uri.scheme?.lowercase().orEmpty()
         val explicitPort = uri.port.takeIf { it in 1..65535 }
