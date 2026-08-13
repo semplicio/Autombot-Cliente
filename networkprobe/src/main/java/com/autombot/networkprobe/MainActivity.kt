@@ -62,6 +62,9 @@ class MainActivity : ComponentActivity() {
                     onOpenProxyAnalyzer = {
                         startActivity(Intent(this, ProxyAnalyzerActivity::class.java))
                     },
+                    onOpenManualDomainProbe = {
+                        startActivity(Intent(this, ManualDomainProbeActivity::class.java))
+                    },
                     onOpenCoreLink = {
                         startActivity(Intent(this, CoreLinkActivity::class.java))
                     }
@@ -95,6 +98,7 @@ private fun ProbeScreen(
     initialPreset: CoreProbePreset?,
     onShare: (ProbeReport) -> Unit,
     onOpenProxyAnalyzer: () -> Unit,
+    onOpenManualDomainProbe: () -> Unit,
     onOpenCoreLink: () -> Unit
 ) {
     var host by remember { mutableStateOf(initialPreset?.host ?: "core.infinitenet.net") }
@@ -157,6 +161,17 @@ private fun ProbeScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = Accent.copy(alpha = 0.85f))
                 ) {
                     Text("Vincular / Perfil AutomBot Core", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            item {
+                Button(
+                    onClick = onOpenManualDomainProbe,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = SurfaceAlt)
+                ) {
+                    Text("Testar lista manual de domínios no 4G/5G", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                 }
             }
 
@@ -395,6 +410,7 @@ private fun ToolsCard() {
                 "• TLS/SNI, validade do certificado e ALPN\n" +
                 "• HTTPS e WebSocket TLS\n" +
                 "• Matriz UDP para Hysteria2, TUIC, WireGuard e portas personalizadas\n" +
+                "• Lista manual de domínios para alcance DNS/TCP/TLS/HTTP no 4G/5G\n" +
                 "• Proxy Analyzer para HTTP CONNECT e SOCKS5\n" +
                 "• Vínculo AutomBot Core com perfil local para testes offline do Manager\n" +
                 "• Pontuação de capacidade e candidatos de transporte",
