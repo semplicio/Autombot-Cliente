@@ -140,13 +140,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // CORRECAO: usuario pediu uma ferramenta tipo "Logcat" dentro do proprio app,
-    // que registre automaticamente o comportamento do app inteiro (abertura,
-    // fechamento, indo e voltando de segundo plano, navegacao entre telas) — nao so
-    // eventos de conexao como ja tinhamos. Esses 5 metodos cobrem o ciclo de vida
-    // completo da Activity; junto com o LaunchedEffect(screen) dentro do AppRoot
-    // (loga toda troca de tela), da pra reconstruir exatamente o que o usuario fez
-    // e quando, olhando so o Logcat depois.
     override fun onStart() {
         super.onStart()
         com.autombot.client.util.AppLog.log("App em primeiro plano (onStart)", com.autombot.client.util.AppLog.Level.INFO)
@@ -182,20 +175,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * CORRECAO: usuario relatou que a conexao funciona normalmente enquanto o app
-     * esta em primeiro plano (tela ligada, olhando pra ele), mas trava assim que
-     * ele sai (troca pra outro app/navegador). Nao achamos nada no nosso proprio
-     * codigo (nenhum onPause/onStop desconectando nada), e a declaracao do servico
-     * em primeiro plano no manifesto ja esta correta — sobra a explicacao mais
-     * provavel: o gerenciador de bateria PROPRIO do fabricante (comum em
-     * Motorola e varios outros) matando o processo em segundo plano, MESMO com o
-     * servico em primeiro plano declarado certinho. Isso pede pro usuario isentar
-     * o app da camada PADRAO do Android (Doze) — normalmente resolve isso na
-     * maioria dos apps, mas alguns fabricantes (Motorola incluso) tem uma tela
-     * PROPRIA e SEPARADA de gerenciamento de bateria que pode precisar de ajuste
-     * manual adicional, que esse codigo nao alcança sozinho.
-     */
     private fun requestBatteryOptimizationExemption() {
         val powerManager = getSystemService(android.os.PowerManager::class.java)
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
@@ -314,9 +293,6 @@ private fun AppRoot(
 
     var screen by remember { mutableStateOf<Screen>(Screen.Splash) }
 
-    // CORRECAO: parte do pedido do "Logcat" — registra toda troca de tela
-    // automaticamente, sem precisar instrumentar cada onClick manualmente. Roda de
-    // novo toda vez que "screen" muda de valor (troca de tela de verdade).
     LaunchedEffect(screen) {
         com.autombot.client.util.AppLog.log(
             "Navegação: tela agora é ${screen::class.simpleName}",
@@ -366,9 +342,8 @@ private fun AppRoot(
         val activeTrojan = trojanConnectionsForRouting.firstOrNull { it.status == TrojanStatus.CONNECTED && it.localSocksPort != null }
 
         val activePort = activeSsh?.localSocksPort ?: activeVless?.localSocksPort ?: activeVmess?.localSocksPort ?: activeSs?.localSocksPort ?: activeTrojan?.localSocksPort
-        
+
         if (activePort != null) {
-            // Se for SSH, tenta pegar o DNS do perfil. Outros protocolos usam o padrao por enquanto.
             val dns1 = activeSsh?.config?.dnsPrimary ?: "8.8.8.8"
             val dns2 = activeSsh?.config?.dnsSecondary ?: "8.8.4.4"
             onStartSystemVpn(activePort, dns1, dns2)
@@ -393,11 +368,6 @@ private fun AppRoot(
                         }
                     },
                     ProgressStep("Autenticando domínio") {
-                        // CORRECAO: não existe (ainda) um endpoint dedicado só pra checar a
-                        // API key — usamos validade.php com um usuário que não deve existir
-                        // de verdade; um 401 aqui significa key errada/ausente, qualquer
-                        // outra resposta (404 "não encontrado" incluso) já confirma que a
-                        // key foi aceita e o painel está respondendo de verdade.
                         val ok = panelClient.checkApiKeyAccepted()
                         if (!ok) {
                             throw PanelException("Esse painel não reconheceu a chave de API do app. Confira a configuração em api_keys.")
@@ -412,44 +382,95 @@ private fun AppRoot(
             val panelClient = remember(current.domain) { PanelWebhookClient(current.domain) }
             val deviceProvisioning = remember { DeviceProvisioning(context) }
             var trialAccount by remember { mutableStateOf<TrialAccount?>(null) }
+            var existingConfigs by remember { mutableStateOf<com.autombot.client.panel.PanelConfigsResponse?>(null) }
+            var restoredExistingAccount by remember { mutableStateOf(false) }
+
             ProgressStepsScreen(
-                title = "Criando sua conta",
-                subtitle = "Seu acesso de teste está sendo configurado automaticamente.",
+                title = if (restoredExistingAccount) "Restaurando sua conta" else "Preparando sua conta",
+                subtitle = "Este aparelho é identificado antes de qualquer novo teste ser criado.",
                 steps = listOf(
-                    ProgressStep("Criando conta") {
+                    ProgressStep("Localizando conta do aparelho") {
                         val deviceId = deviceProvisioning.getOrCreateDeviceId()
-                        val usuario = deviceProvisioning.generateAccountUsername()
-                        val senha = deviceProvisioning.generateRandomPassword()
-                        trialAccount = panelClient.createTrial(deviceId, usuario, senha)
-                    },
-                    ProgressStep("Configurando serviços") {
-                        val conta = trialAccount ?: throw PanelException("Conta não foi criada corretamente")
-                        val respostaConfigs = panelClient.fetchConfigs(conta.usuario)
-                        val avisos = importPanelConfigs(
-                            context = context,
-                            response = respostaConfigs,
-                            wireGuardManager = wireGuardManager,
-                            sshManager = sshManager,
-                            vlessManager = vlessManager,
-                            vmessManager = vmessManager,
-                            shadowsocksManager = shadowsocksManager,
-                            trojanManager = trojanManager,
-                            openVpnManager = openVpnManager
-                        )
-                        avisos.forEach {
-                            com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
+                        val usuario = deviceProvisioning.generateAccountUsername(deviceId)
+
+                        val existing = runCatching { panelClient.fetchConfigs(usuario) }.getOrNull()
+                        if (existing != null && existing.usuario.isNotBlank()) {
+                            existingConfigs = existing
+                            restoredExistingAccount = true
+                            trialAccount = TrialAccount(
+                                usuario = existing.usuario,
+                                senha = "",
+                                expiraEm = existing.expiraEm.orEmpty(),
+                                limiteConexoes = 1,
+                                servidor = existing.servidor,
+                                protocolosConfigurados = existing.protocols.keys.toList(),
+                                warnings = existing.warnings
+                            )
+                            com.autombot.client.util.AppLog.log(
+                                "Aparelho já cadastrado: restaurando conta ${existing.usuario} sem criar novo trial",
+                                com.autombot.client.util.AppLog.Level.INFO
+                            )
+                        } else {
+                            val senha = deviceProvisioning.generateRandomPassword()
+                            trialAccount = panelClient.createTrial(deviceId, usuario, senha)
+                            restoredExistingAccount = false
                         }
-                        val versaoInicial = runCatching { panelClient.fetchConfigVersion(conta.usuario) }.getOrDefault("")
+                    },
+                    ProgressStep("Sincronizando dados da conta") {
+                        val conta = trialAccount ?: throw PanelException("Conta não foi localizada/criada corretamente")
+                        val respostaConfigs = existingConfigs ?: panelClient.fetchConfigs(conta.usuario)
+                        val statusNormalizado = respostaConfigs.status.trim().lowercase()
+                        val contaAtiva = statusNormalizado.isBlank() || statusNormalizado in setOf("ativo", "active", "ok")
+
+                        if (contaAtiva) {
+                            val avisos = importPanelConfigs(
+                                context = context,
+                                response = respostaConfigs,
+                                wireGuardManager = wireGuardManager,
+                                sshManager = sshManager,
+                                vlessManager = vlessManager,
+                                vmessManager = vmessManager,
+                                shadowsocksManager = shadowsocksManager,
+                                trojanManager = trojanManager,
+                                openVpnManager = openVpnManager
+                            )
+                            avisos.forEach {
+                                com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
+                            }
+                        } else {
+                            com.autombot.client.util.AppLog.log(
+                                "Conta ${conta.usuario} restaurada com status ${respostaConfigs.status}; conexões não serão liberadas até renovação",
+                                com.autombot.client.util.AppLog.Level.INFO
+                            )
+                        }
+
+                        val versaoInicial = if (contaAtiva) {
+                            runCatching { panelClient.fetchConfigVersion(conta.usuario) }.getOrDefault("")
+                        } else ""
+                        val deviceId = deviceProvisioning.getOrCreateDeviceId()
                         appPrefs.edit()
                             .putString("managed_usuario", conta.usuario)
                             .putString("managed_base_url", current.domain)
                             .putString("managed_config_versao", versaoInicial)
                             .putLong("managed_config_last_check_ms", System.currentTimeMillis())
                             .putBoolean("managed_config_update_available", false)
+                            .putString("managed_device_id", deviceId)
+                            .putString("managed_account_status", respostaConfigs.status)
+                            .putString("managed_expira_em", respostaConfigs.expiraEm.orEmpty())
+                            .putBoolean("managed_account_restored", restoredExistingAccount)
                             .apply()
                     }
                 ),
-                onComplete = { trialSecondsRemaining = TRIAL_DURATION_SECONDS; markOnboarded(managed = true); screen = Screen.AccountCreated },
+                onComplete = {
+                    markOnboarded(managed = true)
+                    if (restoredExistingAccount) {
+                        trialSecondsRemaining = null
+                        screen = Screen.Shell
+                    } else {
+                        trialSecondsRemaining = TRIAL_DURATION_SECONDS
+                        screen = Screen.AccountCreated
+                    }
+                },
                 onCancel = { screen = Screen.DomainInput }
             )
         }
@@ -576,6 +597,9 @@ private fun AppRoot(
             trialSecondsRemaining = trialSecondsRemaining,
             isManagedMode = isManagedMode,
             onReset = ::resetToChoice,
+            onRequestVpnPermission = onRequestVpnPermission,
+            onStopSystemVpn = onStopSystemVpn,
+            onStartOpenVpn = onStartOpenVpn,
             onOpenSettings = { screen = Screen.Settings },
             onOpenStatistics = { screen = Screen.Statistics },
             onOpenDevices = { screen = Screen.Devices },
@@ -601,6 +625,9 @@ private fun MainShell(
     trialSecondsRemaining: Long?,
     isManagedMode: Boolean,
     onReset: () -> Unit,
+    onRequestVpnPermission: (onGranted: () -> Unit) -> Unit,
+    onStopSystemVpn: () -> Unit,
+    onStartOpenVpn: (connectionName: String, config: com.autombot.client.protocols.openvpn.OpenVpnConnectionConfig) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenStatistics: () -> Unit,
     onOpenDevices: () -> Unit,
@@ -614,15 +641,14 @@ private fun MainShell(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val appPrefs = remember { context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE) }
+    val modernManager = remember(context) { com.autombot.client.protocols.modern.ModernProtocolManagerProvider.get(context) }
 
-    // A disponibilidade de atualização fica persistida como fallback visual. Em
-    // modo gerenciado o app aplica revisões válidas automaticamente e consulta o
-    // manifesto público também pelo próprio domínio patrocinado. Isso permite
-    // receber uma rotação mesmo quando o domínio técnico do painel está bloqueado.
     var updateAvailable by remember {
         mutableStateOf(appPrefs.getBoolean("managed_config_update_available", false))
     }
     var applyingUpdate by remember { mutableStateOf(false) }
+    var lastProtocolId by remember { mutableStateOf(appPrefs.getString("dashboard_last_protocol", "").orEmpty()) }
+    var lastConnectionName by remember { mutableStateOf(appPrefs.getString("dashboard_last_connection", "").orEmpty()) }
 
     suspend fun applyConfigUpdate(): Boolean {
         val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
@@ -631,6 +657,19 @@ private fun MainShell(
         try {
             val cliente = PanelWebhookClient(baseUrlGerenciada)
             val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
+            appPrefs.edit()
+                .putString("managed_account_status", respostaConfigs.status)
+                .putString("managed_expira_em", respostaConfigs.expiraEm.orEmpty())
+                .apply()
+
+            val statusNormalizado = respostaConfigs.status.trim().lowercase()
+            val contaAtiva = statusNormalizado.isBlank() || statusNormalizado in setOf("ativo", "active", "ok")
+            if (!contaAtiva) {
+                updateAvailable = false
+                appPrefs.edit().putBoolean("managed_config_update_available", false).apply()
+                return false
+            }
+
             importPanelConfigs(
                 context = context,
                 response = respostaConfigs,
@@ -668,8 +707,6 @@ private fun MainShell(
         val decorrido = agora - ultimaChecagem
         if (ultimaChecagem > 0L && decorrido >= 0L && decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS) return
 
-        // Uma única janela oportunista por hora. O manifesto patrocinado usa o
-        // endpoint/bootstrap já armazenado, sem polling contínuo em background.
         appPrefs.edit().putLong("managed_config_last_check_ms", agora).apply()
         runCatching {
             SponsoredDomainSync.refresh(
@@ -686,7 +723,13 @@ private fun MainShell(
         }
 
         runCatching {
-            PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
+            val cliente = PanelWebhookClient(baseUrlGerenciada)
+            val configs = cliente.fetchConfigs(usuarioGerenciado)
+            appPrefs.edit()
+                .putString("managed_account_status", configs.status)
+                .putString("managed_expira_em", configs.expiraEm.orEmpty())
+                .apply()
+            cliente.fetchConfigVersion(usuarioGerenciado)
         }.onSuccess { versaoAtual ->
             val existeAtualizacao = versaoAtual.isNotBlank() && versaoAtual != versaoConhecida
             updateAvailable = existeAtualizacao
@@ -738,6 +781,7 @@ private fun MainShell(
             val ssConnectionsDash by shadowsocksManager.connections.collectAsState()
             val trConnectionsDash by trojanManager.connections.collectAsState()
             val ovpnConnections by openVpnManager.connections.collectAsState()
+            val modernConnectionsDash by modernManager.connections.collectAsState()
 
             val activeCount = listOf(
                 wgTunnels.any { it.status == TunnelStatus.CONNECTED },
@@ -749,7 +793,6 @@ private fun MainShell(
                 ovpnConnections.any { it.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTED }
             ).count { it }
 
-            // Soma o tráfego real de TODOS os protocolos para o Dashboard
             val dashRx = wgTunnels.sumOf { it.rxBytes } +
                 sshConnections.sumOf { it.rxBytes } +
                 vlessConnectionsDash.sumOf { it.rxBytes } +
@@ -766,6 +809,113 @@ private fun MainShell(
                 ovpnConnections.sumOf { it.txBytes }
             val dashTrafficLabel = if (dashRx + dashTx > 0) formatBytes(dashRx + dashTx) else "0 B"
 
+            fun rememberLast(protocol: String, name: String) {
+                if (protocol.isBlank() || name.isBlank()) return
+                if (lastProtocolId != protocol || lastConnectionName != name) {
+                    lastProtocolId = protocol
+                    lastConnectionName = name
+                    appPrefs.edit()
+                        .putString("dashboard_last_protocol", protocol)
+                        .putString("dashboard_last_connection", name)
+                        .apply()
+                }
+            }
+
+            LaunchedEffect(
+                wgTunnels,
+                sshConnections,
+                vlessConnectionsDash,
+                vmessConnectionsDash,
+                ssConnectionsDash,
+                trConnectionsDash,
+                ovpnConnections,
+                modernConnectionsDash
+            ) {
+                val current = listOfNotNull(
+                    sshConnections.firstOrNull { it.status == SshStatus.CONNECTED || it.status == SshStatus.CONNECTING }
+                        ?.let { "ssh" to it.config.connectionName },
+                    vlessConnectionsDash.firstOrNull { it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED || it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTING }
+                        ?.let { "vless" to it.config.connectionName },
+                    vmessConnectionsDash.firstOrNull { it.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTED || it.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTING }
+                        ?.let { "vmess" to it.config.connectionName },
+                    ssConnectionsDash.firstOrNull { it.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTED || it.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTING }
+                        ?.let { "shadowsocks" to it.config.connectionName },
+                    trConnectionsDash.firstOrNull { it.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTED || it.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTING }
+                        ?.let { "trojan" to it.config.connectionName },
+                    wgTunnels.firstOrNull { it.status == TunnelStatus.CONNECTED || it.status == TunnelStatus.CONNECTING }
+                        ?.let { "wireguard" to it.name },
+                    ovpnConnections.firstOrNull { it.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTED || it.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTING }
+                        ?.let { "openvpn" to it.config.connectionName },
+                    modernConnectionsDash.firstOrNull { it.status == com.autombot.client.protocols.modern.ModernProtocolStatus.CONNECTED || it.status == com.autombot.client.protocols.modern.ModernProtocolStatus.CONNECTING }
+                        ?.let { it.config.type.id to it.config.connectionName }
+                ).firstOrNull()
+                current?.let { rememberLast(it.first, it.second) }
+            }
+
+            fun stateLabel(name: String): String = when (name) {
+                "CONNECTED" -> "Conectado"
+                "CONNECTING" -> "Conectando…"
+                "DISCONNECTING" -> "Desconectando…"
+                "ERROR" -> "Erro"
+                else -> "Desconectado"
+            }
+
+            val quickConnection: DashboardQuickConnection? = when (lastProtocolId) {
+                "ssh" -> sshConnections.firstOrNull { it.config.connectionName == lastConnectionName }?.let {
+                    DashboardQuickConnection("ssh", "SSH", it.config.connectionName, "${it.config.server}:${it.config.port}", it.status == SshStatus.CONNECTED, it.status == SshStatus.CONNECTING, stateLabel(it.status.name))
+                }
+                "vless" -> vlessConnectionsDash.firstOrNull { it.config.connectionName == lastConnectionName }?.let {
+                    DashboardQuickConnection("vless", "VLESS", it.config.connectionName, "${it.config.server}:${it.config.port}", it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED, it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTING, stateLabel(it.status.name))
+                }
+                "vmess" -> vmessConnectionsDash.firstOrNull { it.config.connectionName == lastConnectionName }?.let {
+                    DashboardQuickConnection("vmess", "VMess / V2Ray", it.config.connectionName, "${it.config.server}:${it.config.port}", it.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTED, it.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTING, stateLabel(it.status.name))
+                }
+                "shadowsocks" -> ssConnectionsDash.firstOrNull { it.config.connectionName == lastConnectionName }?.let {
+                    DashboardQuickConnection("shadowsocks", "Shadowsocks", it.config.connectionName, "${it.config.server}:${it.config.port}", it.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTED, it.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTING, stateLabel(it.status.name))
+                }
+                "trojan" -> trConnectionsDash.firstOrNull { it.config.connectionName == lastConnectionName }?.let {
+                    DashboardQuickConnection("trojan", "Trojan", it.config.connectionName, "${it.config.server}:${it.config.port}", it.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTED, it.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTING, stateLabel(it.status.name))
+                }
+                "wireguard" -> wgTunnels.firstOrNull { it.name == lastConnectionName }?.let {
+                    DashboardQuickConnection("wireguard", "WireGuard", it.name, it.endpointLabel, it.status == TunnelStatus.CONNECTED, it.status == TunnelStatus.CONNECTING || it.status == TunnelStatus.DISCONNECTING, stateLabel(it.status.name))
+                }
+                "openvpn" -> ovpnConnections.firstOrNull { it.config.connectionName == lastConnectionName }?.let {
+                    DashboardQuickConnection("openvpn", "OpenVPN", it.config.connectionName, it.config.configFileName, it.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTED, it.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTING, stateLabel(it.status.name))
+                }
+                "hysteria2", "tuic" -> modernConnectionsDash.firstOrNull { it.config.type.id == lastProtocolId && it.config.connectionName == lastConnectionName }?.let {
+                    DashboardQuickConnection(it.config.type.id, it.config.type.displayName, it.config.connectionName, "${it.config.server}:${it.config.port}", it.status == com.autombot.client.protocols.modern.ModernProtocolStatus.CONNECTED, it.status == com.autombot.client.protocols.modern.ModernProtocolStatus.CONNECTING, stateLabel(it.status.name))
+                }
+                else -> null
+            }
+
+            fun toggleQuick() {
+                val quick = quickConnection ?: return
+                when (quick.protocolId) {
+                    "ssh" -> scope.launch { if (quick.connected) sshManager.disconnect(quick.connectionName) else sshManager.connect(quick.connectionName) }
+                    "vless" -> scope.launch { if (quick.connected) vlessManager.disconnect(quick.connectionName) else vlessManager.connect(quick.connectionName) }
+                    "vmess" -> scope.launch { if (quick.connected) vmessManager.disconnect(quick.connectionName) else vmessManager.connect(quick.connectionName) }
+                    "shadowsocks" -> scope.launch { if (quick.connected) shadowsocksManager.disconnect(quick.connectionName) else shadowsocksManager.connect(quick.connectionName) }
+                    "trojan" -> scope.launch { if (quick.connected) trojanManager.disconnect(quick.connectionName) else trojanManager.connect(quick.connectionName) }
+                    "wireguard" -> wgTunnels.firstOrNull { it.name == quick.connectionName }?.let { tunnel ->
+                        onRequestVpnPermission { scope.launch { wireGuardManager.toggle(tunnel) } }
+                    }
+                    "openvpn" -> ovpnConnections.firstOrNull { it.config.connectionName == quick.connectionName }?.let { conn ->
+                        if (quick.connected) {
+                            openVpnManager.requestDisconnect(conn.config.connectionName)
+                            onStopSystemVpn()
+                        } else {
+                            onStartOpenVpn(conn.config.connectionName, conn.config)
+                        }
+                    }
+                    "hysteria2", "tuic" -> com.autombot.client.protocols.modern.ModernProtocolType.fromId(quick.protocolId)?.let { type ->
+                        scope.launch {
+                            if (quick.connected) modernManager.disconnect(type, quick.connectionName)
+                            else modernManager.connect(type, quick.connectionName)
+                        }
+                    }
+                }
+            }
+
             LaunchedEffect(Unit) { checkForConfigUpdate() }
 
             Box(modifier = Modifier.padding(padding)) {
@@ -775,6 +925,9 @@ private fun MainShell(
                     trafficLabel = dashTrafficLabel,
                     onRenew = onOpenPlan,
                     onOpenConnections = onOpenConnections,
+                    quickConnection = quickConnection,
+                    onToggleQuickConnection = ::toggleQuick,
+                    onOpenQuickConnection = onOpenConnections,
                     updateAvailable = updateAvailable,
                     applyingUpdate = applyingUpdate,
                     onApplyUpdate = { scope.launch { applyConfigUpdate() } }
