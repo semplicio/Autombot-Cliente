@@ -62,7 +62,7 @@ data class SecurityTrailsLookupReport(
 ) {
     fun toJson(): String = JSONObject()
         .put("tool", "AutomBot SecurityTrails Lookup")
-        .put("version", "1.3.0")
+        .put("version", "1.4.0")
         .put("query", query)
         .put("kind", kind)
         .put("resolved_ips", JSONArray(resolvedIps))
@@ -318,11 +318,21 @@ class SecurityTrailsLookupActivity : ComponentActivity() {
         val client = SecurityTrailsClient()
         setContent {
             MaterialTheme {
-                SecurityTrailsScreen(
-                    client = client,
-                    onShareText = { report -> ReportShare.shareText(this, "AutomBot — SecurityTrails Lookup", report.toText()) },
-                    onShareJson = { report -> ReportShare.share(this, report.toJson()) }
-                )
+                var showSniTool by remember { mutableStateOf(false) }
+                if (showSniTool) {
+                    SniToolScreen(
+                        onBack = { showSniTool = false },
+                        onShareText = { text -> ReportShare.shareText(this, "AutomBot — teste SNI", text) },
+                        onShareJson = { json -> ReportShare.share(this, json) }
+                    )
+                } else {
+                    SecurityTrailsScreen(
+                        client = client,
+                        onOpenSniTool = { showSniTool = true },
+                        onShareText = { report -> ReportShare.shareText(this, "AutomBot — SecurityTrails Lookup", report.toText()) },
+                        onShareJson = { report -> ReportShare.share(this, report.toJson()) }
+                    )
+                }
             }
         }
     }
@@ -331,6 +341,7 @@ class SecurityTrailsLookupActivity : ComponentActivity() {
 @Composable
 private fun SecurityTrailsScreen(
     client: SecurityTrailsClient,
+    onOpenSniTool: () -> Unit,
     onShareText: (SecurityTrailsLookupReport) -> Unit,
     onShareJson: (SecurityTrailsLookupReport) -> Unit
 ) {
@@ -410,6 +421,17 @@ private fun SecurityTrailsScreen(
                     } else {
                         Text("Consultar IP / domínio", fontWeight = FontWeight.SemiBold)
                     }
+                }
+            }
+
+            item {
+                Button(
+                    onClick = onOpenSniTool,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = LookupSurfaceAlt)
+                ) {
+                    Text("Testar SNI manual (IP + hostname)", color = LookupText, fontWeight = FontWeight.SemiBold)
                 }
             }
 
