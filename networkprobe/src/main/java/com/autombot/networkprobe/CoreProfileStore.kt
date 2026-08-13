@@ -35,7 +35,8 @@ data class CoreProfileSnapshot(
     val publicIp: String?,
     val protocols: List<CoreProtocolProfile>,
     val rawProfileJson: String,
-    val savedAtMs: Long
+    val savedAtMs: Long,
+    val sponsoredManifest: SponsoredDomainManifest? = null
 ) {
     fun toPreset(): CoreProbePreset? {
         if (protocols.isEmpty() && publicIp.isNullOrBlank()) return null
@@ -155,22 +156,41 @@ data class CoreProbePreset(
 class CoreProfileStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    fun saveProfile(managerUrl: String, rawProfileJson: String): CoreProfileSnapshot {
+    fun saveProfile(
+        managerUrl: String,
+        rawProfileJson: String,
+        sponsoredManifestJson: String? = null
+    ): CoreProfileSnapshot {
         val now = System.currentTimeMillis()
         val parsed = CoreProfileSnapshot.fromServerJson(managerUrl, rawProfileJson, now)
-        prefs.edit()
+        val existingManifest = loadSponsoredManifest()
+        val receivedManifest = sponsoredManifestJson?.let { SponsoredDomainManifest.parse(it) }
+        val effectiveManifest = receivedManifest ?: existingManifest
+
+        val editor = prefs.edit()
             .putString(KEY_MANAGER_URL, managerUrl)
             .putString(KEY_PROFILE_JSON, rawProfileJson)
             .putLong(KEY_SAVED_AT, now)
-            .apply()
-        return parsed
+        if (!sponsoredManifestJson.isNullOrBlank() && receivedManifest != null) {
+            editor.putString(KEY_SPONSORED_MANIFEST_JSON, sponsoredManifestJson)
+        }
+        editor.apply()
+        return parsed.copy(sponsoredManifest = effectiveManifest)
     }
 
     fun loadProfile(): CoreProfileSnapshot? {
         val manager = prefs.getString(KEY_MANAGER_URL, null) ?: return null
         val json = prefs.getString(KEY_PROFILE_JSON, null) ?: return null
         val savedAt = prefs.getLong(KEY_SAVED_AT, 0L)
-        return runCatching { CoreProfileSnapshot.fromServerJson(manager, json, savedAt) }.getOrNull()
+        return runCatching {
+            CoreProfileSnapshot.fromServerJson(manager, json, savedAt)
+                .copy(sponsoredManifest = loadSponsoredManifest())
+        }.getOrNull()
+    }
+
+    fun loadSponsoredManifest(): SponsoredDomainManifest? {
+        val raw = prefs.getString(KEY_SPONSORED_MANIFEST_JSON, null) ?: return null
+        return SponsoredDomainManifest.parse(raw)
     }
 
     fun managerUrl(): String = prefs.getString(KEY_MANAGER_URL, "") ?: ""
@@ -179,6 +199,7 @@ class CoreProfileStore(context: Context) {
         prefs.edit()
             .remove(KEY_MANAGER_URL)
             .remove(KEY_PROFILE_JSON)
+            .remove(KEY_SPONSORED_MANIFEST_JSON)
             .remove(KEY_SAVED_AT)
             .apply()
     }
@@ -187,6 +208,7 @@ class CoreProfileStore(context: Context) {
         const val PREFS_NAME = "automcore_probe_profile"
         const val KEY_MANAGER_URL = "manager_url"
         const val KEY_PROFILE_JSON = "profile_json"
+        const val KEY_SPONSORED_MANIFEST_JSON = "sponsored_manifest_json"
         const val KEY_SAVED_AT = "saved_at"
     }
 }
