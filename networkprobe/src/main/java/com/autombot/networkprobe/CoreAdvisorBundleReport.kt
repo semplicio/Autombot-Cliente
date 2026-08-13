@@ -4,7 +4,8 @@ import org.json.JSONObject
 
 data class CoreAdvisorBundleReport(
     val advisor: CoreAdvisorReport,
-    val sweep: AuthorizedEndpointSweepReport
+    val sweep: AuthorizedEndpointSweepReport,
+    val sponsored: SponsoredDomainProbeReport? = null
 ) {
     val passed: Int get() = advisor.passed
     val warnings: Int get() = advisor.warnings
@@ -18,8 +19,9 @@ data class CoreAdvisorBundleReport(
     fun toJson(): String {
         val root = JSONObject(advisor.toJson())
         val nextSteps = buildVpnNextSteps()
-        root.put("version", "0.9.0")
+        root.put("version", "1.0.0")
         root.put("authorized_endpoint_sweep", sweep.toJsonArray())
+        sponsored?.let { root.put("sponsored_domain_mobile_probe", it.toJson()) }
         root.put("vpn_connection_next_steps", nextSteps)
         root.put("manual", toText())
         return root.toString(2)
@@ -30,6 +32,11 @@ data class CoreAdvisorBundleReport(
         appendLine()
         appendLine()
         append(sweep.toText())
+        sponsored?.let {
+            appendLine()
+            appendLine()
+            append(it.toText())
+        }
         appendLine()
         appendLine()
         append(buildVpnNextSteps())
@@ -52,6 +59,22 @@ data class CoreAdvisorBundleReport(
             appendLine("Já existe protocolo completo confirmado. Priorizar: ${fullPass.joinToString { "${it.protocolType.uppercase()} ${it.host}:${it.port}" }}.")
         } else {
             appendLine("Nenhum protocolo completo foi confirmado ainda; portanto o relatório não garante uma configuração VPN funcional neste momento.")
+        }
+
+        sponsored?.let { sponsoredReport ->
+            val confirmedSponsored = sponsoredReport.confirmed
+            when {
+                !sponsoredReport.cellularNetworkFound ->
+                    appendLine("Domínio patrocinado: nenhuma rede celular foi encontrada para validar o endpoint nesta execução.")
+                confirmedSponsored.isNotEmpty() ->
+                    appendLine(
+                        "Domínio patrocinado configurado no Core com endpoint técnico confirmado na rede móvel: " +
+                            confirmedSponsored.joinToString { "${it.endpoint.domain}:${it.endpoint.tcpPort}" } + "."
+                    )
+                sponsoredReport.items.isNotEmpty() ->
+                    appendLine("Domínio patrocinado: o Core possui endpoint configurado, mas nenhum respondeu com manifesto HTTPS válido nesta execução móvel.")
+            }
+            appendLine("Esse resultado confirma somente alcance técnico do endpoint configurado; não confirma política de cobrança ou zero-rating da operadora.")
         }
 
         if (open.isNotEmpty()) {
@@ -77,6 +100,6 @@ data class CoreAdvisorBundleReport(
             appendLine("Se um reverse proxy seu estiver em 80 ou 8080, uma opção segura é adicionar nele uma rota WebSocket para o serviço Xray interno, manter as portas antigas como fallback e testar VMess/VLESS/Trojan novamente. Não reutilizar uma porta ocupada sem saber qual daemon a possui.")
         }
 
-        appendLine("A varredura desta versão só testa hosts/IPs presentes no perfil AutomBot Core vinculado. Ela não procura domínios de terceiros, ranges da operadora, zero-rating ou fronting externo.")
+        appendLine("A varredura desta versão só testa hosts/IPs presentes no perfil AutomBot Core vinculado e, quando disponível, o domínio patrocinado declarado pelo próprio Core. Ela não procura outros domínios da operadora, ranges de rede, zero-rating ou fronting externo.")
     }.trimEnd()
 }
