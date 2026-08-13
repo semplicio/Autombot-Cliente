@@ -1,39 +1,49 @@
 package com.autombot.client.provisioning
 
 import android.content.Context
+import android.provider.Settings
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
- * Provisionamento automatico de usuario (ver SPEC.md secao 4 e integração com
- * o painel AutomBot Core, api/v1/teste.php + api/v1/configs.php).
+ * Provisionamento automático da conta gerenciada.
  *
- * Fluxo (modo gerenciado, "Já tenho um domínio"):
- *  1. Gera/recupera um UUID persistente proprio do app (NAO usar Android ID/IMEI,
- *     que tem restricoes de privacidade e pode mudar)
- *  2. Gera um login + senha aleatorios localmente, no formato que o painel exige
- *  3. Envia (device_id, usuario, senha) pro painel via POST /api/v1/teste.php
- *  4. Painel valida (throttle de 12h por device_id), cria a conta de verdade
- *     na VPS via automcore, devolve confirmacao
- *  5. App busca as configs prontas via GET /api/v1/configs.php?usuario=X
+ * A identidade primária agora vem de Settings.Secure.ANDROID_ID. Em Android 8+
+ * esse valor é estável para a combinação aparelho + usuário Android + chave de
+ * assinatura do app, portanto normalmente permanece o mesmo após limpar dados ou
+ * reinstalar o APK assinado com a mesma chave. Isso é bem diferente de um UUID
+ * salvo apenas em SharedPreferences, que desaparece quando os dados do app são
+ * apagados.
  *
- * CORRECAO: a versao anterior desse arquivo gerava um UUID NOVO a cada
- * chamada de getOrCreateDeviceId() — nunca persistia nada, apesar do nome e
- * do comentario dizerem o contrario. Isso quebraria o throttle de 12h do
- * painel (cada tentativa pareceria um dispositivo diferente) e faria o app
- * "esquecer" quem ele e a cada reinicio. Agora usa SharedPreferences comum
- * (nao e dado sensivel — e so um identificador local, nao senha nem token).
+ * Observação: nenhum identificador Android é absolutamente imutável. Factory reset,
+ * troca de usuário/perfil Android ou mudança da chave de assinatura pode produzir
+ * outro ANDROID_ID. O servidor continua sendo a autoridade final para impedir novo
+ * trial e restaurar a conta já vinculada ao device_id.
  */
 class DeviceProvisioning(context: Context) {
 
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    /** UUID persistente — gerado uma unica vez, na primeira chamada, e reaproveitado depois. */
+    /**
+     * Identificador estável do aparelho para o vínculo servidor <-> cliente.
+     * Usa ANDROID_ID quando disponível. O UUID persistido fica apenas como fallback
+     * para aparelhos/ROMs que não entreguem um ANDROID_ID utilizável.
+     */
     fun getOrCreateDeviceId(): String {
-        val existing = prefs.getString(KEY_DEVICE_ID, null)
-        if (existing != null) return existing
+        val androidId = runCatching {
+            Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID)
+        }.getOrNull()?.trim()?.lowercase()
+
+        if (!androidId.isNullOrBlank() && androidId != LEGACY_BROKEN_ANDROID_ID) {
+            return androidId
+        }
+
+        val existing = prefs.getString(KEY_FALLBACK_DEVICE_ID, null)
+        if (!existing.isNullOrBlank()) return existing
 
         val fresh = UUID.randomUUID().toString()
-        prefs.edit().putString(KEY_DEVICE_ID, fresh).apply()
+        prefs.edit().putString(KEY_FALLBACK_DEVICE_ID, fresh).apply()
         return fresh
     }
 
@@ -43,20 +53,29 @@ class DeviceProvisioning(context: Context) {
     }
 
     /**
-     * Gera um login valido pro formato que o painel exige (ver api/v1/teste.php):
-     * so letras minusculas/numeros/underscore, comecando com letra, 3 a 32
-     * caracteres — regex ^[a-z][a-z0-9_]{2,31}$. Um UUID cru NAO bate com
-     * isso (tem tracos e pode comecar com numero), por isso geramos algo a
-     * parte em vez de reaproveitar o device_id como login.
+     * Login determinístico derivado do device_id.
+     *
+     * O usuário Linux do AutomBot Core precisa começar por letra e ter no máximo
+     * 32 caracteres. Por isso o login não pode ser o ANDROID_ID cru em todos os
+     * aparelhos (ele pode começar por número). O prefixo "d" mantém a relação 1:1:
+     * o mesmo device_id sempre gera exatamente o mesmo login.
      */
-    fun generateAccountUsername(): String {
-        val chars = ('a'..'z') + ('0'..'9')
-        val suffix = (1..10).map { chars.random() }.joinToString("")
-        return "ac$suffix"
+    fun generateAccountUsername(deviceId: String = getOrCreateDeviceId()): String {
+        val compact = deviceId.lowercase().filter { it.isLetterOrDigit() }
+        val body = if (compact.isNotBlank() && compact.length <= 31) {
+            compact
+        } else {
+            MessageDigest.getInstance("SHA-256")
+                .digest(deviceId.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+                .take(31)
+        }
+        return "d$body".take(32)
     }
 
     companion object {
         private const val PREFS_NAME = "autombot_device_provisioning"
-        private const val KEY_DEVICE_ID = "device_id"
+        private const val KEY_FALLBACK_DEVICE_ID = "fallback_device_id"
+        private const val LEGACY_BROKEN_ANDROID_ID = "9774d56d682e549c"
     }
 }
