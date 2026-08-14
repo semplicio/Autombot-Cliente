@@ -45,6 +45,7 @@ import com.autombot.client.ui.onboarding.ProgressStep
 import com.autombot.client.ui.onboarding.ProgressStepsScreen
 import com.autombot.client.ui.onboarding.SplashScreen
 import com.autombot.client.panel.ManagedAccountStatusClient
+import com.autombot.client.panel.PanelConfigsResponse
 import com.autombot.client.panel.PanelException
 import com.autombot.client.panel.PanelWebhookClient
 import com.autombot.client.panel.SponsoredDomainSync
@@ -274,6 +275,27 @@ private sealed class Screen {
 private const val TRIAL_DURATION_SECONDS = 2 * 60 * 60L
 private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 30 * 1000L
 
+private data class ManagedSshCredentials(
+    val username: String,
+    val password: String
+)
+
+private fun PanelConfigsResponse.managedSshCredentials(): ManagedSshCredentials? {
+    val profiles = protocols["ssh"]?.raw?.optJSONArray("perfis") ?: return null
+    for (index in 0 until profiles.length()) {
+        val profile = profiles.optJSONObject(index) ?: continue
+        val username = profile.optString("usuario")
+            .ifBlank { profile.optString("username") }
+            .ifBlank { profile.optString("login") }
+        val password = profile.optString("senha")
+            .ifBlank { profile.optString("password") }
+        if (username.isNotBlank() && password.isNotBlank()) {
+            return ManagedSshCredentials(username = username, password = password)
+        }
+    }
+    return null
+}
+
 private fun managedStatusAllowsConnection(status: String): Boolean {
     val normalized = status.trim().lowercase()
     return normalized.isBlank() || normalized in setOf("ativo", "active", "ok")
@@ -345,6 +367,16 @@ private fun AppRoot(
         val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
         val cliente = PanelWebhookClient(baseUrlGerenciada)
         val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
+        val credenciaisRemotas = respostaConfigs.managedSshCredentials()
+        val senhaPersistida = appPrefs.getString("managed_senha", "").orEmpty()
+        val senhaGerenciada = senhaPersistida.ifBlank { credenciaisRemotas?.password.orEmpty() }
+        if (senhaGerenciada.isBlank()) {
+            throw PanelException("A conta deste aparelho não possui uma senha SSH salva ou recuperável no painel.")
+        }
+        if (senhaPersistida.isBlank()) {
+            appPrefs.edit().putString("managed_senha", senhaGerenciada).apply()
+        }
+
         val avisos = importPanelConfigs(
             context = context,
             response = respostaConfigs,
@@ -354,7 +386,9 @@ private fun AppRoot(
             vmessManager = vmessManager,
             shadowsocksManager = shadowsocksManager,
             trojanManager = trojanManager,
-            openVpnManager = openVpnManager
+            openVpnManager = openVpnManager,
+            managedUsername = usuarioGerenciado,
+            managedPassword = senhaGerenciada
         )
         avisos.forEach {
             com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
@@ -567,6 +601,12 @@ private fun AppRoot(
                     ProgressStep("Sincronizando dados da conta") {
                         val conta = trialAccount ?: throw PanelException("Conta não foi localizada/criada corretamente")
                         val respostaConfigs = existingConfigs ?: panelClient.fetchConfigs(conta.usuario)
+                        val credenciaisRemotas = respostaConfigs.managedSshCredentials()
+                        val usuarioGerenciado = conta.usuario.ifBlank { credenciaisRemotas?.username.orEmpty() }
+                        val senhaGerenciada = conta.senha.ifBlank { credenciaisRemotas?.password.orEmpty() }
+                        if (usuarioGerenciado.isBlank() || senhaGerenciada.isBlank()) {
+                            throw PanelException("Não foi possível recuperar o login e a senha vinculados a este aparelho.")
+                        }
 
                         // As configurações pertencem à conta e continuam sendo úteis
                         // mesmo quando ela está expirada. A validade controla somente
@@ -580,7 +620,9 @@ private fun AppRoot(
                             vmessManager = vmessManager,
                             shadowsocksManager = shadowsocksManager,
                             trojanManager = trojanManager,
-                            openVpnManager = openVpnManager
+                            openVpnManager = openVpnManager,
+                            managedUsername = usuarioGerenciado,
+                            managedPassword = senhaGerenciada
                         )
                         avisos.forEach {
                             com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
@@ -604,7 +646,8 @@ private fun AppRoot(
                         }.getOrDefault("")
                         val deviceId = deviceProvisioning.getOrCreateDeviceId()
                         appPrefs.edit()
-                            .putString("managed_usuario", conta.usuario)
+                            .putString("managed_usuario", usuarioGerenciado)
+                            .putString("managed_senha", senhaGerenciada)
                             .putString("managed_base_url", current.domain)
                             .putString("managed_config_versao", versaoInicial)
                             .putLong("managed_config_last_check_ms", System.currentTimeMillis())
