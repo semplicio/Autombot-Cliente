@@ -16,7 +16,7 @@ package com.autombot.client.protocols.ssh
 data class SshConnectionConfig(
     val connectionName: String,
     val server: String,
-    val port: String = "22",
+    val port: String = "2222",
     val username: String,
     val authMethod: SshAuthMethod = SshAuthMethod.PASSWORD,
     val password: String = "",
@@ -44,6 +44,10 @@ data class SshConnectionConfig(
     // --- Camada: SSL/TLS com SNI de fachada (independente) ---
     val useSslTls: Boolean = false,
     val sni: String = "",
+    // SHA-256 do certificado folha, em hexadecimal (com ou sem ":"). Quando
+    // preenchido, permite certificado privado/autoassinado SOMENTE se ele for
+    // exatamente o certificado fixado — nunca equivale a "aceitar qualquer um".
+    val tlsCertificateSha256: String = "",
 
     // --- Camada: WebSocket (independente — AINDA NAO implementada de verdade) ---
     val useWebSocket: Boolean = false,
@@ -130,6 +134,7 @@ fun SshConnectionConfig.toJson(): org.json.JSONObject = org.json.JSONObject().ap
     put("payload", payload)
     put("useSslTls", useSslTls)
     put("sni", sni)
+    put("tlsCertificateSha256", tlsCertificateSha256)
     put("useWebSocket", useWebSocket)
     put("wsHost", wsHost)
     put("wsPath", wsPath)
@@ -149,7 +154,7 @@ fun SshConnectionConfig.toJson(): org.json.JSONObject = org.json.JSONObject().ap
 fun sshConnectionConfigFromJson(json: org.json.JSONObject): SshConnectionConfig = SshConnectionConfig(
     connectionName = json.optString("connectionName"),
     server = json.optString("server"),
-    port = json.optString("port", "22"),
+    port = json.optString("port", "2222"),
     username = json.optString("username"),
     authMethod = runCatching { SshAuthMethod.valueOf(json.optString("authMethod")) }.getOrDefault(SshAuthMethod.PASSWORD),
     password = json.optString("password"),
@@ -167,6 +172,7 @@ fun sshConnectionConfigFromJson(json: org.json.JSONObject): SshConnectionConfig 
     payload = json.optString("payload"),
     useSslTls = json.optBoolean("useSslTls"),
     sni = json.optString("sni"),
+    tlsCertificateSha256 = json.optString("tlsCertificateSha256"),
     useWebSocket = json.optBoolean("useWebSocket"),
     wsHost = json.optString("wsHost"),
     wsPath = json.optString("wsPath", "/"),
