@@ -75,6 +75,8 @@ fun DashboardScreen(
     managedAccountExpiry: String? = null,
     updateAvailable: Boolean = false,
     applyingUpdate: Boolean = false,
+    checkingUpdate: Boolean = false,
+    onCheckUpdate: () -> Unit = {},
     onApplyUpdate: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -221,6 +223,25 @@ fun DashboardScreen(
                     text = if (applyingUpdate) "Atualizando…" else "Atualizar",
                     onClick = onApplyUpdate,
                     enabled = !applyingUpdate,
+                    accent = C.AccentLight
+                )
+            }
+        } else if (managedMode) {
+            Spacer(Modifier.height(14.dp))
+            AutomBotCard(modifier = Modifier.fillMaxWidth()) {
+                Text("Configurações do painel", color = C.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "O app verifica o painel automaticamente a cada 30 segundos e aplica novas configurações.",
+                    color = C.TextDim,
+                    fontSize = 10.sp
+                )
+                Spacer(Modifier.height(10.dp))
+                AutomBotGradientButton(
+                    text = if (checkingUpdate) "Verificando…" else "Verificar atualizações",
+                    onClick = onCheckUpdate,
+                    enabled = !checkingUpdate && !applyingUpdate,
+                    modifier = Modifier.fillMaxWidth(),
                     accent = C.AccentLight
                 )
             }

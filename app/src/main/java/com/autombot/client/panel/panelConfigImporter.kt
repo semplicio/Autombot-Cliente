@@ -257,7 +257,11 @@ suspend fun importPanelConfigs(
                         authMethod = SshAuthMethod.PASSWORD,
                         password = senhaSsh,
                         useProxy = raw.optBoolean("use_proxy", false),
-                        proxyType = if (raw.optString("proxy_type") == "HTTP") ProxyType.HTTP else ProxyType.SOCKS5,
+                        proxyType = when (raw.optString("proxy_type").trim().uppercase()) {
+                            "HTTP", "HTTP_CONNECT", "CONNECT" -> ProxyType.HTTP
+                            "PAYLOAD_GATEWAY", "GATEWAY", "RAW_HTTP", "HTTP_PAYLOAD" -> ProxyType.PAYLOAD_GATEWAY
+                            else -> ProxyType.SOCKS5
+                        },
                         proxyHost = raw.optString("proxy_host"),
                         proxyPort = if (raw.isNull("proxy_port")) "" else raw.optString("proxy_port"),
                         proxyUsername = raw.optString("proxy_username"),

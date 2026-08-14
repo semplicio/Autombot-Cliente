@@ -272,7 +272,7 @@ private sealed class Screen {
 }
 
 private const val TRIAL_DURATION_SECONDS = 2 * 60 * 60L
-private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 * 60 * 1000L
+private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 30 * 1000L
 
 private fun managedStatusAllowsConnection(status: String): Boolean {
     val normalized = status.trim().lowercase()
@@ -296,6 +296,7 @@ private fun AppRoot(
 ) {
     val context = LocalContext.current
     val appPrefs = remember { context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE) }
+    val rootScope = rememberCoroutineScope()
 
     var screen by remember { mutableStateOf<Screen>(Screen.Splash) }
 
@@ -307,6 +308,12 @@ private fun AppRoot(
     }
     var trialSecondsRemaining by remember { mutableStateOf<Long?>(null) }
     var isManagedMode by remember { mutableStateOf(appPrefs.getBoolean("managed_mode", false)) }
+    var managedUpdateAvailable by remember {
+        mutableStateOf(appPrefs.getBoolean("managed_config_update_available", false))
+    }
+    var managedApplyingUpdate by remember { mutableStateOf(false) }
+    var managedCheckingUpdate by remember { mutableStateOf(false) }
+    var managedSyncInProgress by remember { mutableStateOf(false) }
     val manualConnections = remember { mutableStateListOf<ManualConnectionConfig>() }
 
     LaunchedEffect(trialSecondsRemaining != null) {
@@ -324,9 +331,144 @@ private fun AppRoot(
     fun resetToChoice() {
         trialSecondsRemaining = null
         isManagedMode = false
+        managedUpdateAvailable = false
         manualConnections.clear()
-        appPrefs.edit().putBoolean("onboarded", false).apply()
+        appPrefs.edit()
+            .putBoolean("onboarded", false)
+            .putBoolean("managed_config_update_available", false)
+            .apply()
         screen = Screen.Choice
+    }
+
+    suspend fun performManagedConfigImport(trigger: String): Boolean {
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
+        val cliente = PanelWebhookClient(baseUrlGerenciada)
+        val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
+        val avisos = importPanelConfigs(
+            context = context,
+            response = respostaConfigs,
+            wireGuardManager = wireGuardManager,
+            sshManager = sshManager,
+            vlessManager = vlessManager,
+            vmessManager = vmessManager,
+            shadowsocksManager = shadowsocksManager,
+            trojanManager = trojanManager,
+            openVpnManager = openVpnManager
+        )
+        avisos.forEach {
+            com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
+        }
+
+        val versaoNova = cliente.fetchConfigVersion(usuarioGerenciado)
+        appPrefs.edit()
+            .putString("managed_config_versao", versaoNova)
+            .putLong("managed_config_last_check_ms", System.currentTimeMillis())
+            .putBoolean("managed_config_update_available", false)
+            .apply()
+        managedUpdateAvailable = false
+        com.autombot.client.util.AppLog.log(
+            "Configurações do painel aplicadas $trigger; os protocolos usarão os novos dados na próxima conexão",
+            com.autombot.client.util.AppLog.Level.SUCCESS
+        )
+        return true
+    }
+
+    suspend fun applyManagedConfigUpdate(trigger: String = "manualmente"): Boolean {
+        if (!isManagedMode || managedSyncInProgress) return false
+        managedSyncInProgress = true
+        managedApplyingUpdate = true
+        return try {
+            performManagedConfigImport(trigger)
+        } catch (e: Exception) {
+            com.autombot.client.util.AppLog.log(
+                "Falha ao aplicar atualização de config: ${e.message}",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
+            false
+        } finally {
+            managedApplyingUpdate = false
+            managedSyncInProgress = false
+        }
+    }
+
+    suspend fun checkManagedConfigUpdate(
+        force: Boolean = false,
+        autoApply: Boolean = true
+    ): Boolean {
+        if (!isManagedMode || managedSyncInProgress) return false
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
+        val agora = System.currentTimeMillis()
+        val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
+        val decorrido = agora - ultimaChecagem
+        if (!force && ultimaChecagem > 0L && decorrido >= 0L &&
+            decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS
+        ) {
+            return true
+        }
+
+        managedSyncInProgress = true
+        managedCheckingUpdate = true
+        return try {
+            runCatching {
+                SponsoredDomainSync.refresh(
+                    context = context,
+                    vlessManager = vlessManager,
+                    vmessManager = vmessManager,
+                    trojanManager = trojanManager
+                )
+            }.onFailure {
+                com.autombot.client.util.AppLog.log(
+                    "Falha ao sincronizar domínio patrocinado: ${it.message}",
+                    com.autombot.client.util.AppLog.Level.ERROR
+                )
+            }
+
+            val cliente = PanelWebhookClient(baseUrlGerenciada)
+            val versaoConhecida = appPrefs.getString("managed_config_versao", "").orEmpty()
+            val versaoAtual = cliente.fetchConfigVersion(usuarioGerenciado)
+            if (versaoAtual.isBlank()) return false
+
+            val existeAtualizacao = versaoAtual != versaoConhecida
+            managedUpdateAvailable = existeAtualizacao
+            appPrefs.edit()
+                .putLong("managed_config_last_check_ms", System.currentTimeMillis())
+                .putBoolean("managed_config_update_available", existeAtualizacao)
+                .apply()
+
+            if (!existeAtualizacao) return true
+
+            com.autombot.client.util.AppLog.log(
+                "Alteração detectada no painel; baixando e reconfigurando os protocolos automaticamente",
+                com.autombot.client.util.AppLog.Level.INFO
+            )
+            if (autoApply) {
+                managedApplyingUpdate = true
+                performManagedConfigImport("automaticamente")
+            } else {
+                true
+            }
+        } catch (e: Exception) {
+            com.autombot.client.util.AppLog.log(
+                "Falha ao verificar atualização de config: ${e.message}",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
+            false
+        } finally {
+            managedApplyingUpdate = false
+            managedCheckingUpdate = false
+            managedSyncInProgress = false
+        }
+    }
+
+    LaunchedEffect(isManagedMode) {
+        if (!isManagedMode) return@LaunchedEffect
+        checkManagedConfigUpdate(force = true, autoApply = true)
+        while (true) {
+            delay(MANAGED_CONFIG_CHECK_INTERVAL_MS)
+            checkManagedConfigUpdate(force = true, autoApply = true)
+        }
     }
 
     val sshConnectionsForRouting by sshManager.connections.collectAsState()
@@ -613,6 +755,19 @@ private fun AppRoot(
             openVpnManager = openVpnManager,
             trialSecondsRemaining = trialSecondsRemaining,
             isManagedMode = isManagedMode,
+            updateAvailable = managedUpdateAvailable,
+            applyingUpdate = managedApplyingUpdate,
+            checkingUpdate = managedCheckingUpdate,
+            onCheckUpdate = {
+                rootScope.launch {
+                    checkManagedConfigUpdate(force = true, autoApply = true)
+                }
+            },
+            onApplyUpdate = {
+                rootScope.launch {
+                    applyManagedConfigUpdate(trigger = "manualmente")
+                }
+            },
             onReset = ::resetToChoice,
             onRequestVpnPermission = onRequestVpnPermission,
             onStopSystemVpn = onStopSystemVpn,
@@ -641,6 +796,11 @@ private fun MainShell(
     openVpnManager: com.autombot.client.protocols.openvpn.OpenVpnTunnelManager,
     trialSecondsRemaining: Long?,
     isManagedMode: Boolean,
+    updateAvailable: Boolean,
+    applyingUpdate: Boolean,
+    checkingUpdate: Boolean,
+    onCheckUpdate: () -> Unit,
+    onApplyUpdate: () -> Unit,
     onReset: () -> Unit,
     onRequestVpnPermission: (onGranted: () -> Unit) -> Unit,
     onStopSystemVpn: () -> Unit,
@@ -660,10 +820,6 @@ private fun MainShell(
     val appPrefs = remember { context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE) }
     val modernManager = remember(context) { com.autombot.client.protocols.modern.ModernProtocolManagerProvider.get(context) }
 
-    var updateAvailable by remember {
-        mutableStateOf(appPrefs.getBoolean("managed_config_update_available", false))
-    }
-    var applyingUpdate by remember { mutableStateOf(false) }
     var lastProtocolId by remember { mutableStateOf(appPrefs.getString("dashboard_last_protocol", "").orEmpty()) }
     var lastConnectionName by remember { mutableStateOf(appPrefs.getString("dashboard_last_connection", "").orEmpty()) }
     var managedAccountUser by remember { mutableStateOf(appPrefs.getString("managed_usuario", "").orEmpty()) }
@@ -699,78 +855,6 @@ private fun MainShell(
                 com.autombot.client.util.AppLog.Level.ERROR
             )
         }.isSuccess
-    }
-
-    suspend fun applyConfigUpdate(): Boolean {
-        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
-        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
-        applyingUpdate = true
-        try {
-            val cliente = PanelWebhookClient(baseUrlGerenciada)
-            val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
-
-            // Atualizações de rota/porta/perfil continuam chegando mesmo com a
-            // conta expirada. A trava é aplicada na hora de abrir/conectar.
-            importPanelConfigs(
-                context = context,
-                response = respostaConfigs,
-                wireGuardManager = wireGuardManager,
-                sshManager = sshManager,
-                vlessManager = vlessManager,
-                vmessManager = vmessManager,
-                shadowsocksManager = shadowsocksManager,
-                trojanManager = trojanManager,
-                openVpnManager = openVpnManager
-            )
-            val versaoNova = runCatching { cliente.fetchConfigVersion(usuarioGerenciado) }.getOrNull()
-            val editor = appPrefs.edit()
-                .putLong("managed_config_last_check_ms", System.currentTimeMillis())
-                .putBoolean("managed_config_update_available", false)
-            if (!versaoNova.isNullOrBlank()) editor.putString("managed_config_versao", versaoNova)
-            editor.apply()
-            updateAvailable = false
-            refreshManagedAccountStatus()
-            return true
-        } catch (e: Exception) {
-            com.autombot.client.util.AppLog.log("Falha ao aplicar atualização de config: ${e.message}", com.autombot.client.util.AppLog.Level.ERROR)
-            return false
-        } finally {
-            applyingUpdate = false
-        }
-    }
-
-    suspend fun checkForConfigUpdate() {
-        if (!isManagedMode) return
-        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return
-        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return
-        val versaoConhecida = appPrefs.getString("managed_config_versao", "")
-        val agora = System.currentTimeMillis()
-        val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
-        val decorrido = agora - ultimaChecagem
-        if (ultimaChecagem > 0L && decorrido >= 0L && decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS) return
-
-        appPrefs.edit().putLong("managed_config_last_check_ms", agora).apply()
-        runCatching {
-            SponsoredDomainSync.refresh(
-                context = context,
-                vlessManager = vlessManager,
-                vmessManager = vmessManager,
-                trojanManager = trojanManager
-            )
-        }.onFailure {
-            com.autombot.client.util.AppLog.log(
-                "Falha ao sincronizar domínio patrocinado: ${it.message}",
-                com.autombot.client.util.AppLog.Level.ERROR
-            )
-        }
-
-        runCatching {
-            PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
-        }.onSuccess { versaoAtual ->
-            val existeAtualizacao = versaoAtual.isNotBlank() && versaoAtual != versaoConhecida
-            updateAvailable = existeAtualizacao
-            appPrefs.edit().putBoolean("managed_config_update_available", existeAtualizacao).apply()
-        }
     }
 
     ModalNavigationDrawer(
@@ -926,28 +1010,68 @@ private fun MainShell(
 
             fun toggleQuick() {
                 val quick = quickConnection ?: return
-                if (!quick.connected && !managedAccessAllowed) return
-                when (quick.protocolId) {
-                    "ssh" -> scope.launch { if (quick.connected) sshManager.disconnect(quick.connectionName) else sshManager.connect(quick.connectionName) }
-                    "vless" -> scope.launch { if (quick.connected) vlessManager.disconnect(quick.connectionName) else vlessManager.connect(quick.connectionName) }
-                    "vmess" -> scope.launch { if (quick.connected) vmessManager.disconnect(quick.connectionName) else vmessManager.connect(quick.connectionName) }
-                    "shadowsocks" -> scope.launch { if (quick.connected) shadowsocksManager.disconnect(quick.connectionName) else shadowsocksManager.connect(quick.connectionName) }
-                    "trojan" -> scope.launch { if (quick.connected) trojanManager.disconnect(quick.connectionName) else trojanManager.connect(quick.connectionName) }
-                    "wireguard" -> wgTunnels.firstOrNull { it.name == quick.connectionName }?.let { tunnel ->
-                        onRequestVpnPermission { scope.launch { wireGuardManager.toggle(tunnel) } }
+                val protocolId = quick.protocolId
+                val connectionName = quick.connectionName
+
+                // Resolve o estado real no instante do toque. Assim um callback que
+                // tenha sido capturado antes da recomposição não repete a ação antiga.
+                val currentlyConnected = when (protocolId) {
+                    "ssh" -> sshManager.connections.value.firstOrNull { it.config.connectionName == connectionName }?.status == SshStatus.CONNECTED
+                    "vless" -> vlessManager.connections.value.firstOrNull { it.config.connectionName == connectionName }?.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED
+                    "vmess" -> vmessManager.connections.value.firstOrNull { it.config.connectionName == connectionName }?.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTED
+                    "shadowsocks" -> shadowsocksManager.connections.value.firstOrNull { it.config.connectionName == connectionName }?.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTED
+                    "trojan" -> trojanManager.connections.value.firstOrNull { it.config.connectionName == connectionName }?.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTED
+                    "wireguard" -> wireGuardManager.tunnels.value.firstOrNull { it.name == connectionName }?.status == TunnelStatus.CONNECTED
+                    "openvpn" -> openVpnManager.connections.value.firstOrNull { it.config.connectionName == connectionName }?.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTED
+                    "hysteria2", "tuic" -> modernManager.connections.value.firstOrNull { it.config.type.id == protocolId && it.config.connectionName == connectionName }?.status == com.autombot.client.protocols.modern.ModernProtocolStatus.CONNECTED
+                    else -> false
+                }
+                if (!currentlyConnected && !managedAccessAllowed) return
+
+                when (protocolId) {
+                    "ssh" -> scope.launch {
+                        val current = sshManager.connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return@launch
+                        if (current.status == SshStatus.CONNECTED) sshManager.disconnect(connectionName)
+                        else if (current.status != SshStatus.CONNECTING) sshManager.connect(connectionName)
                     }
-                    "openvpn" -> ovpnConnections.firstOrNull { it.config.connectionName == quick.connectionName }?.let { conn ->
-                        if (quick.connected) {
+                    "vless" -> scope.launch {
+                        val current = vlessManager.connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return@launch
+                        if (current.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED) vlessManager.disconnect(connectionName)
+                        else if (current.status != com.autombot.client.protocols.vless.VlessStatus.CONNECTING) vlessManager.connect(connectionName)
+                    }
+                    "vmess" -> scope.launch {
+                        val current = vmessManager.connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return@launch
+                        if (current.status == com.autombot.client.protocols.vmess.VmessStatus.CONNECTED) vmessManager.disconnect(connectionName)
+                        else if (current.status != com.autombot.client.protocols.vmess.VmessStatus.CONNECTING) vmessManager.connect(connectionName)
+                    }
+                    "shadowsocks" -> scope.launch {
+                        val current = shadowsocksManager.connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return@launch
+                        if (current.status == com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTED) shadowsocksManager.disconnect(connectionName)
+                        else if (current.status != com.autombot.client.protocols.shadowsocks.ShadowsocksStatus.CONNECTING) shadowsocksManager.connect(connectionName)
+                    }
+                    "trojan" -> scope.launch {
+                        val current = trojanManager.connections.value.firstOrNull { it.config.connectionName == connectionName } ?: return@launch
+                        if (current.status == com.autombot.client.protocols.trojan.TrojanStatus.CONNECTED) trojanManager.disconnect(connectionName)
+                        else if (current.status != com.autombot.client.protocols.trojan.TrojanStatus.CONNECTING) trojanManager.connect(connectionName)
+                    }
+                    "wireguard" -> wireGuardManager.tunnels.value.firstOrNull { it.name == connectionName }?.let { tunnel ->
+                        if (tunnel.status != TunnelStatus.CONNECTING && tunnel.status != TunnelStatus.DISCONNECTING) {
+                            onRequestVpnPermission { scope.launch { wireGuardManager.toggle(tunnel) } }
+                        }
+                    }
+                    "openvpn" -> openVpnManager.connections.value.firstOrNull { it.config.connectionName == connectionName }?.let { conn ->
+                        if (conn.status == com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTED) {
                             openVpnManager.requestDisconnect(conn.config.connectionName)
                             onStopSystemVpn()
-                        } else {
+                        } else if (conn.status != com.autombot.client.protocols.openvpn.OpenVpnStatus.CONNECTING) {
                             onStartOpenVpn(conn.config.connectionName, conn.config)
                         }
                     }
-                    "hysteria2", "tuic" -> com.autombot.client.protocols.modern.ModernProtocolType.fromId(quick.protocolId)?.let { type ->
+                    "hysteria2", "tuic" -> com.autombot.client.protocols.modern.ModernProtocolType.fromId(protocolId)?.let { type ->
                         scope.launch {
-                            if (quick.connected) modernManager.disconnect(type, quick.connectionName)
-                            else modernManager.connect(type, quick.connectionName)
+                            val current = modernManager.connections.value.firstOrNull { it.config.type == type && it.config.connectionName == connectionName } ?: return@launch
+                            if (current.status == com.autombot.client.protocols.modern.ModernProtocolStatus.CONNECTED) modernManager.disconnect(type, connectionName)
+                            else if (current.status != com.autombot.client.protocols.modern.ModernProtocolStatus.CONNECTING) modernManager.connect(type, connectionName)
                         }
                     }
                 }
@@ -955,14 +1079,6 @@ private fun MainShell(
 
             LaunchedEffect(Unit) {
                 refreshManagedAccountStatus()
-                val knownVersion = appPrefs.getString("managed_config_versao", "").orEmpty()
-                if (isManagedMode && knownVersion.isBlank()) {
-                    // Recupera instalações feitas pela versão anterior, que não
-                    // importava protocolos quando a conta estava expirada.
-                    applyConfigUpdate()
-                } else {
-                    checkForConfigUpdate()
-                }
             }
 
             Box(modifier = Modifier.padding(padding)) {
@@ -980,7 +1096,9 @@ private fun MainShell(
                     managedAccountExpiry = managedAccountExpiry,
                     updateAvailable = updateAvailable,
                     applyingUpdate = applyingUpdate,
-                    onApplyUpdate = { scope.launch { applyConfigUpdate() } }
+                    checkingUpdate = checkingUpdate,
+                    onCheckUpdate = onCheckUpdate,
+                    onApplyUpdate = onApplyUpdate
                 )
             }
         }
