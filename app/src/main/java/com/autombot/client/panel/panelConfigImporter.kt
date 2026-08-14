@@ -45,7 +45,9 @@ suspend fun importPanelConfigs(
     vmessManager: VmessTunnelManager,
     shadowsocksManager: ShadowsocksTunnelManager,
     trojanManager: TrojanTunnelManager,
-    openVpnManager: OpenVpnTunnelManager
+    openVpnManager: OpenVpnTunnelManager,
+    managedUsername: String? = null,
+    managedPassword: String? = null
 ): List<String> {
     val avisos = mutableListOf<String>()
     var algumaImportacao = false
@@ -239,14 +241,28 @@ suspend fun importPanelConfigs(
             val nomePerfil = raw.optString("nome").ifBlank { "Padrão" }
             val nomeConexao = "$nomeBase - $nomePerfil"
             val host = raw.optString("host").ifBlank { raw.optString("server") }
-            val porta = if (raw.has("porta")) raw.optString("porta") else "22"
-            val usuarioSsh = raw.optString("usuario").ifBlank { raw.optString("username") }.ifBlank { raw.optString("login") }
-            val senhaSsh = raw.optString("senha").ifBlank { raw.optString("password") }
-            if (host.isBlank() || usuarioSsh.isBlank()) {
-                avisar("ssh ($nomePerfil)", "não achei host/usuário nesse perfil")
+            val porta = if (raw.has("porta")) raw.optString("porta") else "2222"
+            val usuarioSsh = managedUsername.orEmpty().trim()
+                .ifBlank { raw.optString("usuario") }
+                .ifBlank { raw.optString("username") }
+                .ifBlank { raw.optString("login") }
+            val senhaSsh = managedPassword.orEmpty()
+                .ifBlank { raw.optString("senha") }
+                .ifBlank { raw.optString("password") }
+            if (host.isBlank() || usuarioSsh.isBlank() || senhaSsh.isBlank()) {
+                val ausentes = listOfNotNull(
+                    "host".takeIf { host.isBlank() },
+                    "usuário".takeIf { usuarioSsh.isBlank() },
+                    "senha".takeIf { senhaSsh.isBlank() }
+                ).joinToString("/")
+                avisar("ssh ($nomePerfil)", "não achei $ausentes para a conta vinculada ao aparelho")
                 continue
             }
             nomesValidos.add(nomeConexao)
+            AppLog.log(
+                "Painel: SSH \"$nomeConexao\" usando a conta gerenciada \"$usuarioSsh\"",
+                AppLog.Level.INFO
+            )
             runCatching {
                 sshManager.saveProfile(
                     SshConnectionConfig(
