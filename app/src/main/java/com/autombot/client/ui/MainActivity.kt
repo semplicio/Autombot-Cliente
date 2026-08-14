@@ -272,7 +272,7 @@ private sealed class Screen {
 }
 
 private const val TRIAL_DURATION_SECONDS = 2 * 60 * 60L
-private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 * 1000L
+private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 30 * 1000L
 
 private fun managedStatusAllowsConnection(status: String): Boolean {
     val normalized = status.trim().lowercase()
@@ -296,6 +296,7 @@ private fun AppRoot(
 ) {
     val context = LocalContext.current
     val appPrefs = remember { context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE) }
+    val rootScope = rememberCoroutineScope()
 
     var screen by remember { mutableStateOf<Screen>(Screen.Splash) }
 
@@ -307,6 +308,12 @@ private fun AppRoot(
     }
     var trialSecondsRemaining by remember { mutableStateOf<Long?>(null) }
     var isManagedMode by remember { mutableStateOf(appPrefs.getBoolean("managed_mode", false)) }
+    var managedUpdateAvailable by remember {
+        mutableStateOf(appPrefs.getBoolean("managed_config_update_available", false))
+    }
+    var managedApplyingUpdate by remember { mutableStateOf(false) }
+    var managedCheckingUpdate by remember { mutableStateOf(false) }
+    var managedSyncInProgress by remember { mutableStateOf(false) }
     val manualConnections = remember { mutableStateListOf<ManualConnectionConfig>() }
 
     LaunchedEffect(trialSecondsRemaining != null) {
@@ -324,9 +331,144 @@ private fun AppRoot(
     fun resetToChoice() {
         trialSecondsRemaining = null
         isManagedMode = false
+        managedUpdateAvailable = false
         manualConnections.clear()
-        appPrefs.edit().putBoolean("onboarded", false).apply()
+        appPrefs.edit()
+            .putBoolean("onboarded", false)
+            .putBoolean("managed_config_update_available", false)
+            .apply()
         screen = Screen.Choice
+    }
+
+    suspend fun performManagedConfigImport(trigger: String): Boolean {
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
+        val cliente = PanelWebhookClient(baseUrlGerenciada)
+        val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
+        val avisos = importPanelConfigs(
+            context = context,
+            response = respostaConfigs,
+            wireGuardManager = wireGuardManager,
+            sshManager = sshManager,
+            vlessManager = vlessManager,
+            vmessManager = vmessManager,
+            shadowsocksManager = shadowsocksManager,
+            trojanManager = trojanManager,
+            openVpnManager = openVpnManager
+        )
+        avisos.forEach {
+            com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
+        }
+
+        val versaoNova = cliente.fetchConfigVersion(usuarioGerenciado)
+        appPrefs.edit()
+            .putString("managed_config_versao", versaoNova)
+            .putLong("managed_config_last_check_ms", System.currentTimeMillis())
+            .putBoolean("managed_config_update_available", false)
+            .apply()
+        managedUpdateAvailable = false
+        com.autombot.client.util.AppLog.log(
+            "Configurações do painel aplicadas $trigger; os protocolos usarão os novos dados na próxima conexão",
+            com.autombot.client.util.AppLog.Level.SUCCESS
+        )
+        return true
+    }
+
+    suspend fun applyManagedConfigUpdate(trigger: String = "manualmente"): Boolean {
+        if (!isManagedMode || managedSyncInProgress) return false
+        managedSyncInProgress = true
+        managedApplyingUpdate = true
+        return try {
+            performManagedConfigImport(trigger)
+        } catch (e: Exception) {
+            com.autombot.client.util.AppLog.log(
+                "Falha ao aplicar atualização de config: ${e.message}",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
+            false
+        } finally {
+            managedApplyingUpdate = false
+            managedSyncInProgress = false
+        }
+    }
+
+    suspend fun checkManagedConfigUpdate(
+        force: Boolean = false,
+        autoApply: Boolean = true
+    ): Boolean {
+        if (!isManagedMode || managedSyncInProgress) return false
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
+        val agora = System.currentTimeMillis()
+        val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
+        val decorrido = agora - ultimaChecagem
+        if (!force && ultimaChecagem > 0L && decorrido >= 0L &&
+            decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS
+        ) {
+            return true
+        }
+
+        managedSyncInProgress = true
+        managedCheckingUpdate = true
+        return try {
+            runCatching {
+                SponsoredDomainSync.refresh(
+                    context = context,
+                    vlessManager = vlessManager,
+                    vmessManager = vmessManager,
+                    trojanManager = trojanManager
+                )
+            }.onFailure {
+                com.autombot.client.util.AppLog.log(
+                    "Falha ao sincronizar domínio patrocinado: ${it.message}",
+                    com.autombot.client.util.AppLog.Level.ERROR
+                )
+            }
+
+            val cliente = PanelWebhookClient(baseUrlGerenciada)
+            val versaoConhecida = appPrefs.getString("managed_config_versao", "").orEmpty()
+            val versaoAtual = cliente.fetchConfigVersion(usuarioGerenciado)
+            if (versaoAtual.isBlank()) return false
+
+            val existeAtualizacao = versaoAtual != versaoConhecida
+            managedUpdateAvailable = existeAtualizacao
+            appPrefs.edit()
+                .putLong("managed_config_last_check_ms", System.currentTimeMillis())
+                .putBoolean("managed_config_update_available", existeAtualizacao)
+                .apply()
+
+            if (!existeAtualizacao) return true
+
+            com.autombot.client.util.AppLog.log(
+                "Alteração detectada no painel; baixando e reconfigurando os protocolos automaticamente",
+                com.autombot.client.util.AppLog.Level.INFO
+            )
+            if (autoApply) {
+                managedApplyingUpdate = true
+                performManagedConfigImport("automaticamente")
+            } else {
+                true
+            }
+        } catch (e: Exception) {
+            com.autombot.client.util.AppLog.log(
+                "Falha ao verificar atualização de config: ${e.message}",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
+            false
+        } finally {
+            managedApplyingUpdate = false
+            managedCheckingUpdate = false
+            managedSyncInProgress = false
+        }
+    }
+
+    LaunchedEffect(isManagedMode) {
+        if (!isManagedMode) return@LaunchedEffect
+        checkManagedConfigUpdate(force = true, autoApply = true)
+        while (true) {
+            delay(MANAGED_CONFIG_CHECK_INTERVAL_MS)
+            checkManagedConfigUpdate(force = true, autoApply = true)
+        }
     }
 
     val sshConnectionsForRouting by sshManager.connections.collectAsState()
@@ -613,6 +755,19 @@ private fun AppRoot(
             openVpnManager = openVpnManager,
             trialSecondsRemaining = trialSecondsRemaining,
             isManagedMode = isManagedMode,
+            updateAvailable = managedUpdateAvailable,
+            applyingUpdate = managedApplyingUpdate,
+            checkingUpdate = managedCheckingUpdate,
+            onCheckUpdate = {
+                rootScope.launch {
+                    checkManagedConfigUpdate(force = true, autoApply = true)
+                }
+            },
+            onApplyUpdate = {
+                rootScope.launch {
+                    applyManagedConfigUpdate(trigger = "manualmente")
+                }
+            },
             onReset = ::resetToChoice,
             onRequestVpnPermission = onRequestVpnPermission,
             onStopSystemVpn = onStopSystemVpn,
@@ -641,6 +796,11 @@ private fun MainShell(
     openVpnManager: com.autombot.client.protocols.openvpn.OpenVpnTunnelManager,
     trialSecondsRemaining: Long?,
     isManagedMode: Boolean,
+    updateAvailable: Boolean,
+    applyingUpdate: Boolean,
+    checkingUpdate: Boolean,
+    onCheckUpdate: () -> Unit,
+    onApplyUpdate: () -> Unit,
     onReset: () -> Unit,
     onRequestVpnPermission: (onGranted: () -> Unit) -> Unit,
     onStopSystemVpn: () -> Unit,
@@ -660,11 +820,6 @@ private fun MainShell(
     val appPrefs = remember { context.getSharedPreferences("autombot_app", android.content.Context.MODE_PRIVATE) }
     val modernManager = remember(context) { com.autombot.client.protocols.modern.ModernProtocolManagerProvider.get(context) }
 
-    var updateAvailable by remember {
-        mutableStateOf(appPrefs.getBoolean("managed_config_update_available", false))
-    }
-    var applyingUpdate by remember { mutableStateOf(false) }
-    var checkingUpdate by remember { mutableStateOf(false) }
     var lastProtocolId by remember { mutableStateOf(appPrefs.getString("dashboard_last_protocol", "").orEmpty()) }
     var lastConnectionName by remember { mutableStateOf(appPrefs.getString("dashboard_last_connection", "").orEmpty()) }
     var managedAccountUser by remember { mutableStateOf(appPrefs.getString("managed_usuario", "").orEmpty()) }
@@ -700,101 +855,6 @@ private fun MainShell(
                 com.autombot.client.util.AppLog.Level.ERROR
             )
         }.isSuccess
-    }
-
-    suspend fun applyConfigUpdate(): Boolean {
-        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
-        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
-        applyingUpdate = true
-        try {
-            val cliente = PanelWebhookClient(baseUrlGerenciada)
-            val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
-
-            // Atualizações de rota/porta/perfil continuam chegando mesmo com a
-            // conta expirada. A trava é aplicada na hora de abrir/conectar.
-            importPanelConfigs(
-                context = context,
-                response = respostaConfigs,
-                wireGuardManager = wireGuardManager,
-                sshManager = sshManager,
-                vlessManager = vlessManager,
-                vmessManager = vmessManager,
-                shadowsocksManager = shadowsocksManager,
-                trojanManager = trojanManager,
-                openVpnManager = openVpnManager
-            )
-            val versaoNova = runCatching { cliente.fetchConfigVersion(usuarioGerenciado) }.getOrNull()
-            val editor = appPrefs.edit()
-                .putLong("managed_config_last_check_ms", System.currentTimeMillis())
-                .putBoolean("managed_config_update_available", false)
-            if (!versaoNova.isNullOrBlank()) editor.putString("managed_config_versao", versaoNova)
-            editor.apply()
-            updateAvailable = false
-            refreshManagedAccountStatus()
-            return true
-        } catch (e: Exception) {
-            com.autombot.client.util.AppLog.log("Falha ao aplicar atualização de config: ${e.message}", com.autombot.client.util.AppLog.Level.ERROR)
-            return false
-        } finally {
-            applyingUpdate = false
-        }
-    }
-
-    suspend fun checkForConfigUpdate(force: Boolean = false): Boolean {
-        if (!isManagedMode) return false
-        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
-        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
-        val versaoConhecida = appPrefs.getString("managed_config_versao", "")
-        val agora = System.currentTimeMillis()
-        val ultimaChecagem = appPrefs.getLong("managed_config_last_check_ms", 0L)
-        val decorrido = agora - ultimaChecagem
-        if (!force && ultimaChecagem > 0L && decorrido >= 0L && decorrido < MANAGED_CONFIG_CHECK_INTERVAL_MS) return false
-
-        if (force) checkingUpdate = true
-        return try {
-            runCatching {
-                SponsoredDomainSync.refresh(
-                    context = context,
-                    vlessManager = vlessManager,
-                    vmessManager = vmessManager,
-                    trojanManager = trojanManager
-                )
-            }.onFailure {
-                com.autombot.client.util.AppLog.log(
-                    "Falha ao sincronizar domínio patrocinado: ${it.message}",
-                    com.autombot.client.util.AppLog.Level.ERROR
-                )
-            }
-
-            val versaoAtual = PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
-            if (versaoAtual.isBlank()) return false
-            val existeAtualizacao = versaoAtual != versaoConhecida
-            updateAvailable = existeAtualizacao
-            appPrefs.edit()
-                .putLong("managed_config_last_check_ms", System.currentTimeMillis())
-                .putBoolean("managed_config_update_available", existeAtualizacao)
-                .apply()
-            true
-        } catch (e: Exception) {
-            com.autombot.client.util.AppLog.log(
-                "Falha ao verificar atualização de config: ${e.message}",
-                com.autombot.client.util.AppLog.Level.ERROR
-            )
-            false
-        } finally {
-            if (force) checkingUpdate = false
-        }
-    }
-
-    DisposableEffect(isManagedMode) {
-        val lifecycleOwner = context as? androidx.lifecycle.LifecycleOwner
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && isManagedMode) {
-                scope.launch { checkForConfigUpdate(force = true) }
-            }
-        }
-        lifecycleOwner?.lifecycle?.addObserver(observer)
-        onDispose { lifecycleOwner?.lifecycle?.removeObserver(observer) }
     }
 
     ModalNavigationDrawer(
@@ -1019,14 +1079,6 @@ private fun MainShell(
 
             LaunchedEffect(Unit) {
                 refreshManagedAccountStatus()
-                val knownVersion = appPrefs.getString("managed_config_versao", "").orEmpty()
-                if (isManagedMode && knownVersion.isBlank()) {
-                    // Recupera instalações feitas pela versão anterior, que não
-                    // importava protocolos quando a conta estava expirada.
-                    applyConfigUpdate()
-                } else {
-                    checkForConfigUpdate(force = true)
-                }
             }
 
             Box(modifier = Modifier.padding(padding)) {
@@ -1045,8 +1097,8 @@ private fun MainShell(
                     updateAvailable = updateAvailable,
                     applyingUpdate = applyingUpdate,
                     checkingUpdate = checkingUpdate,
-                    onCheckUpdate = { scope.launch { checkForConfigUpdate(force = true) } },
-                    onApplyUpdate = { scope.launch { applyConfigUpdate() } }
+                    onCheckUpdate = onCheckUpdate,
+                    onApplyUpdate = onApplyUpdate
                 )
             }
         }
