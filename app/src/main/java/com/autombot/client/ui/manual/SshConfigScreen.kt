@@ -44,7 +44,7 @@ fun SshConfigScreen(
 ) {
     var name by remember { mutableStateOf(initialConfig?.connectionName ?: "Minha Conexão SSH") }
     var server by remember { mutableStateOf(initialConfig?.server ?: "") }
-    var port by remember { mutableStateOf(initialConfig?.port ?: "22") }
+    var port by remember { mutableStateOf(initialConfig?.port ?: "2222") }
     var username by remember { mutableStateOf(initialConfig?.username ?: "") }
     var authMethod by remember { mutableStateOf(initialConfig?.authMethod ?: SshAuthMethod.PASSWORD) }
     var password by remember { mutableStateOf(initialConfig?.password ?: "") }
@@ -63,6 +63,7 @@ fun SshConfigScreen(
 
     var useSslTls by remember { mutableStateOf(initialConfig?.useSslTls ?: false) }
     var sni by remember { mutableStateOf(initialConfig?.sni ?: "") }
+    var tlsCertificateSha256 by remember { mutableStateOf(initialConfig?.tlsCertificateSha256 ?: "") }
 
     var useWebSocket by remember { mutableStateOf(initialConfig?.useWebSocket ?: false) }
     var wsHost by remember { mutableStateOf(initialConfig?.wsHost ?: "") }
@@ -172,6 +173,18 @@ fun SshConfigScreen(
             item {
                 ExpandableLayer(title = "SSL/TLS", subtitle = "Envolve a conexão em TLS, com SNI de fachada", enabled = useSslTls, onToggle = { useSslTls = it }) {
                     LabeledField("SNI (domínio de fachada)", sni, placeholder = "www.exemplo.com") { sni = it }
+                    Spacer(Modifier.height(8.dp))
+                    LabeledField(
+                        "Impressão digital SHA-256 do certificado (opcional)",
+                        tlsCertificateSha256,
+                        placeholder = "AA:BB:CC:..."
+                    ) { tlsCertificateSha256 = it }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Deixe vazio para certificados públicos. Em certificado autoassinado, informe o SHA-256 exato para fixá-lo com segurança.",
+                        color = C.TextDim,
+                        fontSize = 10.sp
+                    )
                 }
             }
 
@@ -250,7 +263,7 @@ fun SshConfigScreen(
                             SshConnectionConfig(
                                 connectionName = name.ifBlank { "Minha Conexão SSH" },
                                 server = server,
-                                port = port.ifBlank { "22" },
+                                port = port.ifBlank { "2222" },
                                 username = username,
                                 authMethod = authMethod,
                                 password = password,
@@ -268,6 +281,7 @@ fun SshConfigScreen(
                                 payload = payload,
                                 useSslTls = useSslTls,
                                 sni = sni,
+                                tlsCertificateSha256 = tlsCertificateSha256,
                                 useWebSocket = useWebSocket,
                                 wsHost = wsHost,
                                 wsPath = wsPath,

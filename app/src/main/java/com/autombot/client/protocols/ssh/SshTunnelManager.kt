@@ -30,6 +30,10 @@ import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.security.KeyStore
+import java.security.MessageDigest
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
@@ -44,6 +48,9 @@ import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLParameters
 import javax.net.ssl.SSLSocket
+import javax.net.ssl.TrustManager
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
 
 /**
  * Nucleo real da conexao SSH (sshj + servidor SOCKS5 proprio).
@@ -718,6 +725,68 @@ class SshTunnelManager(context: Context) {
                 }
                 throw lastError ?: java.io.IOException("Não foi possível conectar a $host:$port")
             }
+
+            fun normalizeCertificateSha256(value: String): String {
+                val withoutLabel = value.trim()
+                    .substringAfterLast('=')
+                    .replace(Regex("(?i)^SHA-?256\\s*[:/]?\\s*"), "")
+                return withoutLabel
+                    .filter { it.isDigit() || it.uppercaseChar() in 'A'..'F' }
+                    .uppercase()
+            }
+
+            fun certificateSha256(certificate: X509Certificate): String =
+                MessageDigest.getInstance("SHA-256")
+                    .digest(certificate.encoded)
+                    .joinToString("") { "%02X".format(it.toInt() and 0xFF) }
+
+            fun pinnedCertificateTrustManager(expectedSha256: String): X509TrustManager =
+                object : X509TrustManager {
+                    override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+
+                    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                        throw CertificateException("Certificado de cliente não é aceito neste transporte")
+                    }
+
+                    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                        val certificate = chain?.firstOrNull()
+                            ?: throw CertificateException("Servidor TLS não enviou certificado")
+                        certificate.checkValidity()
+                        val actualSha256 = certificateSha256(certificate)
+                        if (actualSha256 != expectedSha256) {
+                            throw CertificateException(
+                                "Certificado TLS diferente do fixado. Esperado $expectedSha256, recebido $actualSha256"
+                            )
+                        }
+                    }
+                }
+
+            fun platformTrustManagerWithFingerprint(): X509TrustManager {
+                val factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+                factory.init(null as KeyStore?)
+                val delegate = factory.trustManagers
+                    .filterIsInstance<X509TrustManager>()
+                    .firstOrNull()
+                    ?: throw CertificateException("Android não forneceu um TrustManager TLS padrão")
+                return object : X509TrustManager {
+                    override fun getAcceptedIssuers(): Array<X509Certificate> = delegate.acceptedIssuers
+
+                    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) =
+                        delegate.checkClientTrusted(chain, authType)
+
+                    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                        try {
+                            delegate.checkServerTrusted(chain, authType)
+                        } catch (error: CertificateException) {
+                            val fingerprint = chain?.firstOrNull()?.let(::certificateSha256) ?: "indisponível"
+                            throw CertificateException(
+                                "${error.message}. SHA-256 do certificado recebido: $fingerprint",
+                                error
+                            )
+                        }
+                    }
+                }
+            }
         }
         private var delegate: Socket? = null
         private var delegateInput: InputStream? = null
@@ -790,7 +859,25 @@ class SshTunnelManager(context: Context) {
             // do tunel TLS, criptografado) -> handshake SSH.
             if (config.useSslTls) {
                 val sslContext = SSLContext.getInstance("TLS")
-                sslContext.init(null, null, null)
+                val certificatePin = normalizeCertificateSha256(config.tlsCertificateSha256)
+                if (config.tlsCertificateSha256.isNotBlank() && certificatePin.length != 64) {
+                    throw java.io.IOException(
+                        "Impressão digital SHA-256 inválida: informe exatamente 64 caracteres hexadecimais"
+                    )
+                }
+                if (certificatePin.isNotBlank()) {
+                    sslContext.init(
+                        null,
+                        arrayOf<TrustManager>(pinnedCertificateTrustManager(certificatePin)),
+                        null
+                    )
+                } else {
+                    sslContext.init(
+                        null,
+                        arrayOf<TrustManager>(platformTrustManagerWithFingerprint()),
+                        null
+                    )
+                }
                 val sslSocket = sslContext.socketFactory.createSocket(socket, host, port, true) as SSLSocket
                 if (config.sni.isNotBlank()) {
                     val params: SSLParameters = sslSocket.sslParameters
@@ -798,6 +885,12 @@ class SshTunnelManager(context: Context) {
                     sslSocket.sslParameters = params
                 }
                 sslSocket.startHandshake()
+                if (certificatePin.isNotBlank()) {
+                    AppLog.log(
+                        "SSH: certificado TLS validado pela impressão digital SHA-256 configurada",
+                        AppLog.Level.SUCCESS
+                    )
+                }
                 socket = sslSocket
             }
 
