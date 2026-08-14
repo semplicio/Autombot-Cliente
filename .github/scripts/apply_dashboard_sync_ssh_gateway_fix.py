@@ -197,7 +197,7 @@ replace_once(
 
                 val headerText = header.toString(Charsets.ISO_8859_1.name())
                 val statusLine = headerText.lineSequence().firstOrNull()?.trim().orEmpty()
-                val statusCode = statusLine.split(Regex("\\s+")).getOrNull(1)?.toIntOrNull()
+                val statusCode = statusLine.split(Regex("\\\\s+")).getOrNull(1)?.toIntOrNull()
                     ?: throw java.io.IOException("Resposta HTTP inválida do gateway: $statusLine")
                 if (statusCode != 101 && statusCode !in 200..299) {
                     throw java.io.IOException("Gateway recusou o Payload: $statusLine")
