@@ -70,6 +70,9 @@ fun DashboardScreen(
     quickConnection: DashboardQuickConnection? = null,
     onToggleQuickConnection: () -> Unit = {},
     onOpenQuickConnection: () -> Unit = {},
+    managedAccountUser: String? = null,
+    managedAccountStatus: String? = null,
+    managedAccountExpiry: String? = null,
     updateAvailable: Boolean = false,
     applyingUpdate: Boolean = false,
     onApplyUpdate: () -> Unit = {}
@@ -82,11 +85,18 @@ fun DashboardScreen(
     val managedBaseUrl = remember(managedMode) {
         if (managedMode) prefs.getString("managed_base_url", "").orEmpty() else ""
     }
-    val managedUser = if (managedMode) prefs.getString("managed_usuario", "").orEmpty() else ""
-    val managedStatus = if (managedMode) prefs.getString("managed_account_status", "").orEmpty() else ""
-    val managedExpiry = if (managedMode) prefs.getString("managed_expira_em", "").orEmpty() else ""
-    val accountInactive = managedMode && managedStatus.isNotBlank() &&
-        managedStatus.lowercase() !in setOf("ativo", "active", "ok")
+    val managedUser = if (managedMode) {
+        managedAccountUser ?: prefs.getString("managed_usuario", "").orEmpty()
+    } else ""
+    val managedStatus = if (managedMode) {
+        managedAccountStatus ?: prefs.getString("managed_account_status", "").orEmpty()
+    } else ""
+    val managedExpiry = if (managedMode) {
+        managedAccountExpiry ?: prefs.getString("managed_expira_em", "").orEmpty()
+    } else ""
+    val normalizedStatus = managedStatus.trim().lowercase()
+    val accountInactive = managedMode && normalizedStatus.isNotBlank() &&
+        normalizedStatus !in setOf("ativo", "active", "ok")
 
     var promotions by remember(managedBaseUrl) { mutableStateOf<List<PanelPromotion>>(emptyList()) }
 
@@ -145,7 +155,12 @@ fun DashboardScreen(
         if (accountInactive) {
             Spacer(Modifier.height(14.dp))
             AutomBotCard(modifier = Modifier.fillMaxWidth(), accent = C.Red) {
-                Text("Conta expirada ou inativa", color = C.Red, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    if (normalizedStatus == "bloqueado") "Conta bloqueada" else "Conta expirada ou inativa",
+                    color = C.Red,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
                 Spacer(Modifier.height(4.dp))
                 if (managedUser.isNotBlank()) {
                     Text("Conta: $managedUser", color = C.Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -153,7 +168,11 @@ fun DashboardScreen(
                 if (managedExpiry.isNotBlank()) {
                     Text("Validade informada pelo servidor: $managedExpiry", color = C.TextDim, fontSize = 10.sp)
                 }
-                Text("O aparelho continua vinculado a esta conta. Renove o acesso para voltar a conectar.", color = C.TextDim, fontSize = 10.sp)
+                Text(
+                    "As configurações continuam sincronizadas neste aparelho, mas novas conexões ficam bloqueadas até a conta voltar a ficar ativa.",
+                    color = C.TextDim,
+                    fontSize = 10.sp
+                )
                 Spacer(Modifier.height(10.dp))
                 AutomBotGradientButton(
                     text = "Renovar agora",
@@ -271,7 +290,7 @@ fun DashboardScreen(
                 connection = quick,
                 onToggle = onToggleQuickConnection,
                 onOpen = onOpenQuickConnection,
-                enabled = !accountInactive
+                enabled = !accountInactive || quick.connected
             )
         }
 
@@ -336,6 +355,7 @@ private fun QuickConnectionCard(
             text = when {
                 connection.busy -> connection.statusLabel
                 connection.connected -> "Desconectar"
+                !enabled -> "Conta inativa"
                 else -> "Conectar"
             },
             onClick = onToggle,
