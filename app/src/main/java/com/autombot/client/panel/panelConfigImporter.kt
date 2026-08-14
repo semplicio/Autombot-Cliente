@@ -270,6 +270,9 @@ suspend fun importPanelConfigs(
                         payload = raw.optString("payload"),
                         useSslTls = raw.optBoolean("use_ssl_tls", false),
                         sni = raw.optString("sni"),
+                        tlsCertificateSha256 = raw.optString("tls_certificate_sha256")
+                            .ifBlank { raw.optString("certificate_sha256") }
+                            .ifBlank { raw.optString("tls_cert_sha256") },
                         useWebSocket = raw.optBoolean("use_websocket", false),
                         wsHost = raw.optString("ws_host"),
                         wsPath = raw.optString("ws_path").ifBlank { "/" },
