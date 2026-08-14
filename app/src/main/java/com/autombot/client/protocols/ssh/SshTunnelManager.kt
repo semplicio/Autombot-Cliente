@@ -22,11 +22,14 @@ import java.io.FilterOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.ByteArrayOutputStream
+import java.io.PushbackInputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
@@ -318,7 +321,15 @@ class SshTunnelManager(context: Context) {
                     closeChannelsForClient(failedClient)
                     runCatching { failedClient.disconnect() }
                 }
-                markError(connectionName, e.message ?: e.javaClass.simpleName)
+                val rawMessage = e.message ?: e.javaClass.simpleName
+                val userMessage = if (
+                    config.useProxy &&
+                    config.proxyType == ProxyType.HTTP &&
+                    rawMessage.contains("Invalid Proxy", ignoreCase = true)
+                ) {
+                    "Proxy HTTP CONNECT recusado. Se o endpoint recebe o Payload diretamente, use 'Gateway Payload' em vez de HTTP CONNECT."
+                } else rawMessage
+                markError(connectionName, userMessage)
             }
         }
     }
@@ -709,6 +720,7 @@ class SshTunnelManager(context: Context) {
             }
         }
         private var delegate: Socket? = null
+        private var delegateInput: InputStream? = null
 
         override fun connect(endpoint: java.net.SocketAddress) = connect(endpoint, 0)
 
@@ -727,6 +739,21 @@ class SshTunnelManager(context: Context) {
                 val localSocket = Socket()
                 localSocket.connect(InetSocketAddress("127.0.0.1", slowDnsLocalPort), effectiveTimeout)
                 localSocket
+            } else if (config.useProxy && config.proxyType == ProxyType.PAYLOAD_GATEWAY) {
+                val gatewayHost = config.proxyHost.trim()
+                val gatewayPort = config.proxyPort.toIntOrNull()
+                    ?: throw java.io.IOException("Porta do Gateway Payload inválida")
+                if (gatewayHost.isBlank()) {
+                    throw java.io.IOException("Host do Gateway Payload não informado")
+                }
+                if (!config.usePayload || config.payload.isBlank()) {
+                    throw java.io.IOException("Gateway Payload exige a camada Payload ativada")
+                }
+                AppLog.log(
+                    "SSH: abrindo Gateway Payload em $gatewayHost:$gatewayPort para o SSH lógico $host:$port (sem HTTP CONNECT)",
+                    AppLog.Level.INFO
+                )
+                connectPreferringIPv4(gatewayHost, gatewayPort, effectiveTimeout)
             } else if (config.useProxy) {
                 val proxyPort = config.proxyPort.toIntOrNull() ?: 1080
                 val proxyType = if (config.proxyType == ProxyType.SOCKS5) Proxy.Type.SOCKS else Proxy.Type.HTTP
@@ -734,8 +761,8 @@ class SshTunnelManager(context: Context) {
                 if (!com.autombot.client.core.AutomBotVpnService.protectSocket(proxySocket)) {
                     throw java.io.IOException("Não consegui isentar a conexão de proxy SSH da VPN (protect() falhou)")
                 }
-                // Com proxy, quem resolve o host de destino e o proprio proxy — so
-                // conectamos no endereco do proxy aqui mesmo, sem fallback de IP.
+                // SOCKS5/HTTP são proxies tradicionais. HTTP usa CONNECT e precisa
+                // concluir esse handshake antes da camada Payload.
                 proxySocket.connect(InetSocketAddress(host, port), effectiveTimeout)
                 proxySocket
             } else {
@@ -774,15 +801,95 @@ class SshTunnelManager(context: Context) {
                 socket = sslSocket
             }
 
+            var preparedInput: InputStream? = null
             if (config.usePayload && config.payload.isNotBlank()) {
                 val payloadText = config.payload
                     .replace("[crlf]", "\r\n")
                     .replace("[host]", config.server)
                     .replace("[port]", config.port)
+                    .replace("[proxy_host]", config.proxyHost)
+                    .replace("[proxy_port]", config.proxyPort)
                 socket.getOutputStream().apply { write(payloadText.toByteArray(Charsets.UTF_8)); flush() }
+
+                // Alguns gateways respondem 101/2xx antes de liberar o fluxo SSH.
+                // Consome somente o cabeçalho HTTP do gateway e preserva o banner SSH
+                // seguinte. Se a resposta já começar com SSH, os bytes são devolvidos.
+                if (looksLikeHttpPayload(payloadText)) {
+                    preparedInput = consumeOptionalHttpGatewayPreface(socket)
+                }
             }
 
             delegate = socket
+            delegateInput = preparedInput ?: socket.getInputStream()
+        }
+
+        private fun looksLikeHttpPayload(payload: String): Boolean {
+            val firstLine = payload.lineSequence().firstOrNull()?.trim().orEmpty().uppercase()
+            return firstLine.startsWith("GET ") ||
+                firstLine.startsWith("POST ") ||
+                firstLine.startsWith("HEAD ") ||
+                firstLine.startsWith("CONNECT ") ||
+                firstLine.startsWith("OPTIONS ")
+        }
+
+        private fun consumeOptionalHttpGatewayPreface(socket: Socket): InputStream {
+            val input = PushbackInputStream(socket.getInputStream(), 8)
+            val previousTimeout = runCatching { socket.soTimeout }.getOrDefault(0)
+            val prefix = ByteArray(5)
+            var count = 0
+            var httpDetected = false
+            try {
+                socket.soTimeout = 1_500
+                while (count < prefix.size) {
+                    val read = input.read(prefix, count, prefix.size - count)
+                    if (read < 0) break
+                    count += read
+                }
+                val start = String(prefix, 0, count, Charsets.US_ASCII)
+                if (count < 5 || start != "HTTP/") {
+                    if (count > 0) input.unread(prefix, 0, count)
+                    return input
+                }
+                httpDetected = true
+
+                val header = ByteArrayOutputStream()
+                header.write(prefix, 0, count)
+                val marker = byteArrayOf(13, 10, 13, 10)
+                var markerIndex = 0
+                while (header.size() < 32 * 1024 && markerIndex < marker.size) {
+                    val value = input.read()
+                    if (value < 0) break
+                    header.write(value)
+                    markerIndex = if (value == marker[markerIndex].toInt()) {
+                        markerIndex + 1
+                    } else if (value == marker[0].toInt()) {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                if (markerIndex != marker.size) {
+                    throw java.io.IOException("Resposta HTTP do gateway incompleta")
+                }
+
+                val headerText = header.toString(Charsets.ISO_8859_1.name())
+                val statusLine = headerText.lineSequence().firstOrNull()?.trim().orEmpty()
+                val statusCode = statusLine.split(Regex("\\s+")).getOrNull(1)?.toIntOrNull()
+                    ?: throw java.io.IOException("Resposta HTTP inválida do gateway: $statusLine")
+                if (statusCode != 101 && statusCode !in 200..299) {
+                    throw java.io.IOException("Gateway recusou o Payload: $statusLine")
+                }
+                AppLog.log("SSH: gateway aceitou o Payload ($statusLine)", AppLog.Level.SUCCESS)
+                return input
+            } catch (e: SocketTimeoutException) {
+                if (httpDetected) {
+                    throw java.io.IOException("Timeout aguardando o cabeçalho HTTP completo do gateway", e)
+                }
+                if (count > 0) input.unread(prefix, 0, count)
+                return input
+            } finally {
+                runCatching { socket.soTimeout = previousTimeout }
+            }
         }
 
         private fun tuneTransportSocket(socket: Socket) {
@@ -792,7 +899,7 @@ class SshTunnelManager(context: Context) {
             runCatching { socket.receiveBufferSize = 256 * 1024 }
         }
 
-        override fun getInputStream() = delegate?.getInputStream() ?: throw java.io.IOException("Socket não conectado")
+        override fun getInputStream() = delegateInput ?: delegate?.getInputStream() ?: throw java.io.IOException("Socket não conectado")
         override fun getOutputStream() = delegate?.getOutputStream() ?: throw java.io.IOException("Socket não conectado")
         override fun isConnected(): Boolean = delegate?.isConnected ?: false
         override fun isClosed(): Boolean = delegate?.isClosed ?: false

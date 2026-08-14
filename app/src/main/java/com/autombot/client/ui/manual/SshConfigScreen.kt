@@ -126,16 +126,34 @@ fun SshConfigScreen(
             }
 
             item {
-                ExpandableLayer(title = "Proxy", subtitle = "SOCKS5 ou HTTP antes do servidor SSH", enabled = useProxy, onToggle = { useProxy = it }) {
+                ExpandableLayer(title = "Proxy / Gateway", subtitle = "SOCKS5, HTTP CONNECT ou gateway que recebe Payload direto", enabled = useProxy, onToggle = { useProxy = it }) {
                     SegmentedChoice(options = ProxyType.entries, selected = proxyType, label = { it.label }, onSelect = { proxyType = it })
                     Spacer(Modifier.height(8.dp))
-                    LabeledField("Host do proxy", proxyHost, placeholder = "127.0.0.1") { proxyHost = it }
+                    if (proxyType == ProxyType.PAYLOAD_GATEWAY) {
+                        Text(
+                            "Abre TCP no gateway e envia a camada Payload diretamente, sem HTTP CONNECT. Servidor/Porta continuam representando o SSH lógico.",
+                            color = C.TextDim,
+                            fontSize = 10.sp
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    LabeledField(
+                        if (proxyType == ProxyType.PAYLOAD_GATEWAY) "Host do gateway" else "Host do proxy",
+                        proxyHost,
+                        placeholder = "127.0.0.1"
+                    ) { proxyHost = it }
                     Spacer(Modifier.height(8.dp))
-                    LabeledField("Porta do proxy", proxyPort, keyboardType = KeyboardType.Number) { proxyPort = it }
-                    Spacer(Modifier.height(8.dp))
-                    LabeledField("Usuário do proxy (opcional)", proxyUsername) { proxyUsername = it }
-                    Spacer(Modifier.height(8.dp))
-                    LabeledField("Senha do proxy (opcional)", proxyPassword, isPassword = true) { proxyPassword = it }
+                    LabeledField(
+                        if (proxyType == ProxyType.PAYLOAD_GATEWAY) "Porta do gateway" else "Porta do proxy",
+                        proxyPort,
+                        keyboardType = KeyboardType.Number
+                    ) { proxyPort = it }
+                    if (proxyType != ProxyType.PAYLOAD_GATEWAY) {
+                        Spacer(Modifier.height(8.dp))
+                        LabeledField("Usuário do proxy (opcional)", proxyUsername) { proxyUsername = it }
+                        Spacer(Modifier.height(8.dp))
+                        LabeledField("Senha do proxy (opcional)", proxyPassword, isPassword = true) { proxyPassword = it }
+                    }
                 }
             }
 

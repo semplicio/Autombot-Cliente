@@ -11,7 +11,7 @@ package com.autombot.client.protocols.ssh
  * combinacoes que eu nao previ, tipo Proxy + SSL + Payload todos juntos.
  *
  * A ordem de composicao das camadas no momento de conectar (ver SshTunnelManager.kt)
- * e: TCP (direto ou via proxy) -> payload cru (se ligado) -> TLS (se ligado) -> handshake SSH.
+ * e: TCP (direto, proxy ou gateway) -> TLS (se ligado) -> payload cru (se ligado) -> handshake SSH.
  */
 data class SshConnectionConfig(
     val connectionName: String,
@@ -81,7 +81,13 @@ enum class SshAuthMethod(val label: String) {
 
 enum class ProxyType(val label: String) {
     SOCKS5("SOCKS5"),
-    HTTP("HTTP")
+    HTTP("HTTP CONNECT"),
+    /**
+     * Gateway de entrada que não implementa HTTP CONNECT. O app abre TCP em
+     * proxyHost:proxyPort e envia a camada Payload diretamente como os primeiros
+     * bytes da sessão. server:port continuam sendo o destino SSH lógico.
+     */
+    PAYLOAD_GATEWAY("Gateway Payload")
 }
 
 enum class SlowDnsResolverMode(val label: String) {

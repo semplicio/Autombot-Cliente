@@ -266,7 +266,7 @@ class PanelWebhookClient(
      * contador no painel.
      */
     suspend fun fetchConfigVersion(usuario: String): String {
-        val url = "$base/api/v1/configs.php?usuario=" + URLEncoder.encode(usuario, "UTF-8")
+        val url = "$base/api/v1/configs.php?usuario=" + URLEncoder.encode(usuario, "UTF-8") + "&_cb=${System.currentTimeMillis()}"
         val json = requestJson("GET", url, null)
         val revisionPayload = JSONObject().apply {
             put("servidor", json.optString("servidor"))
@@ -292,7 +292,7 @@ class PanelWebhookClient(
      * achatar todos os campos.
      */
     suspend fun fetchConfigs(usuario: String): PanelConfigsResponse {
-        val url = "$base/api/v1/configs.php?usuario=" + URLEncoder.encode(usuario, "UTF-8")
+        val url = "$base/api/v1/configs.php?usuario=" + URLEncoder.encode(usuario, "UTF-8") + "&_cb=${System.currentTimeMillis()}"
         val json = requestJson("GET", url, null)
 
         val protocolosJson = json.optJSONObject("protocolos") ?: JSONObject()
@@ -417,7 +417,11 @@ class PanelWebhookClient(
     }
 
     private suspend fun requestJson(metodo: String, url: String, corpo: JSONObject?): JSONObject {
-        val builder = Request.Builder().url(url).addHeader("X-API-Key", apiKey)
+        val builder = Request.Builder()
+            .url(url)
+            .addHeader("X-API-Key", apiKey)
+            .header("Cache-Control", "no-cache, no-store, max-age=0")
+            .header("Pragma", "no-cache")
         when (metodo) {
             "GET" -> builder.get()
             "POST" -> builder.post((corpo ?: JSONObject()).toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
