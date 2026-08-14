@@ -6,6 +6,7 @@ on:
       - agent/fix-dashboard-sync-and-ssh-gateway
     paths:
       - .github/scripts/apply_dashboard_sync_ssh_gateway_fix.py
+      - .github/workflows/apply-dashboard-sync-ssh-gateway-fix.yml
 
 permissions:
   contents: write
@@ -28,12 +29,13 @@ jobs:
         run: python3 .github/scripts/apply_dashboard_sync_ssh_gateway_fix.py
 
       - name: Point Gradle to runner Android SDK
-        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+        run: |
+          printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > local.properties
+          sed -i '/^android\.aapt2FromMavenOverride=/d' gradle.properties
+          chmod +x gradlew
 
       - name: Compile Connect debug Kotlin
-        run: |
-          chmod +x gradlew
-          ./gradlew :app:compileDebugKotlin --stacktrace
+        run: ./gradlew :app:compileDebugKotlin --stacktrace
 
       - name: Commit validated client changes
         run: |
