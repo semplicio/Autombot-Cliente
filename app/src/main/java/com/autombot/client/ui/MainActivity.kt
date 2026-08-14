@@ -44,6 +44,7 @@ import com.autombot.client.ui.onboarding.DomainInputScreen
 import com.autombot.client.ui.onboarding.ProgressStep
 import com.autombot.client.ui.onboarding.ProgressStepsScreen
 import com.autombot.client.ui.onboarding.SplashScreen
+import com.autombot.client.panel.ManagedAccountStatusClient
 import com.autombot.client.panel.PanelException
 import com.autombot.client.panel.PanelWebhookClient
 import com.autombot.client.panel.SponsoredDomainSync
@@ -273,6 +274,11 @@ private sealed class Screen {
 private const val TRIAL_DURATION_SECONDS = 2 * 60 * 60L
 private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 60 * 60 * 1000L
 
+private fun managedStatusAllowsConnection(status: String): Boolean {
+    val normalized = status.trim().lowercase()
+    return normalized.isBlank() || normalized in setOf("ativo", "active", "ok")
+}
+
 @Composable
 private fun AppRoot(
     wireGuardManager: WireGuardManager,
@@ -419,34 +425,41 @@ private fun AppRoot(
                     ProgressStep("Sincronizando dados da conta") {
                         val conta = trialAccount ?: throw PanelException("Conta não foi localizada/criada corretamente")
                         val respostaConfigs = existingConfigs ?: panelClient.fetchConfigs(conta.usuario)
-                        val statusNormalizado = respostaConfigs.status.trim().lowercase()
-                        val contaAtiva = statusNormalizado.isBlank() || statusNormalizado in setOf("ativo", "active", "ok")
 
-                        if (contaAtiva) {
-                            val avisos = importPanelConfigs(
-                                context = context,
-                                response = respostaConfigs,
-                                wireGuardManager = wireGuardManager,
-                                sshManager = sshManager,
-                                vlessManager = vlessManager,
-                                vmessManager = vmessManager,
-                                shadowsocksManager = shadowsocksManager,
-                                trojanManager = trojanManager,
-                                openVpnManager = openVpnManager
-                            )
-                            avisos.forEach {
-                                com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
-                            }
-                        } else {
+                        // As configurações pertencem à conta e continuam sendo úteis
+                        // mesmo quando ela está expirada. A validade controla somente
+                        // a permissão de conectar, não a visibilidade/sincronização.
+                        val avisos = importPanelConfigs(
+                            context = context,
+                            response = respostaConfigs,
+                            wireGuardManager = wireGuardManager,
+                            sshManager = sshManager,
+                            vlessManager = vlessManager,
+                            vmessManager = vmessManager,
+                            shadowsocksManager = shadowsocksManager,
+                            trojanManager = trojanManager,
+                            openVpnManager = openVpnManager
+                        )
+                        avisos.forEach {
+                            com.autombot.client.util.AppLog.log(it, com.autombot.client.util.AppLog.Level.ERROR)
+                        }
+
+                        val estadoConta = runCatching {
+                            ManagedAccountStatusClient(current.domain).fetch(conta.usuario)
+                        }.getOrNull()
+                        val statusConta = estadoConta?.status ?: respostaConfigs.status
+                        val expiraConta = estadoConta?.expiresAt ?: respostaConfigs.expiraEm
+                        val contaAtiva = managedStatusAllowsConnection(statusConta)
+                        if (!contaAtiva) {
                             com.autombot.client.util.AppLog.log(
-                                "Conta ${conta.usuario} restaurada com status ${respostaConfigs.status}; conexões não serão liberadas até renovação",
+                                "Conta ${conta.usuario} restaurada com status $statusConta; configs sincronizadas, conexão bloqueada até renovação",
                                 com.autombot.client.util.AppLog.Level.INFO
                             )
                         }
 
-                        val versaoInicial = if (contaAtiva) {
-                            runCatching { panelClient.fetchConfigVersion(conta.usuario) }.getOrDefault("")
-                        } else ""
+                        val versaoInicial = runCatching {
+                            panelClient.fetchConfigVersion(conta.usuario)
+                        }.getOrDefault("")
                         val deviceId = deviceProvisioning.getOrCreateDeviceId()
                         appPrefs.edit()
                             .putString("managed_usuario", conta.usuario)
@@ -455,8 +468,8 @@ private fun AppRoot(
                             .putLong("managed_config_last_check_ms", System.currentTimeMillis())
                             .putBoolean("managed_config_update_available", false)
                             .putString("managed_device_id", deviceId)
-                            .putString("managed_account_status", respostaConfigs.status)
-                            .putString("managed_expira_em", respostaConfigs.expiraEm.orEmpty())
+                            .putString("managed_account_status", statusConta)
+                            .putString("managed_expira_em", expiraConta.orEmpty())
                             .putBoolean("managed_account_restored", restoredExistingAccount)
                             .apply()
                     }
@@ -560,6 +573,9 @@ private fun AppRoot(
             val ssConns by shadowsocksManager.connections.collectAsState()
             val trConns by trojanManager.connections.collectAsState()
             val ovpnConns by openVpnManager.connections.collectAsState()
+            val managedAccessAllowed = !isManagedMode || managedStatusAllowsConnection(
+                appPrefs.getString("managed_account_status", "").orEmpty()
+            )
             val rowList = listOf(
                 ConnectionRow("ssh", "SSH", if(sshConns.any { it.status == SshStatus.CONNECTED }) "Conectado" else "Desconectado", sshConns.any { it.status == SshStatus.CONNECTED }, true),
                 ConnectionRow("vless", "VLESS", if(vlessConns.any { it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED }) "Conectado" else "Desconectado", vlessConns.any { it.status == com.autombot.client.protocols.vless.VlessStatus.CONNECTED }, true),
@@ -582,7 +598,8 @@ private fun AppRoot(
                     "openvpn" -> Screen.OpenVpn
                     else -> Screen.Shell
                 } },
-                onNewConnection = { screen = Screen.ProtocolSelect }
+                onNewConnection = { screen = Screen.ProtocolSelect },
+                managedAccessAllowed = managedAccessAllowed
             )
         }
         is Screen.Logs -> LogsScreen(filterName = current.filterName, onBack = { screen = current.origin })
@@ -649,6 +666,40 @@ private fun MainShell(
     var applyingUpdate by remember { mutableStateOf(false) }
     var lastProtocolId by remember { mutableStateOf(appPrefs.getString("dashboard_last_protocol", "").orEmpty()) }
     var lastConnectionName by remember { mutableStateOf(appPrefs.getString("dashboard_last_connection", "").orEmpty()) }
+    var managedAccountUser by remember { mutableStateOf(appPrefs.getString("managed_usuario", "").orEmpty()) }
+    var managedAccountStatus by remember { mutableStateOf(appPrefs.getString("managed_account_status", "").orEmpty()) }
+    var managedAccountExpiry by remember { mutableStateOf(appPrefs.getString("managed_expira_em", "").orEmpty()) }
+
+    val managedAccessAllowed = !isManagedMode || managedStatusAllowsConnection(managedAccountStatus)
+
+    suspend fun refreshManagedAccountStatus(): Boolean {
+        if (!isManagedMode) return true
+        val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
+        val baseUrlGerenciada = appPrefs.getString("managed_base_url", null) ?: return false
+
+        return runCatching {
+            ManagedAccountStatusClient(baseUrlGerenciada).fetch(usuarioGerenciado)
+        }.onSuccess { estado ->
+            managedAccountUser = estado.usuario
+            managedAccountStatus = estado.status
+            managedAccountExpiry = estado.expiresAt.orEmpty()
+            appPrefs.edit()
+                .putString("managed_usuario", estado.usuario)
+                .putString("managed_account_status", estado.status)
+                .putString("managed_expira_em", estado.expiresAt.orEmpty())
+                .apply()
+            com.autombot.client.util.AppLog.log(
+                "Estado da conta atualizado: ${estado.usuario} = ${estado.status}" +
+                    (estado.source?.let { " (fonte: $it)" } ?: ""),
+                com.autombot.client.util.AppLog.Level.INFO
+            )
+        }.onFailure {
+            com.autombot.client.util.AppLog.log(
+                "Falha ao atualizar validade da conta: ${it.message}",
+                com.autombot.client.util.AppLog.Level.ERROR
+            )
+        }.isSuccess
+    }
 
     suspend fun applyConfigUpdate(): Boolean {
         val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
@@ -657,19 +708,9 @@ private fun MainShell(
         try {
             val cliente = PanelWebhookClient(baseUrlGerenciada)
             val respostaConfigs = cliente.fetchConfigs(usuarioGerenciado)
-            appPrefs.edit()
-                .putString("managed_account_status", respostaConfigs.status)
-                .putString("managed_expira_em", respostaConfigs.expiraEm.orEmpty())
-                .apply()
 
-            val statusNormalizado = respostaConfigs.status.trim().lowercase()
-            val contaAtiva = statusNormalizado.isBlank() || statusNormalizado in setOf("ativo", "active", "ok")
-            if (!contaAtiva) {
-                updateAvailable = false
-                appPrefs.edit().putBoolean("managed_config_update_available", false).apply()
-                return false
-            }
-
+            // Atualizações de rota/porta/perfil continuam chegando mesmo com a
+            // conta expirada. A trava é aplicada na hora de abrir/conectar.
             importPanelConfigs(
                 context = context,
                 response = respostaConfigs,
@@ -688,6 +729,7 @@ private fun MainShell(
             if (!versaoNova.isNullOrBlank()) editor.putString("managed_config_versao", versaoNova)
             editor.apply()
             updateAvailable = false
+            refreshManagedAccountStatus()
             return true
         } catch (e: Exception) {
             com.autombot.client.util.AppLog.log("Falha ao aplicar atualização de config: ${e.message}", com.autombot.client.util.AppLog.Level.ERROR)
@@ -723,13 +765,7 @@ private fun MainShell(
         }
 
         runCatching {
-            val cliente = PanelWebhookClient(baseUrlGerenciada)
-            val configs = cliente.fetchConfigs(usuarioGerenciado)
-            appPrefs.edit()
-                .putString("managed_account_status", configs.status)
-                .putString("managed_expira_em", configs.expiraEm.orEmpty())
-                .apply()
-            cliente.fetchConfigVersion(usuarioGerenciado)
+            PanelWebhookClient(baseUrlGerenciada).fetchConfigVersion(usuarioGerenciado)
         }.onSuccess { versaoAtual ->
             val existeAtualizacao = versaoAtual.isNotBlank() && versaoAtual != versaoConhecida
             updateAvailable = existeAtualizacao
@@ -890,6 +926,7 @@ private fun MainShell(
 
             fun toggleQuick() {
                 val quick = quickConnection ?: return
+                if (!quick.connected && !managedAccessAllowed) return
                 when (quick.protocolId) {
                     "ssh" -> scope.launch { if (quick.connected) sshManager.disconnect(quick.connectionName) else sshManager.connect(quick.connectionName) }
                     "vless" -> scope.launch { if (quick.connected) vlessManager.disconnect(quick.connectionName) else vlessManager.connect(quick.connectionName) }
@@ -916,7 +953,17 @@ private fun MainShell(
                 }
             }
 
-            LaunchedEffect(Unit) { checkForConfigUpdate() }
+            LaunchedEffect(Unit) {
+                refreshManagedAccountStatus()
+                val knownVersion = appPrefs.getString("managed_config_versao", "").orEmpty()
+                if (isManagedMode && knownVersion.isBlank()) {
+                    // Recupera instalações feitas pela versão anterior, que não
+                    // importava protocolos quando a conta estava expirada.
+                    applyConfigUpdate()
+                } else {
+                    checkForConfigUpdate()
+                }
+            }
 
             Box(modifier = Modifier.padding(padding)) {
                 DashboardScreen(
@@ -928,6 +975,9 @@ private fun MainShell(
                     quickConnection = quickConnection,
                     onToggleQuickConnection = ::toggleQuick,
                     onOpenQuickConnection = onOpenConnections,
+                    managedAccountUser = managedAccountUser,
+                    managedAccountStatus = managedAccountStatus,
+                    managedAccountExpiry = managedAccountExpiry,
                     updateAvailable = updateAvailable,
                     applyingUpdate = applyingUpdate,
                     onApplyUpdate = { scope.launch { applyConfigUpdate() } }
