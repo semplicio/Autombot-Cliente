@@ -54,7 +54,8 @@ fun ConnectionsScreen(
     connections: List<ConnectionRow>,
     onBack: () -> Unit,
     onOpenConnection: (ConnectionRow) -> Unit,
-    onNewConnection: () -> Unit
+    onNewConnection: () -> Unit,
+    managedAccessAllowed: Boolean = true
 ) {
     val context = LocalContext.current
     val managedMode = rememberManagedMode()
@@ -70,12 +71,22 @@ fun ConnectionsScreen(
             profiles.any { it.status == ModernProtocolStatus.ERROR } -> "Erro"
             else -> "Desconectado"
         }
-        return ConnectionRow(type.id, type.displayName, status, connected, true)
+        return ConnectionRow(
+            type.id,
+            type.displayName,
+            status,
+            connected,
+            !managedMode || managedAccessAllowed
+        )
     }
 
     val existingIds = connections.mapTo(mutableSetOf()) { it.protocolId }
     val allConnections = buildList {
-        addAll(connections)
+        addAll(
+            connections.map { row ->
+                if (managedMode) row.copy(available = row.available && managedAccessAllowed) else row
+            }
+        )
         if (ModernProtocolType.HYSTERIA2.id !in existingIds) add(modernRow(ModernProtocolType.HYSTERIA2))
         if (ModernProtocolType.TUIC.id !in existingIds) add(modernRow(ModernProtocolType.TUIC))
     }
@@ -95,7 +106,15 @@ fun ConnectionsScreen(
         AutomBotTopBar("Minhas conexões", onBack, "Minha rede")
         Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
             Text(
-                if (managedMode) "Conexões fornecidas pelo administrador" else "Protocolos configurados neste dispositivo",
+                if (managedMode) {
+                    if (managedAccessAllowed) {
+                        "Conexões fornecidas pelo administrador"
+                    } else {
+                        "Conta expirada ou inativa — configurações disponíveis para consulta"
+                    }
+                } else {
+                    "Protocolos configurados neste dispositivo"
+                },
                 color = C.TextDim,
                 fontSize = 11.sp
             )
@@ -153,7 +172,7 @@ private fun ConnectionRowItem(conn: ConnectionRow, onClick: () -> Unit) {
                         conn.statusLabel.startsWith("Conectando") -> C.Accent
                         else -> C.TextDim
                     },
-                    label = conn.statusLabel
+                    label = if (!conn.available && !conn.connected) "Acesso bloqueado" else conn.statusLabel
                 )
             }
             Icon(Icons.Default.ChevronRight, contentDescription = null, tint = C.TextMuted, modifier = Modifier.size(18.dp))
