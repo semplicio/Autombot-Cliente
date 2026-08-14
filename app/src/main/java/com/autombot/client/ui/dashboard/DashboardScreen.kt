@@ -232,7 +232,7 @@ fun DashboardScreen(
                 Text("Configurações do painel", color = C.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "O app verifica mudanças ao voltar para o primeiro plano. Você também pode conferir agora.",
+                    "O app verifica o painel automaticamente a cada 30 segundos e aplica novas configurações.",
                     color = C.TextDim,
                     fontSize = 10.sp
                 )
