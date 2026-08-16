@@ -328,7 +328,13 @@ private fun AppRoot(
             com.autombot.client.util.AppLog.Level.INFO
         )
     }
-    var trialSecondsRemaining by remember { mutableStateOf<Long?>(null) }
+    var trialSecondsRemaining by remember {
+        val deadline = appPrefs.getLong("managed_trial_expires_at_ms", 0L)
+        val remaining = if (deadline > 0L) {
+            ((deadline - System.currentTimeMillis()).coerceAtLeast(0L) + 999L) / 1000L
+        } else null
+        mutableStateOf<Long?>(remaining)
+    }
     var isManagedMode by remember { mutableStateOf(appPrefs.getBoolean("managed_mode", false)) }
     var managedUpdateAvailable by remember {
         mutableStateOf(appPrefs.getBoolean("managed_config_update_available", false))
@@ -338,10 +344,48 @@ private fun AppRoot(
     var managedSyncInProgress by remember { mutableStateOf(false) }
     val manualConnections = remember { mutableStateListOf<ManualConnectionConfig>() }
 
-    LaunchedEffect(trialSecondsRemaining != null) {
-        while (trialSecondsRemaining != null && (trialSecondsRemaining ?: 0) > 0) {
+    LaunchedEffect(trialSecondsRemaining != null, isManagedMode) {
+        if (!isManagedMode || trialSecondsRemaining == null) return@LaunchedEffect
+        while (true) {
+            val deadline = appPrefs.getLong("managed_trial_expires_at_ms", 0L)
+            if (deadline <= 0L) {
+                trialSecondsRemaining = null
+                break
+            }
+            val remaining = ((deadline - System.currentTimeMillis()).coerceAtLeast(0L) + 999L) / 1000L
+            trialSecondsRemaining = remaining
+            if (remaining <= 0L) {
+                val usuario = appPrefs.getString("managed_usuario", "").orEmpty()
+                val baseUrl = appPrefs.getString("managed_base_url", "").orEmpty()
+                val deviceId = appPrefs.getString("managed_device_id", "").orEmpty()
+                appPrefs.edit()
+                    .putString("managed_account_status", "expirado")
+                    .putBoolean("managed_trial_local_expired", true)
+                    .apply()
+                onStopSystemVpn()
+                if (usuario.isNotBlank() && baseUrl.isNotBlank() && deviceId.isNotBlank()) {
+                    runCatching { ManagedAccountStatusClient(baseUrl).expireTrial(usuario, deviceId) }
+                        .onSuccess { estado ->
+                            appPrefs.edit()
+                                .putString("managed_account_status", estado.status)
+                                .putString("managed_expira_em", estado.expiresAt.orEmpty())
+                                .putBoolean("managed_trial_expiry_sent", true)
+                                .apply()
+                            com.autombot.client.util.AppLog.log(
+                                "Teste de 2 horas encerrado e conta bloqueada no painel",
+                                com.autombot.client.util.AppLog.Level.INFO
+                            )
+                        }
+                        .onFailure {
+                            com.autombot.client.util.AppLog.log(
+                                "Teste encerrado localmente; falha ao bloquear no painel: ${it.message}",
+                                com.autombot.client.util.AppLog.Level.ERROR
+                            )
+                        }
+                }
+                break
+            }
             delay(1000)
-            trialSecondsRemaining = (trialSecondsRemaining ?: 0) - 1
         }
     }
 
@@ -360,6 +404,40 @@ private fun AppRoot(
             .putBoolean("managed_config_update_available", false)
             .apply()
         screen = Screen.Choice
+    }
+
+    suspend fun refreshManagedAccountStatusPrefs(): Boolean {
+        if (!isManagedMode) return true
+        val usuario = appPrefs.getString("managed_usuario", null) ?: return false
+        val baseUrl = appPrefs.getString("managed_base_url", null) ?: return false
+        return runCatching { ManagedAccountStatusClient(baseUrl).fetch(usuario) }
+            .onSuccess { estado ->
+                val localTrialExpired = appPrefs.getBoolean("managed_trial_local_expired", false)
+                val originalTrialExpiry = appPrefs.getString("managed_trial_server_expiry", "").orEmpty()
+                val expiryChanged = !estado.expiresAt.isNullOrBlank() &&
+                    originalTrialExpiry.isNotBlank() && estado.expiresAt != originalTrialExpiry
+                val renewedAfterTrial = localTrialExpired && estado.active && expiryChanged
+                val effectiveStatus = if (localTrialExpired && !renewedAfterTrial) "expirado" else estado.status
+                val editor = appPrefs.edit()
+                    .putString("managed_usuario", estado.usuario)
+                    .putString("managed_account_status", effectiveStatus)
+                    .putString("managed_expira_em", estado.expiresAt.orEmpty())
+                if (renewedAfterTrial) {
+                    editor
+                        .putBoolean("managed_is_trial", false)
+                        .putBoolean("managed_trial_local_expired", false)
+                        .putBoolean("managed_trial_expiry_sent", false)
+                        .remove("managed_trial_expires_at_ms")
+                    trialSecondsRemaining = null
+                }
+                editor.apply()
+            }
+            .onFailure {
+                com.autombot.client.util.AppLog.log(
+                    "Falha ao sincronizar validade da conta: ${it.message}",
+                    com.autombot.client.util.AppLog.Level.ERROR
+                )
+            }.isSuccess
     }
 
     suspend fun performManagedConfigImport(trigger: String): Boolean {
@@ -428,7 +506,8 @@ private fun AppRoot(
 
     suspend fun checkManagedConfigUpdate(
         force: Boolean = false,
-        autoApply: Boolean = true
+        autoApply: Boolean = true,
+        visibleProgress: Boolean = false
     ): Boolean {
         if (!isManagedMode || managedSyncInProgress) return false
         val usuarioGerenciado = appPrefs.getString("managed_usuario", null) ?: return false
@@ -443,7 +522,7 @@ private fun AppRoot(
         }
 
         managedSyncInProgress = true
-        managedCheckingUpdate = true
+        if (visibleProgress) managedCheckingUpdate = true
         return try {
             runCatching {
                 SponsoredDomainSync.refresh(
@@ -498,9 +577,11 @@ private fun AppRoot(
 
     LaunchedEffect(isManagedMode) {
         if (!isManagedMode) return@LaunchedEffect
+        refreshManagedAccountStatusPrefs()
         checkManagedConfigUpdate(force = true, autoApply = true)
         while (true) {
             delay(MANAGED_CONFIG_CHECK_INTERVAL_MS)
+            refreshManagedAccountStatusPrefs()
             checkManagedConfigUpdate(force = true, autoApply = true)
         }
     }
@@ -594,8 +675,18 @@ private fun AppRoot(
                             )
                         } else {
                             val senha = deviceProvisioning.generateRandomPassword()
-                            trialAccount = panelClient.createTrial(deviceId, usuario, senha)
+                            val created = panelClient.createTrial(deviceId, usuario, senha, validadeMinutos = 120)
+                            trialAccount = created
                             restoredExistingAccount = false
+                            val deadline = System.currentTimeMillis() + TRIAL_DURATION_SECONDS * 1000L
+                            appPrefs.edit()
+                                .putBoolean("managed_is_trial", true)
+                                .putLong("managed_trial_expires_at_ms", deadline)
+                                .putString("managed_trial_server_expiry", created.expiraEm)
+                                .putBoolean("managed_trial_local_expired", false)
+                                .putBoolean("managed_trial_expiry_sent", false)
+                                .apply()
+                            trialSecondsRemaining = TRIAL_DURATION_SECONDS
                         }
                     },
                     ProgressStep("Sincronizando dados da conta") {
@@ -694,7 +785,18 @@ private fun AppRoot(
         is Screen.ManualConfig -> ManualConfigScreen(protocol = current.protocol, onBack = { screen = Screen.ProtocolSelect }, onSave = { manualConnections.add(it); screen = Screen.ConnectionTest(it) })
         is Screen.ConnectionTest -> ConnectionTestScreen(config = current.config, onCancel = { screen = Screen.ProtocolSelect }, onFinished = { markOnboarded(false); screen = Screen.Shell })
         is Screen.XraySelect -> XraySelectScreen(onBack = { screen = Screen.Connections }, onSelect = { opt -> screen = when(opt.id) { "vless" -> Screen.Vless; "vmess" -> Screen.Vmess; "shadowsocks" -> Screen.Shadowsocks; "trojan" -> Screen.Trojan; else -> Screen.Shell } })
-        is Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Shell }, onLogout = ::resetToChoice)
+        is Screen.Settings -> SettingsScreen(
+            onBack = { screen = Screen.Shell },
+            onLogout = ::resetToChoice,
+            showManagedUpdate = isManagedMode,
+            checkingUpdate = managedCheckingUpdate || managedApplyingUpdate,
+            onCheckUpdates = {
+                rootScope.launch {
+                    refreshManagedAccountStatusPrefs()
+                    checkManagedConfigUpdate(force = true, autoApply = true, visibleProgress = true)
+                }
+            }
+        )
         is Screen.Statistics -> {
             val wgTunnels by wireGuardManager.tunnels.collectAsState()
             val sshConns by sshManager.connections.collectAsState()
@@ -1120,8 +1222,13 @@ private fun MainShell(
                 }
             }
 
-            LaunchedEffect(Unit) {
+            LaunchedEffect(isManagedMode) {
+                if (!isManagedMode) return@LaunchedEffect
                 refreshManagedAccountStatus()
+                while (true) {
+                    delay(MANAGED_CONFIG_CHECK_INTERVAL_MS)
+                    refreshManagedAccountStatus()
+                }
             }
 
             Box(modifier = Modifier.padding(padding)) {
