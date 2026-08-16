@@ -1,0 +1,31 @@
+name: Apply managed trial sync patch
+
+on:
+  push:
+    branches:
+      - agent/managed-trial-account-sync
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'Sync managed trial lifecycle'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/managed-trial-account-sync
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 scripts/apply_managed_trial_sync.py
+      - name: Validate diff
+        run: git diff --check
+      - name: Commit patched sources
+        run: |
+          rm -f scripts/apply_managed_trial_sync.py .github/workflows/apply-managed-trial-sync.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Sync managed trial lifecycle"
+          git push origin HEAD:agent/managed-trial-account-sync
