@@ -50,6 +50,7 @@ class ManagedAccountStatusClient(
         .build()
 
     suspend fun fetch(usuario: String): ManagedAccountStatus {
+        // Sempre consulta o estado atual, inclusive após uma renovação manual no painel.
         val url = "$base/api/v1/validade.php?usuario=" + URLEncoder.encode(usuario, "UTF-8") +
             "&_cb=${System.currentTimeMillis()}"
         return requestStatus(url, usuario)
