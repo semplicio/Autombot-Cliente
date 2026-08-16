@@ -50,10 +50,36 @@ class ManagedAccountStatusClient(
         .build()
 
     suspend fun fetch(usuario: String): ManagedAccountStatus {
-        val url = "$base/api/v1/validade.php?usuario=" + URLEncoder.encode(usuario, "UTF-8")
+        val url = "$base/api/v1/validade.php?usuario=" + URLEncoder.encode(usuario, "UTF-8") +
+            "&_cb=${System.currentTimeMillis()}"
+        return requestStatus(url, usuario)
+    }
+
+    /**
+     * Encerra um teste no painel usando o mesmo endpoint responsável pela criação
+     * do trial. O painel deve tratar esta chamada como idempotente: repetir o GET
+     * para uma conta já expirada/bloqueada não pode criar um novo teste.
+     */
+    suspend fun expireTrial(usuario: String, deviceId: String): ManagedAccountStatus {
+        val url = buildString {
+            append(base)
+            append("/api/v1/teste.php?acao=expirar")
+            append("&usuario=")
+            append(URLEncoder.encode(usuario, "UTF-8"))
+            append("&device_id=")
+            append(URLEncoder.encode(deviceId, "UTF-8"))
+            append("&_cb=")
+            append(System.currentTimeMillis())
+        }
+        return requestStatus(url, usuario)
+    }
+
+    private suspend fun requestStatus(url: String, usuario: String): ManagedAccountStatus {
         val request = Request.Builder()
             .url(url)
             .addHeader("X-API-Key", apiKey)
+            .header("Cache-Control", "no-cache, no-store, max-age=0")
+            .header("Pragma", "no-cache")
             .get()
             .build()
 
@@ -67,7 +93,10 @@ class ManagedAccountStatusClient(
             throw PanelException(error)
         }
         if (json == null) throw PanelException("Resposta de validade não é um JSON válido")
+        return parseStatus(json, usuario)
+    }
 
+    private fun parseStatus(json: JSONObject, fallbackUsuario: String): ManagedAccountStatus {
         val rawStatus = json.optString("status").trim().lowercase()
         val blocked = json.optBoolean("bloqueado", false) || rawStatus == "bloqueado"
         val expired = json.optBoolean("expirado", rawStatus == "expirado")
@@ -84,7 +113,7 @@ class ManagedAccountStatusClient(
         }
 
         return ManagedAccountStatus(
-            usuario = json.optString("usuario").ifBlank { usuario },
+            usuario = json.optString("usuario").ifBlank { fallbackUsuario },
             status = normalizedStatus,
             connectionStatus = json.optString("status_conexao").ifBlank {
                 if (rawStatus in setOf("online", "offline")) rawStatus else ""
