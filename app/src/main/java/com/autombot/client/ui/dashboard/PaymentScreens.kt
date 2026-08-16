@@ -41,7 +41,7 @@ data class PlanOption(val id: String, val name: String, val price: String, val c
 
 val AvailablePlans = listOf(
     PlanOption("monthly", "Mensal", "R$ 29,90", "por mês", 30),
-    PlanOption("annual", "Anual", "R$ 299,90", "por ano", 365)
+    PlanOption("annual", "Anual", "R$ 299,90", "por ano", 360)
 )
 
 @Composable
