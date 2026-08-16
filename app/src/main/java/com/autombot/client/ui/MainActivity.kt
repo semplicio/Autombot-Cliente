@@ -301,6 +301,34 @@ private fun managedStatusAllowsConnection(status: String): Boolean {
     return normalized.isBlank() || normalized in setOf("ativo", "active", "ok")
 }
 
+private fun managedExpiryMillis(raw: String): Long? {
+    if (raw.isBlank()) return null
+    val patterns = listOf(
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd'T'HH:mm:ssXXX",
+        "yyyy-MM-dd'T'HH:mm:ss",
+        "yyyy-MM-dd"
+    )
+    return patterns.firstNotNullOfOrNull { pattern ->
+        runCatching {
+            java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault()).apply {
+                isLenient = false
+            }.parse(raw)?.time
+        }.getOrNull()
+    }
+}
+
+private fun managedTrialWasRenewed(originalExpiry: String, currentExpiry: String?): Boolean {
+    if (originalExpiry.isBlank() || currentExpiry.isNullOrBlank()) return false
+    val originalMs = managedExpiryMillis(originalExpiry)
+    val currentMs = managedExpiryMillis(currentExpiry)
+    return if (originalMs != null && currentMs != null) {
+        currentMs > originalMs + 60_000L
+    } else {
+        currentExpiry.trim() != originalExpiry.trim()
+    }
+}
+
 @Composable
 private fun AppRoot(
     wireGuardManager: WireGuardManager,
@@ -412,17 +440,17 @@ private fun AppRoot(
         val baseUrl = appPrefs.getString("managed_base_url", null) ?: return false
         return runCatching { ManagedAccountStatusClient(baseUrl).fetch(usuario) }
             .onSuccess { estado ->
+                val isTrial = appPrefs.getBoolean("managed_is_trial", false)
                 val localTrialExpired = appPrefs.getBoolean("managed_trial_local_expired", false)
                 val originalTrialExpiry = appPrefs.getString("managed_trial_server_expiry", "").orEmpty()
-                val expiryChanged = !estado.expiresAt.isNullOrBlank() &&
-                    originalTrialExpiry.isNotBlank() && estado.expiresAt != originalTrialExpiry
-                val renewedAfterTrial = localTrialExpired && estado.active && expiryChanged
-                val effectiveStatus = if (localTrialExpired && !renewedAfterTrial) "expirado" else estado.status
+                val renewedTrial = isTrial && estado.active &&
+                    managedTrialWasRenewed(originalTrialExpiry, estado.expiresAt)
+                val effectiveStatus = if (localTrialExpired && !renewedTrial) "expirado" else estado.status
                 val editor = appPrefs.edit()
                     .putString("managed_usuario", estado.usuario)
                     .putString("managed_account_status", effectiveStatus)
                     .putString("managed_expira_em", estado.expiresAt.orEmpty())
-                if (renewedAfterTrial) {
+                if (renewedTrial) {
                     editor
                         .putBoolean("managed_is_trial", false)
                         .putBoolean("managed_trial_local_expired", false)
@@ -981,12 +1009,12 @@ private fun MainShell(
         return runCatching {
             ManagedAccountStatusClient(baseUrlGerenciada).fetch(usuarioGerenciado)
         }.onSuccess { estado ->
+            val isTrial = appPrefs.getBoolean("managed_is_trial", false)
             val localTrialExpired = appPrefs.getBoolean("managed_trial_local_expired", false)
             val originalTrialExpiry = appPrefs.getString("managed_trial_server_expiry", "").orEmpty()
-            val expiryChanged = !estado.expiresAt.isNullOrBlank() &&
-                originalTrialExpiry.isNotBlank() && estado.expiresAt != originalTrialExpiry
-            val renewedAfterTrial = localTrialExpired && estado.active && expiryChanged
-            val effectiveStatus = if (localTrialExpired && !renewedAfterTrial) "expirado" else estado.status
+            val renewedTrial = isTrial && estado.active &&
+                managedTrialWasRenewed(originalTrialExpiry, estado.expiresAt)
+            val effectiveStatus = if (localTrialExpired && !renewedTrial) "expirado" else estado.status
 
             managedAccountUser = estado.usuario
             managedAccountStatus = effectiveStatus
@@ -996,7 +1024,7 @@ private fun MainShell(
                 .putString("managed_usuario", estado.usuario)
                 .putString("managed_account_status", effectiveStatus)
                 .putString("managed_expira_em", estado.expiresAt.orEmpty())
-            if (renewedAfterTrial) {
+            if (renewedTrial) {
                 editor
                     .putBoolean("managed_is_trial", false)
                     .putBoolean("managed_trial_local_expired", false)
