@@ -1,0 +1,31 @@
+name: Apply managed status lock fix
+
+on:
+  push:
+    branches:
+      - agent/managed-trial-account-sync
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'Keep expired trial locked until renewal'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/managed-trial-account-sync
+          fetch-depth: 0
+      - name: Apply status lock fix
+        run: python3 scripts/fix_managed_status_lock.py
+      - name: Validate diff
+        run: git diff --check
+      - name: Commit source fix
+        run: |
+          rm -f scripts/fix_managed_status_lock.py .github/workflows/apply-managed-status-lock.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Keep expired trial locked until renewal"
+          git push origin HEAD:agent/managed-trial-account-sync
