@@ -39,6 +39,7 @@ import com.autombot.client.ui.theme.AutomBotColors as C
 
 data class PlanOption(val id: String, val name: String, val price: String, val cadence: String, val days: Int)
 
+// Regra comercial do AutomBot: mensal = 30 dias; anual = 360 dias.
 val AvailablePlans = listOf(
     PlanOption("monthly", "Mensal", "R$ 29,90", "por mês", 30),
     PlanOption("annual", "Anual", "R$ 299,90", "por ano", 360)
