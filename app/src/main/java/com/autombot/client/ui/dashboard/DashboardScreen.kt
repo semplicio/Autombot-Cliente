@@ -226,23 +226,24 @@ fun DashboardScreen(
                     accent = C.AccentLight
                 )
             }
-        } else if (managedMode) {
+        }
+
+        if (managedMode && !accountInactive && trialCountdown == null && managedExpiry.isNotBlank()) {
+            val validity = remember(managedExpiry) { managedValidityLabels(managedExpiry) }
             Spacer(Modifier.height(14.dp))
-            AutomBotCard(modifier = Modifier.fillMaxWidth()) {
-                Text("Configurações do painel", color = C.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            AutomBotCard(modifier = Modifier.fillMaxWidth(), accent = C.Green) {
+                Text("Plano ativo", color = C.Green, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    "O app verifica o painel automaticamente a cada 30 segundos e aplica novas configurações.",
-                    color = C.TextDim,
-                    fontSize = 10.sp
-                )
+                Text(validity.first, color = C.Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                validity.second?.let {
+                    Text(it, color = C.TextDim, fontSize = 10.sp)
+                }
                 Spacer(Modifier.height(10.dp))
                 AutomBotGradientButton(
-                    text = if (checkingUpdate) "Verificando…" else "Verificar atualizações",
-                    onClick = onCheckUpdate,
-                    enabled = !checkingUpdate && !applyingUpdate,
+                    text = "Renovar agora",
+                    onClick = onRenew,
                     modifier = Modifier.fillMaxWidth(),
-                    accent = C.AccentLight
+                    accent = C.Green
                 )
             }
         }
@@ -501,4 +502,29 @@ private fun formatDashboardBytes(bytes: Long): String {
     val units = arrayOf("B", "KB", "MB", "GB", "TB")
     val group = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceIn(0, units.lastIndex)
     return String.format("%.2f %s", bytes / Math.pow(1024.0, group.toDouble()), units[group])
+}
+
+
+private fun managedValidityLabels(raw: String): Pair<String, String?> {
+    val patterns = listOf(
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd'T'HH:mm:ssXXX",
+        "yyyy-MM-dd'T'HH:mm:ss",
+        "yyyy-MM-dd"
+    )
+    val parsed = patterns.firstNotNullOfOrNull { pattern ->
+        runCatching {
+            java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault()).apply { isLenient = false }.parse(raw)
+        }.getOrNull()
+    }
+    if (parsed == null) return "Conta válida até $raw" to null
+    val dateLabel = java.text.SimpleDateFormat("dd/MM/yyyy", java.util.Locale.getDefault()).format(parsed)
+    val remainingMs = (parsed.time - System.currentTimeMillis()).coerceAtLeast(0L)
+    val days = if (remainingMs == 0L) 0L else (remainingMs + 86_399_999L) / 86_400_000L
+    val remainingLabel = when (days) {
+        0L -> "Vence hoje"
+        1L -> "1 dia restante"
+        else -> "$days dias restantes"
+    }
+    return "Conta válida até $dateLabel" to remainingLabel
 }

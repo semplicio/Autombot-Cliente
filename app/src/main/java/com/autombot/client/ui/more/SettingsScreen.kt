@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.runtime.Composable
@@ -29,7 +30,13 @@ import com.autombot.client.ui.theme.AutomBotColors as C
 import com.autombot.client.util.AppLog
 
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onLogout: () -> Unit,
+    showManagedUpdate: Boolean = false,
+    checkingUpdate: Boolean = false,
+    onCheckUpdates: () -> Unit = {}
+) {
     var darkTheme by remember { mutableStateOf(true) }
     var notifications by remember { mutableStateOf(true) }
     var startWithSystem by remember { mutableStateOf(false) }
@@ -64,6 +71,15 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                         cacheCleared = true
                     }
                 )
+                if (showManagedUpdate) {
+                    AutomBotInfoRow(
+                        Icons.Default.Refresh,
+                        "Buscar atualizações",
+                        if (checkingUpdate) "Verificando painel…" else "Sincronizar conta e configurações agora",
+                        C.AccentLight,
+                        onClick = if (checkingUpdate) null else onCheckUpdates
+                    )
+                }
                 AutomBotInfoRow(Icons.Default.Info, "Sobre o app", "AutomBot Connect • 0.1.0", C.TextDim, onClick = {})
             }
 
