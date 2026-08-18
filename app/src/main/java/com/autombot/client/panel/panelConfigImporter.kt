@@ -130,8 +130,27 @@ suspend fun importPanelConfigs(
         registrarRota("vless", rotaVless)
         runCatching {
             val parsed = parseVlessUri(uriVless)
+            // No contrato route-aware, a rota escolhida e a fonte de verdade para
+            // transporte, TLS e endpoint. Antes somente o servidor alternativo era
+            // aplicado; se a URI legada estivesse sem security=tls, uma rota TLS
+            // acabava salva como WS puro e o Android a bloqueava como cleartext.
+            val routeHost = rotaVless?.host?.takeIf { it.isNotBlank() }
+            val routePath = rotaVless?.path
+                ?.takeIf { it.isNotBlank() }
+                ?.let { if (it.startsWith('/')) it else "/$it" }
             vlessManager.addProfile(
-                parsed.copy(server = selecaoVless.connectHost ?: parsed.server)
+                parsed.copy(
+                    server = selecaoVless.connectHost ?: routeHost ?: parsed.server,
+                    port = rotaVless?.port ?: parsed.port,
+                    wsPath = routePath ?: parsed.wsPath,
+                    wsHost = routeHost ?: parsed.wsHost,
+                    useTls = rotaVless?.tls ?: parsed.useTls,
+                    sni = if (rotaVless?.tls == true) {
+                        routeHost ?: parsed.sni.ifBlank { parsed.wsHost }
+                    } else {
+                        parsed.sni
+                    }
+                )
             )
         }
             .onSuccess { algumaImportacao = true }
