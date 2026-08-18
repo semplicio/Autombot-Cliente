@@ -11,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -44,11 +45,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -111,7 +114,7 @@ private data class LabReport(
 ) {
     fun json(): String = JSONObject()
         .put("tool", "AutomBot Connection Lab")
-        .put("version", "1.6.0")
+        .put("version", "1.7.0")
         .put("network", network)
         .put("target", "${config.targetHost}:${config.targetPort}")
         .put("entry", "${config.entryHost}:${config.entryPort}")
@@ -524,6 +527,7 @@ class ConnectionLabActivity : ComponentActivity() {
             MaterialTheme {
                 LabScreen(
                     engine = remember { ConnectionLabEngine(applicationContext) },
+                    injectorProbe = remember { InjectorFlowProbe(applicationContext) },
                     initialEntry = sponsored?.domain.orEmpty(),
                     initialEntryPort = sponsored?.tcpPort ?: 443,
                     initialTarget = origin?.originHost ?: ssh?.host ?: snapshot?.publicIp.orEmpty(),
@@ -532,7 +536,14 @@ class ConnectionLabActivity : ComponentActivity() {
                         startActivity(Intent(this, CdnRouteProbeActivity::class.java))
                     },
                     onTxt = { ReportShare.shareText(this, "AutomBot — Connection Lab", it.text()) },
-                    onJson = { ReportShare.share(this, it.json()) }
+                    onJson = { ReportShare.share(this, it.json()) },
+                    onInjectorLog = {
+                        ReportShare.shareText(
+                            this,
+                            "AutomBot — HTTP Proxy para SSH",
+                            it.text()
+                        )
+                    }
                 )
             }
         }
@@ -542,13 +553,15 @@ class ConnectionLabActivity : ComponentActivity() {
 @Composable
 private fun LabScreen(
     engine: ConnectionLabEngine,
+    injectorProbe: InjectorFlowProbe,
     initialEntry: String,
     initialEntryPort: Int,
     initialTarget: String,
     initialTargetPort: Int,
     onOpenCdnRouteProbe: () -> Unit,
     onTxt: (LabReport) -> Unit,
-    onJson: (LabReport) -> Unit
+    onJson: (LabReport) -> Unit,
+    onInjectorLog: (InjectorFlowReport) -> Unit
 ) {
     var target by remember { mutableStateOf(initialTarget) }
     var targetPort by remember { mutableStateOf(initialTargetPort.toString()) }
@@ -562,6 +575,12 @@ private fun LabScreen(
     var password by remember { mutableStateOf("") }
     var payload by remember { mutableStateOf("GET / HTTP/1.1[crlf]Host: [http_host][crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]") }
     var cellular by remember { mutableStateOf(true) }
+    var flowTimeout by remember { mutableStateOf("15") }
+    var flowAttempts by remember { mutableStateOf("3") }
+    var flowRunning by remember { mutableStateOf(false) }
+    var flowLogs by remember { mutableStateOf<List<InjectorLogEntry>>(emptyList()) }
+    var flowReport by remember { mutableStateOf<InjectorFlowReport?>(null) }
+    var flowJob by remember { mutableStateOf<Job?>(null) }
     var running by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var report by remember { mutableStateOf<LabReport?>(null) }
@@ -588,6 +607,151 @@ private fun LabScreen(
             item { LabCard { Text("Entrada / proxy / domínio patrocinado", color = LabAccent, fontWeight = FontWeight.Bold); Spacer(Modifier.height(8.dp)); Field(entry, { entry = it }, "Host/IP de entrada"); Spacer(Modifier.height(8.dp)); Field(entryPort, { entryPort = it.filter(Char::isDigit) }, "Porta de entrada", KeyboardType.Number); Spacer(Modifier.height(8.dp)); Toggle("Usar TLS nesta entrada", "Quando ligado, SNI/TLS é aplicado também aos testes de WS, payload e proxy.", tls) { tls = it }; Spacer(Modifier.height(8.dp)); Field(sni, { sni = it }, "SNI autorizado"); Spacer(Modifier.height(8.dp)); Field(httpHost, { httpHost = it }, "Host HTTP / WebSocket"); Spacer(Modifier.height(8.dp)); Field(path, { path = it }, "WebSocket path") } }
             item { LabCard { Text("Credenciais de proxy (opcional)", color = LabAccent, fontWeight = FontWeight.Bold); Spacer(Modifier.height(8.dp)); Field(user, { user = it }, "Usuário"); Spacer(Modifier.height(8.dp)); OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Senha") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp), colors = fieldColors()) } }
             item { LabCard { Text("Payload bruto", color = LabAccent, fontWeight = FontWeight.Bold); Text("[host] [port] [entry_host] [entry_port] [proxy_host] [proxy_port] [sni] [http_host] [crlf]", color = LabDim, fontSize = 10.sp); Spacer(Modifier.height(8.dp)); OutlinedTextField(value = payload, onValueChange = { payload = it }, label = { Text("Payload") }, minLines = 5, maxLines = 10, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp), colors = fieldColors()) } }
+            item {
+                LabCard {
+                    Text("Fluxo HTTP Proxy ➔ SSH", color = LabAccent, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Sobe um proxy local de prova, envia o payload pela entrada informada e aguarda o banner SSH. Em falha, reconecta com espera progressiva.",
+                        color = LabDim,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            Field(flowTimeout, { flowTimeout = it.filter(Char::isDigit) }, "Timeout (5–60s)", KeyboardType.Number)
+                        }
+                        Box(modifier = Modifier.weight(1f)) {
+                            Field(flowAttempts, { flowAttempts = it.filter(Char::isDigit) }, "Tentativas (1–5)", KeyboardType.Number)
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            if (flowRunning) {
+                                injectorProbe.cancel()
+                                flowJob?.cancel()
+                                flowJob = null
+                                flowRunning = false
+                                flowLogs = flowLogs + InjectorLogEntry(
+                                    System.currentTimeMillis(),
+                                    InjectorLogLevel.INFO,
+                                    "Teste interrompido pelo operador"
+                                )
+                            } else {
+                                val targetPortNumber = targetPort.toIntOrNull()
+                                val entryPortNumber = entryPort.toIntOrNull()
+                                val timeoutNumber = flowTimeout.toIntOrNull()
+                                val attemptsNumber = flowAttempts.toIntOrNull()
+                                when {
+                                    target.isBlank() -> error = "Informe o servidor SSH."
+                                    targetPortNumber == null || targetPortNumber !in 1..65535 -> error = "Porta SSH inválida."
+                                    entry.isBlank() -> error = "Informe a entrada/proxy que receberá o payload."
+                                    entryPortNumber == null || entryPortNumber !in 1..65535 -> error = "Porta de entrada inválida."
+                                    payload.isBlank() -> error = "Informe o payload personalizado."
+                                    tls && sni.isBlank() -> error = "Informe o SNI autorizado quando TLS estiver ligado."
+                                    timeoutNumber == null || timeoutNumber !in 5..60 -> error = "Timeout deve ficar entre 5 e 60 segundos."
+                                    attemptsNumber == null || attemptsNumber !in 1..5 -> error = "Tentativas deve ficar entre 1 e 5."
+                                    else -> {
+                                        error = null
+                                        flowLogs = emptyList()
+                                        flowReport = null
+                                        flowRunning = true
+                                        val config = InjectorFlowConfig(
+                                            targetHost = target.trim(),
+                                            targetPort = targetPortNumber,
+                                            entryHost = entry.trim(),
+                                            entryPort = entryPortNumber,
+                                            entryTls = tls,
+                                            sni = sni.trim(),
+                                            httpHost = httpHost.trim(),
+                                            payload = payload,
+                                            forceCellular = cellular,
+                                            timeoutSeconds = timeoutNumber,
+                                            maxAttempts = attemptsNumber
+                                        )
+                                        flowJob = scope.launch {
+                                            try {
+                                                flowReport = injectorProbe.run(config) { event ->
+                                                    withContext(Dispatchers.Main.immediate) {
+                                                        flowLogs = (flowLogs + event).takeLast(300)
+                                                    }
+                                                }
+                                            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                                // O botão de parada já registra a ação no log visível.
+                                            } catch (failure: Exception) {
+                                                error = failure.message ?: failure.javaClass.simpleName
+                                            } finally {
+                                                flowRunning = false
+                                                flowJob = null
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().height(50.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (flowRunning) LabFail else LabAccent
+                        )
+                    ) {
+                        if (flowRunning) {
+                            Text("Parar fluxo", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        } else {
+                            Text("Executar HTTP Proxy ➔ SSH", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            }
+            if (flowLogs.isNotEmpty()) {
+                item {
+                    LabCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Log da sessão", color = LabText, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text(
+                                if (flowRunning) "EXECUTANDO" else if (flowReport?.success == true) "SUCESSO" else "ENCERRADO",
+                                color = if (flowRunning) LabWarn else if (flowReport?.success == true) LabPass else LabDim,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        flowLogs.forEach { event ->
+                            Text(
+                                event.formatted(),
+                                color = when (event.level) {
+                                    InjectorLogLevel.INFO -> LabDim
+                                    InjectorLogLevel.SUCCESS -> LabPass
+                                    InjectorLogLevel.ERROR -> LabFail
+                                },
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp
+                            )
+                            Spacer(Modifier.height(3.dp))
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { flowReport?.let(onInjectorLog) },
+                                enabled = flowReport != null,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = LabAlt)
+                            ) { Text("Compartilhar log", color = LabText, fontSize = 11.sp) }
+                            Button(
+                                onClick = {
+                                    flowLogs = emptyList()
+                                    flowReport = null
+                                },
+                                enabled = !flowRunning,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = LabAlt)
+                            ) { Text("Limpar log", color = LabText, fontSize = 11.sp) }
+                        }
+                    }
+                }
+            }
             item { LabCard { Toggle("Forçar rede celular física", "Cria os sockets diretamente na interface 4G/5G, sem usar VPN/Wi‑Fi.", cellular) { cellular = it } } }
             error?.let { item { Text(it, color = LabFail, fontSize = 12.sp) } }
             item {

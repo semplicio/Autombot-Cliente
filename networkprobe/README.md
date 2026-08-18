@@ -8,6 +8,15 @@ O probe testa **somente endpoints informados pelo operador**. Ele não procura d
 
 ## Testes da v0.4
 
+### Fluxo HTTP Proxy ➔ SSH com payload personalizado
+
+- O Connection Lab sobe um proxy local de prova em `127.0.0.1` e faz um cliente SSH de diagnóstico entrar por ele.
+- O proxy abre somente a entrada informada pelo operador, aplica TLS/SNI quando solicitado, expande o payload e o envia antes da identificação SSH.
+- O teste confirma a cadeia até receber um banner `SSH-2.0`; não solicita nem persiste usuário, senha ou chave privada.
+- Em falha ou timeout, repete a tentativa com espera progressiva de 1, 2, 3 segundos, respeitando os limites configurados na tela.
+- O log mostra dispositivo, versão do app, rede física, IP/interface local, porta do proxy local, etapa do payload, timeout, reconexão e resultado.
+- O relatório pode ser compartilhado em texto e o log da sessão pode ser limpo diretamente na tela.
+
 ### Teste dedicado CDN HTTP/80 + TLS/443
 
 - Executa WS sem TLS na porta 80 e WSS com TLS/SNI na porta 443 para o mesmo FQDN.
