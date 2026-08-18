@@ -274,6 +274,7 @@ private sealed class Screen {
 
 private const val TRIAL_DURATION_SECONDS = 2 * 60 * 60L
 private const val MANAGED_CONFIG_CHECK_INTERVAL_MS = 30 * 1000L
+private const val MANAGED_IMPORT_SCHEMA_VERSION = 2
 
 private data class ManagedSshCredentials(
     val username: String,
@@ -503,6 +504,7 @@ private fun AppRoot(
         val versaoNova = cliente.fetchConfigVersion(usuarioGerenciado)
         appPrefs.edit()
             .putString("managed_config_versao", versaoNova)
+            .putInt("managed_import_schema_version", MANAGED_IMPORT_SCHEMA_VERSION)
             .putLong("managed_config_last_check_ms", System.currentTimeMillis())
             .putBoolean("managed_config_update_available", false)
             .apply()
@@ -571,7 +573,9 @@ private fun AppRoot(
             val versaoAtual = cliente.fetchConfigVersion(usuarioGerenciado)
             if (versaoAtual.isBlank()) return false
 
-            val existeAtualizacao = versaoAtual != versaoConhecida
+            val versaoImportadorAplicada = appPrefs.getInt("managed_import_schema_version", 0)
+            val exigeReimportacaoLocal = versaoImportadorAplicada < MANAGED_IMPORT_SCHEMA_VERSION
+            val existeAtualizacao = versaoAtual != versaoConhecida || exigeReimportacaoLocal
             managedUpdateAvailable = existeAtualizacao
             appPrefs.edit()
                 .putLong("managed_config_last_check_ms", System.currentTimeMillis())
@@ -581,7 +585,11 @@ private fun AppRoot(
             if (!existeAtualizacao) return true
 
             com.autombot.client.util.AppLog.log(
-                "Alteração detectada no painel; baixando e reconfigurando os protocolos automaticamente",
+                if (exigeReimportacaoLocal) {
+                    "Importador atualizado; ressincronizando os perfis gerenciados uma única vez"
+                } else {
+                    "Alteração detectada no painel; baixando e reconfigurando os protocolos automaticamente"
+                },
                 com.autombot.client.util.AppLog.Level.INFO
             )
             if (autoApply) {
@@ -769,6 +777,7 @@ private fun AppRoot(
                             .putString("managed_senha", senhaGerenciada)
                             .putString("managed_base_url", current.domain)
                             .putString("managed_config_versao", versaoInicial)
+                            .putInt("managed_import_schema_version", MANAGED_IMPORT_SCHEMA_VERSION)
                             .putLong("managed_config_last_check_ms", System.currentTimeMillis())
                             .putBoolean("managed_config_update_available", false)
                             .putString("managed_device_id", deviceId)
