@@ -1,6 +1,7 @@
 package com.autombot.networkprobe
 
 import android.content.Context
+import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -110,7 +111,7 @@ private data class LabReport(
 ) {
     fun json(): String = JSONObject()
         .put("tool", "AutomBot Connection Lab")
-        .put("version", "1.5.0")
+        .put("version", "1.6.0")
         .put("network", network)
         .put("target", "${config.targetHost}:${config.targetPort}")
         .put("entry", "${config.entryHost}:${config.entryPort}")
@@ -527,6 +528,9 @@ class ConnectionLabActivity : ComponentActivity() {
                     initialEntryPort = sponsored?.tcpPort ?: 443,
                     initialTarget = origin?.originHost ?: ssh?.host ?: snapshot?.publicIp.orEmpty(),
                     initialTargetPort = origin?.originPort ?: ssh?.ports?.firstOrNull() ?: 22,
+                    onOpenCdnRouteProbe = {
+                        startActivity(Intent(this, CdnRouteProbeActivity::class.java))
+                    },
                     onTxt = { ReportShare.shareText(this, "AutomBot — Connection Lab", it.text()) },
                     onJson = { ReportShare.share(this, it.json()) }
                 )
@@ -542,6 +546,7 @@ private fun LabScreen(
     initialEntryPort: Int,
     initialTarget: String,
     initialTargetPort: Int,
+    onOpenCdnRouteProbe: () -> Unit,
     onTxt: (LabReport) -> Unit,
     onJson: (LabReport) -> Unit
 ) {
@@ -569,6 +574,16 @@ private fun LabScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item { LabCard { Text("Connection Lab", color = LabText, fontSize = 22.sp, fontWeight = FontWeight.Bold); Text("Testa SSH/Dropbear, gateway, proxy, TLS/SNI, WebSocket e payload somente contra endpoints informados por você.", color = LabDim, fontSize = 12.sp, lineHeight = 17.sp) } }
+            item {
+                Button(
+                    onClick = onOpenCdnRouteProbe,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = LabAccent)
+                ) {
+                    Text("Testar CDN HTTP/80 + TLS/443", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            }
             item { LabCard { Text("Servidor final", color = LabAccent, fontWeight = FontWeight.Bold); Spacer(Modifier.height(8.dp)); Field(target, { target = it }, "Host/IP SSH"); Spacer(Modifier.height(8.dp)); Field(targetPort, { targetPort = it.filter(Char::isDigit) }, "Porta SSH", KeyboardType.Number) } }
             item { LabCard { Text("Entrada / proxy / domínio patrocinado", color = LabAccent, fontWeight = FontWeight.Bold); Spacer(Modifier.height(8.dp)); Field(entry, { entry = it }, "Host/IP de entrada"); Spacer(Modifier.height(8.dp)); Field(entryPort, { entryPort = it.filter(Char::isDigit) }, "Porta de entrada", KeyboardType.Number); Spacer(Modifier.height(8.dp)); Toggle("Usar TLS nesta entrada", "Quando ligado, SNI/TLS é aplicado também aos testes de WS, payload e proxy.", tls) { tls = it }; Spacer(Modifier.height(8.dp)); Field(sni, { sni = it }, "SNI autorizado"); Spacer(Modifier.height(8.dp)); Field(httpHost, { httpHost = it }, "Host HTTP / WebSocket"); Spacer(Modifier.height(8.dp)); Field(path, { path = it }, "WebSocket path") } }
             item { LabCard { Text("Credenciais de proxy (opcional)", color = LabAccent, fontWeight = FontWeight.Bold); Spacer(Modifier.height(8.dp)); Field(user, { user = it }, "Usuário"); Spacer(Modifier.height(8.dp)); OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Senha") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp), colors = fieldColors()) } }

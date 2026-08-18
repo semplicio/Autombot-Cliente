@@ -65,6 +65,9 @@ class MainActivity : ComponentActivity() {
                     onOpenManualDomainProbe = {
                         startActivity(Intent(this, ManualDomainProbeActivity::class.java))
                     },
+                    onOpenCdnRouteProbe = {
+                        startActivity(Intent(this, CdnRouteProbeActivity::class.java))
+                    },
                     onOpenSecurityTrailsLookup = {
                         startActivity(Intent(this, SecurityTrailsLookupActivity::class.java))
                     },
@@ -102,6 +105,7 @@ private fun ProbeScreen(
     onShare: (ProbeReport) -> Unit,
     onOpenProxyAnalyzer: () -> Unit,
     onOpenManualDomainProbe: () -> Unit,
+    onOpenCdnRouteProbe: () -> Unit,
     onOpenSecurityTrailsLookup: () -> Unit,
     onOpenCoreLink: () -> Unit
 ) {
@@ -165,6 +169,17 @@ private fun ProbeScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = Accent.copy(alpha = 0.85f))
                 ) {
                     Text("Vincular / Perfil AutomBot Core", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            item {
+                Button(
+                    onClick = onOpenCdnRouteProbe,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent.copy(alpha = 0.85f))
+                ) {
+                    Text("Testar CDN HTTP/80 + TLS/443", color = Color.White, fontWeight = FontWeight.SemiBold)
                 }
             }
 
@@ -424,6 +439,7 @@ private fun ToolsCard() {
                 "• Matriz de portas TCP com distinção entre timeout e porta recusada\n" +
                 "• TLS/SNI, validade do certificado e ALPN\n" +
                 "• HTTPS e WebSocket TLS\n" +
+                "• Comparação dedicada CDN WS/80 e WSS/443 em todos os IPs resolvidos\n" +
                 "• Matriz UDP para Hysteria2, TUIC, WireGuard e portas personalizadas\n" +
                 "• Lista manual de domínios para alcance DNS/TCP/TLS/HTTP no 4G/5G\n" +
                 "• IP / Domain Intelligence via SecurityTrails para DNS, reverse IP, WHOIS e indicadores de CDN/provedor\n" +
