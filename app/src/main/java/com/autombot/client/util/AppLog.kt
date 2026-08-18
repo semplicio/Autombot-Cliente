@@ -74,9 +74,21 @@ object AppLog {
         schedulePersist()
     }
 
-    /** Limpa de verdade (usado pelo botão "Limpar Cache" nas Configurações). */
-    fun clear() {
-        _entries.value = emptyList()
+    /**
+     * Limpa todos os registros ou somente os eventos da conexão informada.
+     *
+     * As telas de protocolo usam o nome da conexão entre aspas nas mensagens.
+     * Preservar os demais eventos permite iniciar um teste novo de um protocolo
+     * sem apagar os logs ainda úteis das outras conexões.
+     */
+    fun clear(filterName: String? = null) {
+        _entries.update { current ->
+            if (filterName == null) {
+                emptyList()
+            } else {
+                current.filterNot { it.message.contains("\"$filterName\"") }
+            }
+        }
         schedulePersist(delayMs = 0L)
     }
 
