@@ -72,31 +72,39 @@ suspend fun importPanelConfigs(
 
     suspend fun selecionarRota(item: ProtocolPackage?): RouteSelection {
         if (item == null) return RouteSelection(null, null)
-        var patrocinadaFalhou = false
-        for (route in item.orderedRoutes()) {
-            if (route.role.equals("sponsored", ignoreCase = true)) {
-                val endpoint = item.sponsoredEndpoint?.endpointForDomain(route.host)
-                val connectHost = SponsoredRouteValidator.selectConnectHost(route, endpoint)
-                if (connectHost != null) {
-                    return RouteSelection(route.uri, route, connectHost = connectHost)
-                }
-                patrocinadaFalhou = true
-                AppLog.log(
-                    "Painel: rota patrocinada ${route.id} não concluiu upgrade WebSocket; tentando fallback sem substituir a última rota válida",
-                    AppLog.Level.ERROR
-                )
-                continue
+        val routes = item.orderedRoutes()
+        if (routes.isEmpty()) return RouteSelection(item.uri, null)
+
+        for (route in routes) {
+            val websocket = route.transport.equals("websocket", ignoreCase = true) ||
+                route.transport.equals("ws", ignoreCase = true)
+
+            // Rotas TCP/UDP (por exemplo VLESS Reality) não usam upgrade WS e
+            // continuam seguindo a ordem indicada pelo Core. Rotas antigas sem
+            // metadados completos também preservam a compatibilidade anterior.
+            if (!websocket || route.host.isNullOrBlank() || route.port == null) {
+                return RouteSelection(route.uri, route)
             }
-            // Não substitui um perfil patrocinado já funcional por uma rota
-            // comum só porque a rede atual não conseguiu validar a revisão nova.
-            if (patrocinadaFalhou) return RouteSelection(null, null, preserveExisting = true)
-            return RouteSelection(route.uri, route)
+
+            val endpoint = if (route.role.equals("sponsored", ignoreCase = true)) {
+                item.sponsoredEndpoint?.endpointForDomain(route.host)
+            } else {
+                null
+            }
+            val connectHost = SponsoredRouteValidator.selectConnectHost(route, endpoint)
+            if (connectHost != null) {
+                return RouteSelection(route.uri, route, connectHost = connectHost)
+            }
+
+            AppLog.log(
+                "Painel: rota ${route.id} (${route.host}:${route.port}) não concluiu upgrade WebSocket; tentando próxima rota",
+                AppLog.Level.ERROR
+            )
         }
-        return if (patrocinadaFalhou) {
-            RouteSelection(null, null, preserveExisting = true)
-        } else {
-            RouteSelection(item.uri, null)
-        }
+
+        // Não troca um perfil persistido potencialmente funcional quando nenhuma
+        // das novas rotas anunciadas respondeu na rede atual.
+        return RouteSelection(null, null, preserveExisting = true)
     }
 
     val itemVmess = response.protocols["vmess"]
@@ -104,7 +112,7 @@ suspend fun importPanelConfigs(
     val uriVmess = selecaoVmess.uri
     val rotaVmess = selecaoVmess.route
     if (selecaoVmess.preserveExisting) {
-        avisar("vmess", "a nova rota patrocinada não validou; mantive o perfil anterior")
+        avisar("vmess", "nenhuma rota nova validou; mantive o perfil anterior")
     } else if (itemVmess != null && itemVmess.success && !uriVmess.isNullOrBlank()) {
         registrarRota("vmess", rotaVmess)
         runCatching {
@@ -125,7 +133,7 @@ suspend fun importPanelConfigs(
     val uriVless = selecaoVless.uri
     val rotaVless = selecaoVless.route
     if (selecaoVless.preserveExisting) {
-        avisar("vless", "a nova rota patrocinada não validou; mantive o perfil anterior")
+        avisar("vless", "nenhuma rota nova validou; mantive o perfil anterior")
     } else if (itemVless != null && itemVless.success && !uriVless.isNullOrBlank()) {
         registrarRota("vless", rotaVless)
         runCatching {
@@ -165,7 +173,7 @@ suspend fun importPanelConfigs(
     val uriTrojan = selecaoTrojan.uri
     val rotaTrojan = selecaoTrojan.route
     if (selecaoTrojan.preserveExisting) {
-        avisar("trojan", "a nova rota patrocinada não validou; mantive o perfil anterior")
+        avisar("trojan", "nenhuma rota nova validou; mantive o perfil anterior")
     } else if (itemTrojan != null && itemTrojan.success && !uriTrojan.isNullOrBlank()) {
         registrarRota("trojan", rotaTrojan)
         runCatching {
@@ -186,7 +194,7 @@ suspend fun importPanelConfigs(
     val uriSs = selecaoSs.uri
     val rotaSs = selecaoSs.route
     if (selecaoSs.preserveExisting) {
-        avisar("shadowsocks", "a nova rota patrocinada não validou; mantive o perfil anterior")
+        avisar("shadowsocks", "nenhuma rota nova validou; mantive o perfil anterior")
     } else if (itemSs != null && itemSs.success && !uriSs.isNullOrBlank()) {
         registrarRota("shadowsocks", rotaSs)
         runCatching { shadowsocksManager.addProfile(parseShadowsocksUri(uriSs)) }
