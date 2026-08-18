@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,6 +54,9 @@ fun LogsScreen(filterName: String? = null, onBack: () -> Unit) {
             actions = {
                 IconButton(onClick = { copyLogs(context, entries, filterName) }) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "Copiar logs", tint = C.TextDim)
+                }
+                IconButton(onClick = { clearLogs(context, entries, filterName) }) {
+                    Icon(Icons.Default.CleaningServices, contentDescription = "Limpar logs", tint = C.TextDim)
                 }
             }
         )
@@ -101,4 +105,17 @@ private fun copyLogs(context: Context, entries: List<AppLog.Entry>, filterName: 
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("Logs AutomBot Connect", report))
     Toast.makeText(context, "Logs copiados", Toast.LENGTH_SHORT).show()
+}
+
+private fun clearLogs(context: Context, entries: List<AppLog.Entry>, filterName: String?) {
+    if (entries.isEmpty()) {
+        Toast.makeText(context, "Nenhum log para limpar", Toast.LENGTH_SHORT).show()
+        return
+    }
+    AppLog.clear(filterName)
+    Toast.makeText(
+        context,
+        if (filterName != null) "Logs desta conexão limpos" else "Logs limpos",
+        Toast.LENGTH_SHORT
+    ).show()
 }
