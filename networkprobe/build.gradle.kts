@@ -11,8 +11,8 @@ android {
         applicationId = "com.autombot.networkprobe"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "1.6.0"
+        versionCode = 17
+        versionName = "1.7.0"
     }
 
     buildTypes {
@@ -36,6 +36,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
