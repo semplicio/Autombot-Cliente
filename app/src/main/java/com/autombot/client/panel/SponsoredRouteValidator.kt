@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 
-/** Confirma o upgrade WebSocket real antes de promover uma rota patrocinada. */
+/** Confirma o upgrade WebSocket real antes de promover qualquer rota do painel. */
 internal object SponsoredRouteValidator {
     private const val VALIDATION_TIMEOUT_MS = 7_000L
 
