@@ -1,6 +1,11 @@
 name: Validate Network Probe sponsored domain
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'networkprobe/**'
+      - '.github/workflows/validate-networkprobe-sponsored.yml'
   push:
     branches: [main]
     paths:

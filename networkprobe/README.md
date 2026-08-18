@@ -8,6 +8,15 @@ O probe testa **somente endpoints informados pelo operador**. Ele não procura d
 
 ## Testes da v0.4
 
+### Teste dedicado CDN HTTP/80 + TLS/443
+
+- Executa WS sem TLS na porta 80 e WSS com TLS/SNI na porta 443 para o mesmo FQDN.
+- Aceita vários paths na mesma execução, por exemplo `/vmess,/vless,/trojan`.
+- Resolve o domínio pela rede física escolhida e testa cada IP retornado separadamente.
+- Registra a etapa exata do timeout e os headers `HTTP`, `Location`, `Server`, `Via`, `X-Cache`, `Connection`, `Upgrade` e `Sec-WebSocket-Accept`.
+- Distingue upgrade `101`, redirect HTTP→HTTPS no mesmo domínio, redirect para portal da operadora, timeout e resposta HTTP sem upgrade.
+- Permite prender os sockets diretamente à interface celular para repetir o comportamento observado no AutomBot Connect sem passar por Wi-Fi ou VPN.
+
 - Detecta Wi‑Fi / rede móvel e evita usar uma VPN já ativa como rede de teste.
 - Exibe validação da rede, interface, MTU, DNS, IPv4/IPv6 e indício de CGNAT/NAT privado.
 - Resolve A/AAAA explicitamente pela rede física Android.
