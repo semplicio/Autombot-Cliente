@@ -104,6 +104,13 @@ class VlessTunnelManager(context: Context) {
                     AppLog.Level.SUCCESS
                 )
 
+                // Não anuncia o SOCKS local como conectado antes de comprovar que
+                // o mesmo transporte usado pelos canais reais consegue concluir o
+                // upgrade WebSocket. O destino do probe é IP literal para não
+                // depender de DNS; o objetivo aqui é validar endpoint, path, TLS,
+                // Host/SNI, protect() e o primeiro frame VLESS.
+                validateRemoteEndpoint(config, connectionName)
+
                 val socksPort = findFreePort()
                 val socksServer = Socks5Server(
                     socksPort,
@@ -168,6 +175,36 @@ class VlessTunnelManager(context: Context) {
     }
 
     private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
+
+    private fun validateRemoteEndpoint(
+        config: VlessConnectionConfig,
+        connectionName: String
+    ) {
+        val path = config.wsPath.ifBlank { "/" }
+        AppLog.log(
+            "VLESS \"$connectionName\": validando servidor remoto ${config.server}:${config.port}$path " +
+                "(${config.describeTransport()})",
+            AppLog.Level.INFO
+        )
+
+        val (probeInput, probeOutput) = VlessTransport.connect(
+            config = config,
+            destHost = "1.1.1.1",
+            destPort = 443,
+            protectSocket = { socket -> AutomBotVpnService.protectSocket(socket) },
+            timeoutMs = 10_000,
+            dns = underlyingDns
+        )
+        try {
+            AppLog.log(
+                "VLESS \"$connectionName\": servidor remoto validado — WebSocket aberto com sucesso",
+                AppLog.Level.SUCCESS
+            )
+        } finally {
+            runCatching { probeOutput.close() }
+            runCatching { probeInput.close() }
+        }
+    }
 
     private fun openVlessUdpSession(
         config: VlessConnectionConfig,
