@@ -31,10 +31,11 @@ private data class RouteSelection(
 /**
  * Importa as configurações do painel e respeita a rota preferida indicada pelo Core.
  *
- * O contrato novo pode trazer várias rotas para a mesma credencial (por exemplo,
- * VMess/VLESS em HTTP/80 direto + CDN/443 + origem TLS). O app usa a URI da rota
- * preferida/recomendada e mantém compatibilidade com painéis antigos que ainda
- * entregam somente um campo ``uri``.
+ * O contrato novo pode trazer várias rotas para a mesma credencial. VMess/VLESS
+ * materializam cada rota pública como uma conexão separada (por exemplo, WS/80 e
+ * WSS/443), permitindo escolha manual sem associar uma porta a uma operadora fixa.
+ * Os demais protocolos continuam escolhendo a melhor rota validada. Painéis antigos
+ * que entregam somente um campo ``uri`` permanecem compatíveis.
  */
 suspend fun importPanelConfigs(
     context: Context,
@@ -68,6 +69,40 @@ suspend fun importPanelConfigs(
                 AppLog.Level.INFO
             )
         }
+    }
+
+    fun rotasPublicasWebSocket(item: ProtocolPackage?): List<ProtocolRoute> {
+        if (item == null) return emptyList()
+        return item.orderedRoutes()
+            .filter { route ->
+                val websocket = route.transport.equals("websocket", ignoreCase = true) ||
+                    route.transport.equals("ws", ignoreCase = true)
+                websocket &&
+                    !route.uri.isNullOrBlank() &&
+                    !route.host.isNullOrBlank() &&
+                    route.port != null &&
+                    !route.role.equals("origin", ignoreCase = true)
+            }
+            // O mesmo endpoint pode aparecer como patrocinado e CDN. Uma conexão
+            // por combinação real evita cartões duplicados na interface.
+            .distinctBy { route ->
+                listOf(route.host?.lowercase(), route.port, route.tls, route.path).joinToString("|")
+            }
+    }
+
+    fun nomeDaRota(nomeOriginal: String, route: ProtocolRoute): String {
+        val detalhe = route.label.takeIf { it.isNotBlank() }
+            ?: "${if (route.tls) "WSS" else "WS"}/${route.port ?: "?"}"
+        return "$nomeOriginal · $detalhe"
+    }
+
+    fun hostDeConexao(item: ProtocolPackage, route: ProtocolRoute): String? {
+        val endpoint = if (route.role.equals("sponsored", ignoreCase = true)) {
+            item.sponsoredEndpoint?.endpointForDomain(route.host)
+        } else {
+            null
+        }
+        return endpoint?.bootstrapIps?.firstOrNull() ?: route.host
     }
 
     suspend fun selecionarRota(item: ProtocolPackage?): RouteSelection {
@@ -108,19 +143,47 @@ suspend fun importPanelConfigs(
     }
 
     val itemVmess = response.protocols["vmess"]
-    val selecaoVmess = selecionarRota(itemVmess)
-    val uriVmess = selecaoVmess.uri
-    val rotaVmess = selecaoVmess.route
-    if (selecaoVmess.preserveExisting) {
-        avisar("vmess", "nenhuma rota nova validou; mantive o perfil anterior")
-    } else if (itemVmess != null && itemVmess.success && !uriVmess.isNullOrBlank()) {
-        registrarRota("vmess", rotaVmess)
-        runCatching {
-            val parsed = parseVmessUri(uriVmess)
-            vmessManager.addProfile(
-                parsed.copy(server = selecaoVmess.connectHost ?: parsed.server)
-            )
+    val rotasVmess = rotasPublicasWebSocket(itemVmess)
+    if (itemVmess != null && itemVmess.success && rotasVmess.isNotEmpty()) {
+        val nomesBase = mutableSetOf<String>()
+        val nomesImportados = mutableSetOf<String>()
+        rotasVmess.forEach { rota ->
+            runCatching {
+                val parsed = parseVmessUri(rota.uri!!)
+                val routeHost = rota.host?.takeIf { it.isNotBlank() }
+                val routePath = rota.path
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { if (it.startsWith('/')) it else "/$it" }
+                val connectionName = nomeDaRota(parsed.connectionName, rota)
+                nomesBase += parsed.connectionName
+                nomesImportados += connectionName
+                vmessManager.addProfile(
+                    parsed.copy(
+                        connectionName = connectionName,
+                        server = hostDeConexao(itemVmess, rota) ?: parsed.server,
+                        port = rota.port ?: parsed.port,
+                        wsPath = routePath ?: parsed.wsPath,
+                        wsHost = routeHost ?: parsed.wsHost,
+                        useTls = rota.tls,
+                        sni = if (rota.tls) routeHost ?: parsed.sni else parsed.sni
+                    )
+                )
+                registrarRota("vmess ($connectionName)", rota)
+            }.onSuccess {
+                algumaImportacao = true
+            }.onFailure {
+                avisar("vmess (${rota.label})", it.message ?: "erro ao interpretar a URI")
+            }
         }
+        vmessManager.connections.value
+            .map { it.config.connectionName }
+            .filter { nome ->
+                nome !in nomesImportados &&
+                    nomesBase.any { base -> nome == base || nome.startsWith("$base · ") }
+            }
+            .forEach(vmessManager::removeProfile)
+    } else if (itemVmess != null && itemVmess.success && !itemVmess.uri.isNullOrBlank()) {
+        runCatching { vmessManager.addProfile(parseVmessUri(itemVmess.uri)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("vmess", it.message ?: "erro ao interpretar a URI") }
     } else {
@@ -129,38 +192,51 @@ suspend fun importPanelConfigs(
     }
 
     val itemVless = response.protocols["vless"]
-    val selecaoVless = selecionarRota(itemVless)
-    val uriVless = selecaoVless.uri
-    val rotaVless = selecaoVless.route
-    if (selecaoVless.preserveExisting) {
-        avisar("vless", "nenhuma rota nova validou; mantive o perfil anterior")
-    } else if (itemVless != null && itemVless.success && !uriVless.isNullOrBlank()) {
-        registrarRota("vless", rotaVless)
-        runCatching {
-            val parsed = parseVlessUri(uriVless)
-            // No contrato route-aware, a rota escolhida e a fonte de verdade para
-            // transporte, TLS e endpoint. Antes somente o servidor alternativo era
-            // aplicado; se a URI legada estivesse sem security=tls, uma rota TLS
-            // acabava salva como WS puro e o Android a bloqueava como cleartext.
-            val routeHost = rotaVless?.host?.takeIf { it.isNotBlank() }
-            val routePath = rotaVless?.path
-                ?.takeIf { it.isNotBlank() }
-                ?.let { if (it.startsWith('/')) it else "/$it" }
-            vlessManager.addProfile(
-                parsed.copy(
-                    server = selecaoVless.connectHost ?: routeHost ?: parsed.server,
-                    port = rotaVless?.port ?: parsed.port,
-                    wsPath = routePath ?: parsed.wsPath,
-                    wsHost = routeHost ?: parsed.wsHost,
-                    useTls = rotaVless?.tls ?: parsed.useTls,
-                    sni = if (rotaVless?.tls == true) {
-                        routeHost ?: parsed.sni.ifBlank { parsed.wsHost }
-                    } else {
-                        parsed.sni
-                    }
+    val rotasVless = rotasPublicasWebSocket(itemVless)
+    if (itemVless != null && itemVless.success && rotasVless.isNotEmpty()) {
+        val nomesBase = mutableSetOf<String>()
+        val nomesImportados = mutableSetOf<String>()
+        rotasVless.forEach { rota ->
+            runCatching {
+                val parsed = parseVlessUri(rota.uri!!)
+                val routeHost = rota.host?.takeIf { it.isNotBlank() }
+                val routePath = rota.path
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { if (it.startsWith('/')) it else "/$it" }
+                val connectionName = nomeDaRota(parsed.connectionName, rota)
+                nomesBase += parsed.connectionName
+                nomesImportados += connectionName
+                vlessManager.addProfile(
+                    parsed.copy(
+                        connectionName = connectionName,
+                        server = hostDeConexao(itemVless, rota) ?: parsed.server,
+                        port = rota.port ?: parsed.port,
+                        wsPath = routePath ?: parsed.wsPath,
+                        wsHost = routeHost ?: parsed.wsHost,
+                        useTls = rota.tls,
+                        sni = if (rota.tls) {
+                            routeHost ?: parsed.sni.ifBlank { parsed.wsHost }
+                        } else {
+                            parsed.sni
+                        }
+                    )
                 )
-            )
+                registrarRota("vless ($connectionName)", rota)
+            }.onSuccess {
+                algumaImportacao = true
+            }.onFailure {
+                avisar("vless (${rota.label})", it.message ?: "erro ao interpretar a URI")
+            }
         }
+        vlessManager.connections.value
+            .map { it.config.connectionName }
+            .filter { nome ->
+                nome !in nomesImportados &&
+                    nomesBase.any { base -> nome == base || nome.startsWith("$base · ") }
+            }
+            .forEach(vlessManager::removeProfile)
+    } else if (itemVless != null && itemVless.success && !itemVless.uri.isNullOrBlank()) {
+        runCatching { vlessManager.addProfile(parseVlessUri(itemVless.uri)) }
             .onSuccess { algumaImportacao = true }
             .onFailure { avisar("vless", it.message ?: "erro ao interpretar a URI") }
     } else {
