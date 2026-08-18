@@ -73,18 +73,33 @@ suspend fun importPanelConfigs(
 
     fun rotasPublicasWebSocket(item: ProtocolPackage?): List<ProtocolRoute> {
         if (item == null) return emptyList()
-        return item.orderedRoutes()
+        val rotasWebSocket = item.orderedRoutes()
             .filter { route ->
                 val websocket = route.transport.equals("websocket", ignoreCase = true) ||
                     route.transport.equals("ws", ignoreCase = true)
                 websocket &&
                     !route.uri.isNullOrBlank() &&
                     !route.host.isNullOrBlank() &&
-                    route.port != null &&
-                    !route.role.equals("origin", ignoreCase = true)
+                    route.port != null
             }
-            // O mesmo endpoint pode aparecer como patrocinado e CDN. Uma conexão
-            // por combinação real evita cartões duplicados na interface.
+
+        // Quando o Core identifica explicitamente as rotas públicas, exibe somente
+        // essas entradas. Isso mantém exatamente os cartões CDN HTTP/80 e CDN
+        // TLS/443 e evita mostrar a rota técnica direta/origem como terceira opção.
+        // Contratos antigos sem role=public continuam usando toda rota que não
+        // seja marcada como origem.
+        val publicas = rotasWebSocket.filter { route ->
+            route.role.equals("public", ignoreCase = true)
+        }
+        val selecionadas = publicas.ifEmpty {
+            rotasWebSocket.filterNot { route ->
+                route.role.equals("origin", ignoreCase = true)
+            }
+        }
+
+        return selecionadas
+            // O mesmo endpoint pode aparecer mais de uma vez. Uma conexão por
+            // combinação real evita cartões duplicados na interface.
             .distinctBy { route ->
                 listOf(route.host?.lowercase(), route.port, route.tls, route.path).joinToString("|")
             }
@@ -144,6 +159,14 @@ suspend fun importPanelConfigs(
 
     val itemVmess = response.protocols["vmess"]
     val rotasVmess = rotasPublicasWebSocket(itemVmess)
+    if (itemVmess?.success == true) {
+        AppLog.log(
+            "Painel: vmess recebeu ${itemVmess.routes.size} rota(s); " +
+                "${rotasVmess.size} rota(s) pública(s) WebSocket selecionada(s): " +
+                rotasVmess.joinToString { "${it.id}:${it.port}" },
+            AppLog.Level.INFO
+        )
+    }
     if (itemVmess != null && itemVmess.success && rotasVmess.isNotEmpty()) {
         val nomesBase = mutableSetOf<String>()
         val nomesImportados = mutableSetOf<String>()
@@ -193,6 +216,14 @@ suspend fun importPanelConfigs(
 
     val itemVless = response.protocols["vless"]
     val rotasVless = rotasPublicasWebSocket(itemVless)
+    if (itemVless?.success == true) {
+        AppLog.log(
+            "Painel: vless recebeu ${itemVless.routes.size} rota(s); " +
+                "${rotasVless.size} rota(s) pública(s) WebSocket selecionada(s): " +
+                rotasVless.joinToString { "${it.id}:${it.port}" },
+            AppLog.Level.INFO
+        )
+    }
     if (itemVless != null && itemVless.success && rotasVless.isNotEmpty()) {
         val nomesBase = mutableSetOf<String>()
         val nomesImportados = mutableSetOf<String>()
