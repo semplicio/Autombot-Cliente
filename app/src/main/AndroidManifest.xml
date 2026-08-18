@@ -24,11 +24,18 @@
          Android. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- O AutomBot suporta explicitamente rotas VLESS/VMess WS sem TLS
+         (por exemplo, o front door direto HTTP/80 entregue pelo Core), alem
+         das rotas WSS/TLS. Em Android 9+ o OkHttp bloqueia ws:// antes do
+         handshake quando cleartext nao e autorizado, fazendo a falha aparecer
+         incorretamente como timeout de DNS. Esta permissao apenas habilita as
+         rotas que foram configuradas como WS; perfis TLS continuam usando WSS. -->
     <application
         android:allowBackup="false"
         android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:label="AutomBot Connect"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.AutomBotClient"
         android:supportsRtl="true">
 
